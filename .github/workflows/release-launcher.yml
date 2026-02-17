@@ -41,4 +41,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: npx electron-builder --win --x64 --publish always -c.publish.provider=github -c.publish.owner=yk045t0854t0845ht8045 -c.publish.repo=wplay-update -c.publish.releaseType=release
+        run: npx electron-builder --win --x64 --publish always

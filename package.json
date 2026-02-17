@@ -14,7 +14,7 @@
     "update-now": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/update-now.ps1",
     "build": "npm run tw:build && npm run next:build && electron-builder --win --x64",
     "build:portable": "npm run tw:build && npm run next:build && electron-builder --win portable --x64 -c.win.artifactName=WPlay-Portable-${version}-${arch}.${ext}",
-    "release:github": "npm run tw:build && npm run next:build && electron-builder --win --x64 --publish always -c.publish.provider=github -c.publish.owner=yk045t0854t0845ht8045 -c.publish.repo=wplay-update -c.publish.releaseType=release"
+    "release:github": "npm run tw:build && npm run next:build && electron-builder --win --x64 --publish always"
   },
   "dependencies": {
     "7zip-bin": "^5.2.0",
@@ -87,6 +87,12 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "shortcutName": "WPlay"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "yk045t0854t0845ht8045",
+      "repo": "wplay-update",
+      "releaseType": "release"
     }
   }
 }
