@@ -66,6 +66,7 @@ if (process.platform === "win32" && typeof app.setAppUserModelId === "function")
 
 let mainWindow = null;
 let updateSplashWindow = null;
+let youtubePlayerWindow = null;
 let allowUpdateSplashWindowClose = false;
 let youtubeRequestHeaderHookInstalled = false;
 let authDeepLinkUrlBuffer = "";
@@ -5383,6 +5384,76 @@ async function openExternalUrl(rawUrl) {
   return true;
 }
 
+function isYoutubeHost(hostname) {
+  const host = String(hostname || "").toLowerCase().trim();
+  if (!host) return false;
+  return (
+    host === "youtube.com" ||
+    host.endsWith(".youtube.com") ||
+    host === "youtu.be" ||
+    host === "youtube-nocookie.com" ||
+    host.endsWith(".youtube-nocookie.com")
+  );
+}
+
+async function openYoutubePlayer(rawUrl, rawTitle = "") {
+  const value = String(rawUrl || "").trim();
+  if (!value) {
+    throw new Error("[YOUTUBE_PLAYER] URL vazia.");
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_error) {
+    throw new Error("[YOUTUBE_PLAYER] URL invalida.");
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("[YOUTUBE_PLAYER] Protocolo nao suportado. Use http/https.");
+  }
+  if (!isYoutubeHost(parsed.hostname)) {
+    throw new Error("[YOUTUBE_PLAYER] URL nao pertence ao YouTube.");
+  }
+
+  const title = String(rawTitle || "").trim() || "WPlay Trailer";
+  const windowIconPath = resolveWindowIconPath();
+
+  if (!youtubePlayerWindow || youtubePlayerWindow.isDestroyed()) {
+    youtubePlayerWindow = new BrowserWindow({
+      width: 1240,
+      height: 760,
+      minWidth: 980,
+      minHeight: 620,
+      title,
+      backgroundColor: "#09090A",
+      autoHideMenuBar: true,
+      icon: windowIconPath,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false
+      }
+    });
+
+    youtubePlayerWindow.setMenuBarVisibility(false);
+    youtubePlayerWindow.setAutoHideMenuBar(true);
+
+    youtubePlayerWindow.on("closed", () => {
+      youtubePlayerWindow = null;
+    });
+  } else {
+    youtubePlayerWindow.setTitle(title);
+  }
+
+  await youtubePlayerWindow.loadURL(parsed.toString());
+  if (youtubePlayerWindow.isMinimized()) {
+    youtubePlayerWindow.restore();
+  }
+  youtubePlayerWindow.show();
+  youtubePlayerWindow.focus();
+  return true;
+}
+
 async function openGameInstallFolder(gameId) {
   const { games, settings } = await readCatalogBundle();
   const game = games.find((entry) => entry.id === gameId);
@@ -5601,6 +5672,7 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:open-downloads-folder", () => openInstallFolder());
     ipcMain.handle("launcher:open-game-install-folder", (_event, gameId) => openGameInstallFolder(gameId));
     ipcMain.handle("launcher:open-external-url", (_event, rawUrl) => openExternalUrl(rawUrl));
+    ipcMain.handle("launcher:open-youtube-player", (_event, rawUrl, rawTitle) => openYoutubePlayer(rawUrl, rawTitle));
     ipcMain.handle("launcher:auth-get-session", () => getAuthSessionState());
     ipcMain.handle("launcher:auth-login-discord", () => loginWithDiscord());
     ipcMain.handle("launcher:auth-logout", () => logoutAuthSession());
@@ -5649,5 +5721,9 @@ if (!hasSingleInstanceLock) {
   app.on("before-quit", () => {
     clearAutoUpdaterInterval();
     destroyUpdateSplashWindow();
+    if (youtubePlayerWindow && !youtubePlayerWindow.isDestroyed()) {
+      youtubePlayerWindow.destroy();
+      youtubePlayerWindow = null;
+    }
   });
 }
