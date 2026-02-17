@@ -1,8 +1,8 @@
 1:"$Sreact.fragment"
-6:I[27611,["./_next/static/chunks/0dd513ecbb29f5fe.js"],"default"]
+6:I[27611,["./_next/static/chunks/9a4147b3e09883e8.js"],"default"]
 7:I[97367,["./_next/static/chunks/2f236954d6a65e12.js"],"OutletBoundary"]
 8:"$Sreact.suspense"
-2:T6062,
+2:T605d,
     <div class="bg-glow glow-left"></div>
     <div class="bg-glow glow-right"></div>
     <div class="bg-noise"></div>
@@ -72,7 +72,7 @@
 
           <button
             id="railDownloadsBtn"
-            class="rail-install-btn is-hidden"
+            class="rail-install-btn"
             type="button"
             aria-label="Downloads e instalacoes"
             aria-expanded="false"
@@ -445,8 +445,8 @@
     </div>
 
     
-0:{"buildId":"7Rv3JrsxLCczD2bGxo0wk","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
+0:{"buildId":"AbMGNo6MvzOyssU7V1IIW","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
 3:["$","$L6",null,{}]
-4:["$","script","script-0",{"src":"./_next/static/chunks/0dd513ecbb29f5fe.js","async":true}]
+4:["$","script","script-0",{"src":"./_next/static/chunks/9a4147b3e09883e8.js","async":true}]
 5:["$","$L7",null,{"children":["$","$8",null,{"name":"Next.MetadataOutlet","children":"$@9"}]}]
 9:null

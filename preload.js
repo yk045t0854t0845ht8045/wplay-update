@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   authLogout: () => ipcRenderer.invoke("launcher:auth-logout"),
   autoUpdateGetState: () => ipcRenderer.invoke("launcher:auto-update-get-state"),
   autoUpdateCheck: () => ipcRenderer.invoke("launcher:auto-update-check"),
+  autoUpdateCheckBackground: () => ipcRenderer.invoke("launcher:auto-update-check-background"),
   autoUpdateDownload: () => ipcRenderer.invoke("launcher:auto-update-download"),
   autoUpdateRestartAndInstall: () => ipcRenderer.invoke("launcher:auto-update-restart-and-install"),
   minimizeWindow: () => ipcRenderer.invoke("launcher:window-minimize"),

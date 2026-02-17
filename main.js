@@ -22,6 +22,7 @@ const RUNTIME_CONFIG_FILE_NAME = "launcher.runtime.json";
 const AUTH_CONFIG_FILE_NAME = "auth.json";
 const AUTH_CONFIG_EXAMPLE_FILE_NAME = "auth.example.json";
 const UPDATER_CONFIG_FILE_NAME = "updater.json";
+const UPDATER_CONFIG_EXAMPLE_FILE_NAME = "updater.example.json";
 const INSTALL_PROGRESS_CHANNEL = "launcher:install-progress";
 const AUTO_UPDATE_STATE_CHANNEL = "launcher:auto-update-state";
 const MAX_SCAN_DEPTH = 6;
@@ -42,6 +43,7 @@ const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 1 * 60 * 1000;
 const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const AUTO_UPDATE_CHECK_COOLDOWN_MS = 45 * 1000;
 const AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS = 15 * 1000;
+const AUTO_UPDATE_WINDOW_READY_CHECK_DELAY_MS = 3500;
 const RUNNING_PROCESS_CACHE_TTL_MS = 2500;
 const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 5;
 const CATALOG_MIN_POLL_INTERVAL_SECONDS = 5;
@@ -176,6 +178,11 @@ function createWindow() {
   mainWindow.webContents.on("did-finish-load", () => {
     sendMaximizedState();
     broadcastAutoUpdateState();
+    if (autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured) {
+      setTimeout(() => {
+        void checkForLauncherUpdate("window-ready");
+      }, AUTO_UPDATE_WINDOW_READY_CHECK_DELAY_MS);
+    }
   });
 }
 
@@ -201,6 +208,18 @@ function getUserAuthConfigPath() {
 
 function getUpdaterConfigPath() {
   return path.join(app.getAppPath(), "config", UPDATER_CONFIG_FILE_NAME);
+}
+
+function getBundledUpdaterConfigPath() {
+  return path.join(app.getAppPath(), "config", UPDATER_CONFIG_FILE_NAME);
+}
+
+function getBundledUpdaterConfigExamplePath() {
+  return path.join(app.getAppPath(), "config", UPDATER_CONFIG_EXAMPLE_FILE_NAME);
+}
+
+function getUserUpdaterConfigPath() {
+  return path.join(app.getPath("userData"), "config", UPDATER_CONFIG_FILE_NAME);
 }
 
 function readRuntimeConfigSync() {
@@ -274,6 +293,66 @@ async function ensurePersistedAuthConfigFile() {
   }
 
   return userAuthConfigPath;
+}
+
+async function ensurePersistedUpdaterConfigFile() {
+  const userUpdaterConfigPath = getUserUpdaterConfigPath();
+  const readCandidate = async (filePath) => {
+    try {
+      if (!(await pathExists(filePath))) {
+        return null;
+      }
+      const raw = await fsp.readFile(filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        return parsed;
+      }
+      return null;
+    } catch (_error) {
+      return null;
+    }
+  };
+  const isConfigured = (config) => {
+    if (!config || typeof config !== "object") {
+      return false;
+    }
+    const owner = normalizeUpdaterOwnerOrRepo(config.owner);
+    const repo = normalizeUpdaterOwnerOrRepo(config.repo);
+    return Boolean(owner && repo);
+  };
+
+  const existingUserConfig = await readCandidate(userUpdaterConfigPath);
+  if (isConfigured(existingUserConfig)) {
+    return userUpdaterConfigPath;
+  }
+
+  await fsp.mkdir(path.dirname(userUpdaterConfigPath), { recursive: true });
+  const candidateSources = [getBundledUpdaterConfigPath(), getBundledUpdaterConfigExamplePath()];
+  let fallbackSourcePath = "";
+  for (const sourcePath of candidateSources) {
+    if (!(await pathExists(sourcePath))) {
+      continue;
+    }
+    if (!fallbackSourcePath) {
+      fallbackSourcePath = sourcePath;
+    }
+    const sourceConfig = await readCandidate(sourcePath);
+    if (!isConfigured(sourceConfig)) {
+      continue;
+    }
+    try {
+      await fsp.copyFile(sourcePath, userUpdaterConfigPath);
+      return userUpdaterConfigPath;
+    } catch (_error) {
+      // Try next source.
+    }
+  }
+
+  if (!existingUserConfig && fallbackSourcePath) {
+    await fsp.copyFile(fallbackSourcePath, userUpdaterConfigPath).catch(() => {});
+  }
+
+  return userUpdaterConfigPath;
 }
 
 async function writeRuntimeConfig(nextConfig) {
@@ -445,16 +524,37 @@ function parseBoolean(value, fallback = false) {
 }
 
 function readUpdaterConfigFileSync() {
-  try {
-    const raw = fs.readFileSync(getUpdaterConfigPath(), "utf8");
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") {
-      return parsed;
+  const candidatePaths = [getUserUpdaterConfigPath(), getBundledUpdaterConfigPath(), getBundledUpdaterConfigExamplePath()];
+  const parsedCandidates = [];
+
+  for (const candidatePath of candidatePaths) {
+    try {
+      if (!fs.existsSync(candidatePath)) {
+        continue;
+      }
+      const raw = fs.readFileSync(candidatePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        parsedCandidates.push(parsed);
+      }
+    } catch (_error) {
+      // Try next source.
     }
-    return {};
-  } catch (_error) {
+  }
+
+  if (parsedCandidates.length === 0) {
     return {};
   }
+
+  for (const parsedCandidate of parsedCandidates) {
+    const owner = normalizeUpdaterOwnerOrRepo(parsedCandidate.owner);
+    const repo = normalizeUpdaterOwnerOrRepo(parsedCandidate.repo);
+    if (owner && repo) {
+      return parsedCandidate;
+    }
+  }
+
+  return parsedCandidates[0];
 }
 
 function normalizeUpdaterOwnerOrRepo(value) {
@@ -5187,6 +5287,7 @@ if (!hasSingleInstanceLock) {
 
   app.whenReady().then(async () => {
     await ensurePersistedAuthConfigFile().catch(() => {});
+    await ensurePersistedUpdaterConfigFile().catch(() => {});
     registerAuthProtocolClient();
     setupAutoUpdater();
 
@@ -5217,6 +5318,7 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:auth-logout", () => logoutAuthSession());
     ipcMain.handle("launcher:auto-update-get-state", () => getPublicAutoUpdateState());
     ipcMain.handle("launcher:auto-update-check", () => checkForLauncherUpdate("manual"));
+    ipcMain.handle("launcher:auto-update-check-background", () => checkForLauncherUpdate("renderer-poll"));
     ipcMain.handle("launcher:auto-update-download", () => downloadLauncherUpdate());
     ipcMain.handle("launcher:auto-update-restart-and-install", () => restartAndInstallLauncherUpdate());
     ipcMain.handle("launcher:window-minimize", () => {

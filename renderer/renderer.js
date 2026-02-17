@@ -90,6 +90,9 @@ const NOTIFICATION_HISTORY_LIMIT = 36;
 const NOTYF_STACK_VISIBLE = 5;
 const NOTYF_STACK_OFFSET_Y = 18;
 const PROGRESS_RENDER_MIN_INTERVAL_MS = 120;
+const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = 15 * 1000;
+const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = 60 * 1000;
+const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = 8 * 1000;
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
@@ -179,7 +182,8 @@ const state = {
   lastNonDetailView: "store",
   storeFilter: "popular",
   introPlayed: false,
-  realtimeSyncStarted: false
+  realtimeSyncStarted: false,
+  autoUpdateRealtimeSyncStarted: false
 };
 
 let refreshGamesInFlight = null;
@@ -191,6 +195,7 @@ let progressRenderFrame = 0;
 let lastProgressRenderAt = 0;
 let previousStoreGridSignature = "";
 let previousLibraryGridSignature = "";
+let autoUpdateBackgroundCheckTimer = null;
 
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
@@ -878,6 +883,26 @@ function formatVersionTag(versionText) {
   return clean.startsWith("v") ? clean : `v${clean}`;
 }
 
+function hasAutoUpdateApiSupport() {
+  return (
+    typeof window.launcherApi?.autoUpdateGetState === "function" &&
+    typeof window.launcherApi?.autoUpdateCheck === "function"
+  );
+}
+
+function scheduleAutoUpdateBackgroundCheckSoon(delayMs = AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS) {
+  if (!hasAutoUpdateApiSupport()) {
+    return;
+  }
+  if (autoUpdateBackgroundCheckTimer) {
+    window.clearTimeout(autoUpdateBackgroundCheckTimer);
+  }
+  autoUpdateBackgroundCheckTimer = window.setTimeout(() => {
+    autoUpdateBackgroundCheckTimer = null;
+    void checkForAutoUpdateInBackground();
+  }, Math.max(1200, Number(delayMs) || AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS));
+}
+
 function setUpdateRestartModalOpen(open) {
   if (!updateRestartModal) return;
   const nextOpen = Boolean(open) && Boolean(state.autoUpdate.updateDownloaded);
@@ -899,10 +924,7 @@ function renderAutoUpdateButton() {
   if (!topUpdateBtn) return;
 
   const autoUpdate = state.autoUpdate;
-  const visible =
-    autoUpdate.supported &&
-    autoUpdate.configured &&
-    autoUpdate.enabled;
+  const visible = hasAutoUpdateApiSupport() || autoUpdate.supported || autoUpdate.enabled || autoUpdate.configured;
 
   topUpdateBtn.classList.toggle("is-hidden", !visible);
   topUpdateBtn.classList.toggle(
@@ -928,6 +950,8 @@ function renderAutoUpdateButton() {
     label = autoUpdate.message || "Nova atualizacao encontrada.";
   } else if (autoUpdate.status === "idle") {
     label = autoUpdate.message || "Launcher atualizado. Clique para verificar novamente.";
+  } else if (autoUpdate.status === "disabled") {
+    label = autoUpdate.error || autoUpdate.message || "Atualizador desativado ou nao configurado.";
   } else if (autoUpdate.status === "error") {
     label = autoUpdate.error || autoUpdate.message || "Falha no atualizador. Clique para tentar novamente.";
   }
@@ -980,7 +1004,8 @@ function applyAutoUpdatePayload(payload, fromEvent = false) {
 }
 
 async function bootstrapAutoUpdateState() {
-  if (typeof window.launcherApi.autoUpdateGetState !== "function") {
+  if (!hasAutoUpdateApiSupport()) {
+    renderAutoUpdateButton();
     return;
   }
 
@@ -989,6 +1014,17 @@ async function bootstrapAutoUpdateState() {
     applyAutoUpdatePayload(payload, false);
   } catch (error) {
     setStatus(`Falha ao consultar atualizador: ${error?.message || "erro desconhecido"}`, true);
+    applyAutoUpdatePayload(
+      {
+        supported: true,
+        configured: true,
+        enabled: true,
+        status: "idle",
+        message: "Atualizador indisponivel no momento. Tentando novamente em segundo plano.",
+        error: ""
+      },
+      false
+    );
   }
 
   if (typeof window.launcherApi.onAutoUpdateState === "function") {
@@ -998,8 +1034,64 @@ async function bootstrapAutoUpdateState() {
   }
 }
 
+async function checkForAutoUpdateInBackground() {
+  if (!hasAutoUpdateApiSupport()) {
+    return;
+  }
+
+  try {
+    if (typeof window.launcherApi.autoUpdateCheckBackground === "function") {
+      const payload = await window.launcherApi.autoUpdateCheckBackground();
+      applyAutoUpdatePayload(payload, false);
+      return;
+    }
+
+    const payload = await window.launcherApi.autoUpdateCheck();
+    applyAutoUpdatePayload(payload, false);
+  } catch (_error) {
+    // Silent on background checks to avoid noisy notifications.
+  }
+}
+
+function startAutoUpdateRealtimeSync() {
+  if (state.autoUpdateRealtimeSyncStarted) {
+    return;
+  }
+  state.autoUpdateRealtimeSyncStarted = true;
+
+  if (!hasAutoUpdateApiSupport()) {
+    renderAutoUpdateButton();
+    return;
+  }
+
+  window.setInterval(() => {
+    void (async () => {
+      try {
+        const payload = await window.launcherApi.autoUpdateGetState();
+        applyAutoUpdatePayload(payload, false);
+      } catch (_error) {
+        // Silent polling failure.
+      }
+    })();
+  }, AUTO_UPDATE_STATE_POLL_INTERVAL_MS);
+
+  window.setInterval(() => {
+    void checkForAutoUpdateInBackground();
+  }, AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS);
+
+  window.addEventListener("focus", () => {
+    scheduleAutoUpdateBackgroundCheckSoon();
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      scheduleAutoUpdateBackgroundCheckSoon();
+    }
+  });
+}
+
 async function checkForAutoUpdateManually() {
-  if (typeof window.launcherApi.autoUpdateCheck !== "function") {
+  if (!hasAutoUpdateApiSupport()) {
     notify("error", "Atualizacao", "API de atualizacao indisponivel nesta versao.");
     return;
   }
@@ -1519,6 +1611,11 @@ function isDirectVideo(urlValue) {
   if (lower.includes("response-content-type=video%2f") || lower.includes("response-content-type=video/")) return true;
   if (lower.includes("content-type=video%2f") || lower.includes("content-type=video/")) return true;
   return false;
+}
+
+function hasGameVideoSource(game) {
+  if (!game || typeof game !== "object") return false;
+  return Boolean(String(game.trailerUrl || game.videoUrl || "").trim());
 }
 
 function setDetailsVideoMarkup(mediaKey, html) {
@@ -2099,9 +2196,8 @@ function renderRailDownloads() {
 
   const activeDownloads = getActiveDownloadEntries();
   const hasActiveDownloads = activeDownloads.length > 0;
-  const shouldShowButton = hasActiveDownloads || state.view === "downloads";
 
-  railDownloadsBtn.classList.toggle("is-hidden", !shouldShowButton);
+  railDownloadsBtn.classList.remove("is-hidden");
   railDownloadsBtn.classList.toggle("is-busy", hasActiveDownloads);
   railDownloadsBtn.classList.toggle("is-active", state.view === "downloads");
   railDownloadsBtn.setAttribute("aria-expanded", state.view === "downloads" ? "true" : "false");
@@ -2635,29 +2731,56 @@ function renderVideo(game) {
 
 function renderGallery(game) {
   const images = getGalleryImages(game);
-  if (!images.length) {
+  const hasVideo = hasGameVideoSource(game);
+  if (!images.length && !hasVideo) {
     detailsGallery.innerHTML = "";
     state.selectedGalleryByGameId.set(game.id, -1);
     return;
   }
 
   const selectedIndexRaw = Number(state.selectedGalleryByGameId.get(game.id));
-  const selectedIndex =
-    Number.isFinite(selectedIndexRaw) && selectedIndexRaw >= 0 && selectedIndexRaw < images.length
-      ? selectedIndexRaw
-      : -1;
+  let selectedIndex = -1;
+  if (Number.isFinite(selectedIndexRaw)) {
+    if (selectedIndexRaw >= 0 && selectedIndexRaw < images.length) {
+      selectedIndex = selectedIndexRaw;
+    } else if (selectedIndexRaw === -1) {
+      selectedIndex = -1;
+    }
+  }
+
+  if (!hasVideo && selectedIndex < 0 && images.length > 0) {
+    selectedIndex = 0;
+  }
   state.selectedGalleryByGameId.set(game.id, selectedIndex);
 
-  detailsGallery.innerHTML = images
-    .map((imageUrl, index) => {
+  const cardsMarkup = [];
+  if (hasVideo) {
+    const videoActiveClass = selectedIndex < 0 ? "is-active" : "";
+    cardsMarkup.push(`
+      <button class="gallery-thumb gallery-thumb-video ${videoActiveClass}" type="button" data-gallery-index="-1" aria-label="Exibir trailer de ${escapeHtml(game.name)}">
+        <img src="${escapeHtml(getBannerImage(game))}" alt="Trailer de ${escapeHtml(game.name)}" loading="lazy" />
+        <span class="gallery-video-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M9 7.6V16.4L16 12L9 7.6Z" fill="currentColor"></path>
+          </svg>
+          VIDEO
+        </span>
+      </button>
+    `);
+  }
+
+  cardsMarkup.push(
+    ...images.map((imageUrl, index) => {
       const activeClass = index === selectedIndex ? "is-active" : "";
       return `
-        <button class="gallery-thumb ${activeClass}" type="button" data-gallery-index="${index}">
+        <button class="gallery-thumb ${activeClass}" type="button" data-gallery-index="${index}" aria-label="Exibir imagem ${index + 1} de ${escapeHtml(game.name)}">
           <img src="${escapeHtml(imageUrl)}" alt="Imagem ${index + 1} de ${escapeHtml(game.name)}" loading="lazy" />
         </button>
       `;
     })
-    .join("");
+  );
+
+  detailsGallery.innerHTML = cardsMarkup.join("");
 }
 
 function renderGenres(game) {
@@ -2768,8 +2891,8 @@ function renderDetails(game) {
   detailsReleaseDate.textContent = game.releaseDate || "Nao informado";
 
   renderGenres(game);
-  renderVideo(game);
   renderGallery(game);
+  renderVideo(game);
   renderDetailsProgress(game);
   renderDetailsActions(game);
 }
@@ -3066,6 +3189,8 @@ function installEventBindings() {
   renderTopAccountButton();
   renderAutoUpdateButton();
   void bootstrapAutoUpdateState();
+  startAutoUpdateRealtimeSync();
+  scheduleAutoUpdateBackgroundCheckSoon(2500);
 
   if (authDiscordLoginBtn) {
     authDiscordLoginBtn.addEventListener("click", () => {
@@ -3467,13 +3592,18 @@ function installEventBindings() {
     if (!game) return;
 
     const gallery = getGalleryImages(game);
-    const safeIndex = Math.min(Math.max(0, index), gallery.length - 1);
-    const currentIndex = Number(state.selectedGalleryByGameId.get(game.id));
-    if (Number.isFinite(currentIndex) && currentIndex === safeIndex) {
-      state.selectedGalleryByGameId.set(game.id, -1);
+    const hasVideo = hasGameVideoSource(game);
+
+    let nextIndex = -1;
+    if (index < 0) {
+      if (!hasVideo) return;
+      nextIndex = -1;
     } else {
-      state.selectedGalleryByGameId.set(game.id, safeIndex);
+      if (!gallery.length) return;
+      nextIndex = Math.min(Math.max(0, index), gallery.length - 1);
     }
+
+    state.selectedGalleryByGameId.set(game.id, nextIndex);
     renderVideo(game);
     renderGallery(game);
   });
