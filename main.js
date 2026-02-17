@@ -41,6 +41,11 @@ const ARCHIVE_TOOL_TIMEOUT_MS = 25 * 60 * 1000;
 const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 1 * 60 * 1000;
 const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 12 * 60 * 1000;
 const AUTO_UPDATE_STARTUP_DELAY_MS = 2500;
+const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 5;
+const CATALOG_MIN_POLL_INTERVAL_SECONDS = 5;
+const CATALOG_MAX_POLL_INTERVAL_SECONDS = 300;
+const CATALOG_DEFAULT_SUPABASE_SCHEMA = "public";
+const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
 
 let mainWindow = null;
 let authDeepLinkUrlBuffer = "";
@@ -53,6 +58,14 @@ let autoUpdateConfigSnapshot = null;
 let autoUpdateFeedValidationCompleted = false;
 let autoUpdateFeedValidationInFlight = null;
 let autoUpdateLastCheckOrigin = "";
+let remoteCatalogInFlight = null;
+const remoteCatalogCache = {
+  entries: null,
+  loadedAt: 0,
+  source: "local-json",
+  error: "",
+  lastSyncAt: 0
+};
 const activeInstalls = new Map();
 const activeUninstalls = new Set();
 const installSizeCache = new Map();
@@ -1829,6 +1842,180 @@ function normalizeStringArray(value) {
   return [];
 }
 
+function normalizeJsonArrayValue(value) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch (_error) {
+      return normalizeStringArray(value);
+    }
+  }
+  return [];
+}
+
+function pickFirstDefinedValue(source, keys = []) {
+  if (!source || typeof source !== "object") {
+    return undefined;
+  }
+  for (const key of keys) {
+    if (!key) continue;
+    if (source[key] !== undefined && source[key] !== null) {
+      return source[key];
+    }
+  }
+  return undefined;
+}
+
+function normalizeCatalogIdentifier(value, fallback = "") {
+  const normalized = String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_]/g, "");
+  return normalized || fallback;
+}
+
+function clampCatalogPollSeconds(value, fallback = CATALOG_DEFAULT_POLL_INTERVAL_SECONDS) {
+  const parsed = parsePositiveInteger(value);
+  if (parsed <= 0) {
+    return fallback;
+  }
+  return Math.max(CATALOG_MIN_POLL_INTERVAL_SECONDS, Math.min(parsed, CATALOG_MAX_POLL_INTERVAL_SECONDS));
+}
+
+function resolveCatalogSourceConfig(settings = {}) {
+  const catalogSettings = settings.catalog && typeof settings.catalog === "object" ? settings.catalog : {};
+  const providerRaw = String(
+    process.env.WPLAY_CATALOG_PROVIDER || catalogSettings.provider || settings.catalogProvider || "supabase"
+  )
+    .trim()
+    .toLowerCase();
+  const provider = ["supabase", "json", "auto"].includes(providerRaw) ? providerRaw : "supabase";
+  const enabled = parseBoolean(
+    process.env.WPLAY_CATALOG_ENABLED ?? catalogSettings.enabled ?? settings.catalogEnabled,
+    provider !== "json"
+  );
+  const pollIntervalSeconds = clampCatalogPollSeconds(
+    process.env.WPLAY_CATALOG_POLL_SECONDS ?? catalogSettings.pollIntervalSeconds ?? settings.catalogPollIntervalSeconds,
+    CATALOG_DEFAULT_POLL_INTERVAL_SECONDS
+  );
+  const schema = normalizeCatalogIdentifier(
+    process.env.WPLAY_CATALOG_SUPABASE_SCHEMA || catalogSettings.supabaseSchema || catalogSettings.schema,
+    CATALOG_DEFAULT_SUPABASE_SCHEMA
+  );
+  const table = normalizeCatalogIdentifier(
+    process.env.WPLAY_CATALOG_SUPABASE_TABLE || catalogSettings.supabaseTable || catalogSettings.table,
+    CATALOG_DEFAULT_SUPABASE_TABLE
+  );
+  const fallbackToLocalJson = parseBoolean(
+    process.env.WPLAY_CATALOG_FALLBACK_JSON ?? catalogSettings.fallbackToLocalJson,
+    true
+  );
+  const allowEmptyRemote = parseBoolean(
+    process.env.WPLAY_CATALOG_ALLOW_EMPTY_REMOTE ?? catalogSettings.allowEmptyRemote,
+    false
+  );
+  const useRemote = enabled && (provider === "supabase" || provider === "auto");
+  return {
+    provider,
+    enabled,
+    useRemote,
+    pollIntervalSeconds,
+    pollIntervalMs: pollIntervalSeconds * 1000,
+    schema,
+    table,
+    fallbackToLocalJson,
+    allowEmptyRemote
+  };
+}
+
+function sortCatalogEntries(entries = []) {
+  return [...entries].sort((a, b) => {
+    const orderA = Number(a?.sortOrder);
+    const orderB = Number(b?.sortOrder);
+    const safeOrderA = Number.isFinite(orderA) ? orderA : 1_000_000;
+    const safeOrderB = Number.isFinite(orderB) ? orderB : 1_000_000;
+    if (safeOrderA !== safeOrderB) {
+      return safeOrderA - safeOrderB;
+    }
+    const nameA = String(a?.name || "").toLowerCase();
+    const nameB = String(b?.name || "").toLowerCase();
+    return nameA.localeCompare(nameB, "pt-BR");
+  });
+}
+
+function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
+  const source = row && typeof row === "object" ? row : {};
+  const payloadRaw = source.game_data && typeof source.game_data === "object"
+    ? source.game_data
+    : source.data && typeof source.data === "object"
+      ? source.data
+      : {};
+  const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
+  const merged = {
+    ...payload,
+    ...source
+  };
+
+  const gallery = normalizeJsonArrayValue(pickFirstDefinedValue(merged, ["gallery", "screenshots", "images"]));
+  const genres = normalizeJsonArrayValue(pickFirstDefinedValue(merged, ["genres", "tags", "genre"]));
+  const downloadUrls = normalizeJsonArrayValue(
+    pickFirstDefinedValue(merged, ["downloadUrls", "download_urls", "mirrorUrls", "mirror_urls", "download_urls_json"])
+  );
+  const downloadSources = normalizeJsonArrayValue(
+    pickFirstDefinedValue(merged, ["downloadSources", "download_sources", "sources"])
+  );
+
+  return {
+    id: pickFirstDefinedValue(merged, ["id", "game_id", "gameId"]),
+    name: pickFirstDefinedValue(merged, ["name", "title"]),
+    description: pickFirstDefinedValue(merged, ["description", "summary"]),
+    longDescription: pickFirstDefinedValue(merged, ["longDescription", "long_description", "fullDescription"]),
+    section: pickFirstDefinedValue(merged, ["section", "catalog_section"]),
+    comingSoon: pickFirstDefinedValue(merged, ["comingSoon", "coming_soon"]),
+    archiveType: pickFirstDefinedValue(merged, ["archiveType", "archive_type"]),
+    archivePassword: pickFirstDefinedValue(merged, ["archivePassword", "archive_password"]),
+    checksumSha256: pickFirstDefinedValue(merged, ["checksumSha256", "checksum_sha256", "sha256"]),
+    downloadUrl: pickFirstDefinedValue(merged, ["downloadUrl", "download_url"]),
+    downloadUrls,
+    downloadSources,
+    googleDriveFileId: pickFirstDefinedValue(merged, ["googleDriveFileId", "google_drive_file_id"]),
+    localArchiveFile: pickFirstDefinedValue(merged, ["localArchiveFile", "local_archive_file"]),
+    googleApiKey: pickFirstDefinedValue(merged, ["googleApiKey", "google_api_key"]) || fallbackGoogleApiKey,
+    installDirName: pickFirstDefinedValue(merged, ["installDirName", "install_dir_name"]),
+    launchExecutable: pickFirstDefinedValue(merged, ["launchExecutable", "launch_executable"]),
+    autoDetectExecutable: pickFirstDefinedValue(merged, ["autoDetectExecutable", "auto_detect_executable"]),
+    imageUrl: pickFirstDefinedValue(merged, ["imageUrl", "image_url"]),
+    cardImageUrl: pickFirstDefinedValue(merged, ["cardImageUrl", "card_image_url"]),
+    bannerUrl: pickFirstDefinedValue(merged, ["bannerUrl", "banner_url"]),
+    logoUrl: pickFirstDefinedValue(merged, ["logoUrl", "logo_url"]),
+    developedBy: pickFirstDefinedValue(merged, ["developedBy", "developed_by"]),
+    publishedBy: pickFirstDefinedValue(merged, ["publishedBy", "published_by"]),
+    releaseDate: pickFirstDefinedValue(merged, ["releaseDate", "release_date"]),
+    trailerUrl: pickFirstDefinedValue(merged, ["trailerUrl", "trailer_url", "video_url"]),
+    gallery,
+    genres,
+    averagePlayTime: pickFirstDefinedValue(merged, ["averagePlayTime", "average_play_time"]),
+    averageAchievement: pickFirstDefinedValue(merged, ["averageAchievement", "average_achievement"]),
+    storeType: pickFirstDefinedValue(merged, ["storeType", "store_type"]),
+    storeTag: pickFirstDefinedValue(merged, ["storeTag", "store_tag"]),
+    currentPrice: pickFirstDefinedValue(merged, ["currentPrice", "current_price"]),
+    originalPrice: pickFirstDefinedValue(merged, ["originalPrice", "original_price"]),
+    discountPercent: pickFirstDefinedValue(merged, ["discountPercent", "discount_percent"]),
+    free: pickFirstDefinedValue(merged, ["free", "is_free"]),
+    exclusive: pickFirstDefinedValue(merged, ["exclusive", "is_exclusive"]),
+    sizeBytes: pickFirstDefinedValue(merged, ["sizeBytes", "size_bytes"]),
+    size: pickFirstDefinedValue(merged, ["size", "size_label"]),
+    enabled: pickFirstDefinedValue(merged, ["enabled", "is_enabled"]),
+    sortOrder: pickFirstDefinedValue(merged, ["sortOrder", "sort_order"]),
+    updatedAt: pickFirstDefinedValue(merged, ["updatedAt", "updated_at"])
+  };
+}
+
 function normalizeDownloadSourceEntries(value) {
   if (!Array.isArray(value)) return [];
 
@@ -2059,7 +2246,7 @@ async function getInstalledSizeSnapshot(installDir, manifest = null) {
   return measured;
 }
 
-async function parseCatalogFile() {
+async function parseLocalCatalogFile() {
   const raw = await fsp.readFile(getCatalogPath(), "utf8");
   const parsed = JSON.parse(raw);
 
@@ -2077,8 +2264,156 @@ async function parseCatalogFile() {
   throw new Error("config/games.json deve ser um array ou objeto com { settings, games }.");
 }
 
+function buildCatalogSupabaseHeaders(authConfig, schema) {
+  return {
+    apikey: authConfig.supabaseAnonKey,
+    Authorization: `Bearer ${authConfig.supabaseAnonKey}`,
+    "Accept-Profile": schema,
+    "Content-Profile": schema
+  };
+}
+
+async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {}) {
+  const authConfig = resolveAuthConfig();
+  if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
+    throw new Error("[CATALOG_SUPABASE_AUTH] Supabase nao configurado para catalogo remoto.");
+  }
+
+  const tableName = normalizeCatalogIdentifier(sourceConfig.table, CATALOG_DEFAULT_SUPABASE_TABLE);
+  const schemaName = normalizeCatalogIdentifier(sourceConfig.schema, CATALOG_DEFAULT_SUPABASE_SCHEMA);
+  const endpoint = `${authConfig.supabaseUrl}/rest/v1/${tableName}?select=*`;
+
+  const response = await axios.get(endpoint, {
+    headers: buildCatalogSupabaseHeaders(authConfig, schemaName),
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(
+      `[CATALOG_SUPABASE_TABLE_NOT_FOUND] Tabela ${schemaName}.${tableName} nao encontrada no Supabase.`
+    );
+  }
+
+  if (response.status >= 400) {
+    throw new Error(
+      `[CATALOG_SUPABASE_HTTP_${response.status}] Falha ao carregar catalogo remoto em ${schemaName}.${tableName}.`
+    );
+  }
+
+  const fallbackGoogleApiKey = String(localSettings.googleApiKey || "").trim();
+  const rows = Array.isArray(response.data) ? response.data : [];
+  const mappedEntries = rows
+    .map((row) => mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey))
+    .filter((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      if (entry.enabled === false) return false;
+      return Boolean(String(entry.id || "").trim() || String(entry.name || "").trim());
+    });
+
+  return sortCatalogEntries(mappedEntries);
+}
+
+async function resolveCatalogEntries(settings = {}, localEntries = []) {
+  const sourceConfig = resolveCatalogSourceConfig(settings);
+  const fallbackEntries = Array.isArray(localEntries) ? localEntries : [];
+
+  if (!sourceConfig.useRemote) {
+    return {
+      entries: fallbackEntries,
+      source: "local-json",
+      warning: "",
+      sourceConfig
+    };
+  }
+
+  const now = Date.now();
+  if (
+    Array.isArray(remoteCatalogCache.entries) &&
+    remoteCatalogCache.entries.length > 0 &&
+    now - remoteCatalogCache.loadedAt < sourceConfig.pollIntervalMs
+  ) {
+    return {
+      entries: remoteCatalogCache.entries,
+      source: remoteCatalogCache.source || "supabase-cache",
+      warning: remoteCatalogCache.error || "",
+      sourceConfig
+    };
+  }
+
+  if (remoteCatalogInFlight) {
+    const pendingResult = await remoteCatalogInFlight;
+    return {
+      entries: pendingResult.entries,
+      source: pendingResult.source,
+      warning: pendingResult.warning || "",
+      sourceConfig
+    };
+  }
+
+  remoteCatalogInFlight = (async () => {
+    try {
+      const remoteEntries = await fetchCatalogEntriesFromSupabase(sourceConfig, settings);
+      const hasRemoteEntries = remoteEntries.length > 0;
+      if (!hasRemoteEntries && fallbackEntries.length > 0 && !sourceConfig.allowEmptyRemote) {
+        const warning =
+          "[CATALOG_SUPABASE_EMPTY] Catalogo remoto vazio. Usando games.json como fallback ate existir jogo na tabela.";
+        remoteCatalogCache.entries = null;
+        remoteCatalogCache.loadedAt = Date.now();
+        remoteCatalogCache.source = "local-json-fallback";
+        remoteCatalogCache.error = warning;
+        remoteCatalogCache.lastSyncAt = Date.now();
+        return {
+          entries: fallbackEntries,
+          source: "local-json-fallback",
+          warning
+        };
+      }
+
+      remoteCatalogCache.entries = remoteEntries;
+      remoteCatalogCache.loadedAt = Date.now();
+      remoteCatalogCache.source = "supabase-live";
+      remoteCatalogCache.error = "";
+      remoteCatalogCache.lastSyncAt = Date.now();
+      return {
+        entries: remoteEntries,
+        source: "supabase-live",
+        warning: ""
+      };
+    } catch (error) {
+      const warning = String(error?.message || "[CATALOG_SUPABASE_ERROR] Falha ao carregar catalogo remoto.");
+      const canUseStaleRemote = Array.isArray(remoteCatalogCache.entries) && remoteCatalogCache.entries.length > 0;
+      const canUseLocalFallback = sourceConfig.fallbackToLocalJson && fallbackEntries.length > 0;
+      if (canUseStaleRemote) {
+        remoteCatalogCache.error = warning;
+        return {
+          entries: remoteCatalogCache.entries,
+          source: "supabase-stale-cache",
+          warning
+        };
+      }
+      if (canUseLocalFallback) {
+        remoteCatalogCache.error = warning;
+        return {
+          entries: fallbackEntries,
+          source: "local-json-fallback",
+          warning
+        };
+      }
+      throw error;
+    } finally {
+      remoteCatalogInFlight = null;
+    }
+  })();
+
+  return remoteCatalogInFlight;
+}
+
 async function readCatalogBundle() {
-  const { settings, entries } = await parseCatalogFile();
+  const { settings, entries: localEntries } = await parseLocalCatalogFile();
+  const resolvedCatalog = await resolveCatalogEntries(settings, localEntries);
+  const entries = Array.isArray(resolvedCatalog.entries) ? resolvedCatalog.entries : [];
+  const catalogSourceConfig = resolvedCatalog.sourceConfig || resolveCatalogSourceConfig(settings);
 
   const globalApiKey = String(
     settings.googleApiKey || process.env.WPLAY_GOOGLE_API_KEY || process.env.WYZER_GOOGLE_API_KEY || ""
@@ -2197,7 +2532,13 @@ async function readCatalogBundle() {
     settings: {
       installRoot,
       defaultExecutable,
-      googleApiKey: globalApiKey
+      googleApiKey: globalApiKey,
+      catalogSource: resolvedCatalog.source || "local-json",
+      catalogWarning: resolvedCatalog.warning || "",
+      catalogPollIntervalSeconds: catalogSourceConfig.pollIntervalSeconds,
+      catalogProvider: catalogSourceConfig.useRemote ? "supabase" : "json",
+      catalogTable: catalogSourceConfig.table,
+      catalogSchema: catalogSourceConfig.schema
     },
     games
   };
@@ -3124,7 +3465,7 @@ async function verifyDownloadedChecksum(archivePath, expectedSha256 = "") {
   const expected = String(expectedSha256 || "").trim().toLowerCase();
   if (!expected) return "";
   if (!/^[a-f0-9]{64}$/.test(expected)) {
-    throw new Error("checksumSha256 invalido no games.json. Use hash SHA-256 com 64 caracteres hexadecimais.");
+    throw new Error("checksumSha256 invalido no catalogo. Use hash SHA-256 com 64 caracteres hexadecimais.");
   }
 
   const hash = crypto.createHash("sha256");
@@ -3842,7 +4183,7 @@ function normalizeInstallFailureMessage(error) {
     return formatInstallFailure(
       "SOURCE_NOT_CONFIGURED",
       "Nenhuma fonte de download foi configurada para este jogo.",
-      "Preencha downloadUrl/downloadSources/downloadUrls no games.json."
+      "Preencha downloadUrl/downloadSources/downloadUrls no catalogo de jogos (Supabase ou games.json)."
     );
   }
   if (
@@ -3908,7 +4249,7 @@ function normalizeInstallFailureMessage(error) {
     return formatInstallFailure(
       "ARCHIVE_PASSWORD",
       "Falha ao extrair o arquivo por senha invalida ou ausente.",
-      "Confira archivePassword no games.json."
+      "Confira archivePassword no catalogo de jogos (Supabase ou games.json)."
     );
   }
   if (

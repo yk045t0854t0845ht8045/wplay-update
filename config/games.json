@@ -2,7 +2,18 @@
   "settings": {
     "installRoot": "C:\\wyzer_games",
     "defaultExecutable": "game.exe",
-    "googleApiKey": ""
+    "googleApiKey": "",
+    "__commentCatalog": "Catalogo profissional em tempo real via Supabase (tabela public.launcher_games). games[] abaixo vira fallback/local exemplo.",
+    "catalog": {
+      "provider": "supabase",
+      "enabled": true,
+      "supabaseSchema": "public",
+      "supabaseTable": "launcher_games",
+      "pollIntervalSeconds": 5,
+      "fallbackToLocalJson": true,
+      "allowEmptyRemote": false,
+      "__comment": "Com provider=supabase, launcher puxa jogos do Supabase a cada ~5s sem precisar atualizar o launcher."
+    }
   },
   "games": [
     {
@@ -43,5 +54,27 @@
       "bannerUrl": "https://imgur.com/CkC4BWy.png",
       "logoUrl": "https://imgur.com/BLXTkyr.png"
     }
-  ]
+  ],
+  "examples": {
+    "__comment": "Exemplo de novo jogo no formato da tabela launcher_games (SQL): adicione uma linha no Supabase para aparecer no launcher em tempo real.",
+    "supabaseRowExample": {
+      "id": "novo-jogo-id",
+      "name": "Novo Jogo",
+      "description": "Descricao curta",
+      "section": "Catalogo",
+      "archive_type": "zip",
+      "download_url": "https://github.com/SEU_USUARIO/wplay-assets/releases/download/tag/arquivo.zip",
+      "download_sources": [
+        {
+          "url": "https://github.com/SEU_USUARIO/wplay-assets/releases/download/tag/arquivo.zip",
+          "label": "github-release",
+          "kind": "github",
+          "priority": 10
+        }
+      ],
+      "launch_executable": "PASTA\\JOGO.EXE",
+      "enabled": true,
+      "sort_order": 100
+    }
+  }
 }

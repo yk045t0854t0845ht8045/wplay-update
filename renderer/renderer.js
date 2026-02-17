@@ -84,7 +84,7 @@ const authRetryBtn = document.getElementById("authRetryBtn");
 const FALLBACK_CARD_IMAGE = "https://placehold.co/640x360/0f0f0f/f2f2f2?text=Game";
 const FALLBACK_BANNER_IMAGE = "https://placehold.co/1280x720/0f0f0f/f2f2f2?text=Game+Banner";
 const LIBRARY_STORAGE_KEY = "wyzer.launcher.library.v1";
-const REALTIME_SYNC_INTERVAL_MS = 3500;
+const REALTIME_SYNC_INTERVAL_MS = 5000;
 const NOTIFICATION_HISTORY_LIMIT = 36;
 const NOTYF_STACK_VISIBLE = 4;
 const PROGRESS_RENDER_MIN_INTERVAL_MS = 120;
