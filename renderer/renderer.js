@@ -85,12 +85,12 @@ const FALLBACK_CARD_IMAGE = "https://placehold.co/640x360/0f0f0f/f2f2f2?text=Gam
 const FALLBACK_BANNER_IMAGE = "https://placehold.co/1280x720/0f0f0f/f2f2f2?text=Game+Banner";
 const LIBRARY_STORAGE_KEY = "wyzer.launcher.library.v1";
 const REALTIME_SYNC_INTERVAL_MS = 5000;
+const RECENT_COMPLETED_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
 const NOTIFICATION_HISTORY_LIMIT = 36;
-const NOTYF_STACK_VISIBLE = 4;
+const NOTYF_STACK_VISIBLE = 5;
+const NOTYF_STACK_OFFSET_Y = 18;
 const PROGRESS_RENDER_MIN_INTERVAL_MS = 120;
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
-const AUTO_UPDATE_STATUS_VISIBLE = new Set(["available", "downloading", "downloaded", "error"]);
-
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
   minute: "2-digit"
@@ -151,6 +151,7 @@ const state = {
   accountMenuOpen: false,
   downloadSpeedByGameId: new Map(),
   downloadsSectionCollapsed: false,
+  recentCompletedDownloadsByGameId: new Map(),
   authChecking: false,
   authBusy: false,
   authConfigured: true,
@@ -520,7 +521,12 @@ function applyNotyfDeckLayout() {
   if (!container) return;
 
   const toasts = Array.from(container.querySelectorAll(".notyf__toast"));
-  if (!toasts.length) return;
+  if (!toasts.length) {
+    container.classList.remove("has-toasts");
+    return;
+  }
+
+  container.classList.add("has-toasts");
 
   toasts.forEach((toast) => {
     toast.classList.remove("notyf-stack-top", "notyf-stack-hidden");
@@ -534,13 +540,13 @@ function applyNotyfDeckLayout() {
 
   const newestFirst = [...toasts].reverse();
   newestFirst.forEach((toast, index) => {
-    const shiftY = index * 9;
-    const scale = Math.max(0.9, 1 - index * 0.028);
-    const opacity = Math.max(0.38, 1 - index * 0.16);
-    const brightness = Math.max(0.82, 1 - index * 0.055);
+    const shiftY = index * NOTYF_STACK_OFFSET_Y;
+    const scale = Math.max(0.86, 1 - index * 0.032);
+    const opacity = Math.max(0.24, 1 - index * 0.17);
+    const brightness = Math.max(0.78, 1 - index * 0.06);
 
     toast.style.setProperty("--stack-index", String(index));
-    toast.style.setProperty("--stack-z", String(90 - index));
+    toast.style.setProperty("--stack-z", String(420 - index));
     toast.style.setProperty("--stack-shift-y", `${shiftY}px`);
     toast.style.setProperty("--stack-scale", scale.toFixed(3));
     toast.style.setProperty("--stack-opacity", opacity.toFixed(3));
@@ -649,6 +655,36 @@ function getNotificationTypeLabel(type) {
   return "Info";
 }
 
+function getNotificationIconSvg(type, iconClass = "notification-icon-svg") {
+  if (type === "error") {
+    return `
+      <svg class="${iconClass}" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="8.2" stroke="currentColor" stroke-width="1.85"></circle>
+        <path d="M12 7.9V12.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+        <circle cx="12" cy="15.9" r="1.1" fill="currentColor"></circle>
+      </svg>
+    `;
+  }
+
+  if (type === "success") {
+    return `
+      <svg class="${iconClass}" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="8.2" stroke="currentColor" stroke-width="1.85"></circle>
+        <path d="M8.5 12.3L10.8 14.6L15.6 9.8" stroke="currentColor" stroke-width="1.95" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+    `;
+  }
+
+  return `
+    <svg class="${iconClass}" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.2" stroke="currentColor" stroke-width="1.85"></circle>
+      <path d="M12 9.4V12.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+      <circle cx="12" cy="7.6" r="1.1" fill="currentColor"></circle>
+      <path d="M9.2 15.7H14.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+    </svg>
+  `;
+}
+
 function formatNotificationTimestamp(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -688,19 +724,43 @@ function renderNotificationHistory() {
       const type = getNotificationType(entry.type);
       const typeLabel = getNotificationTypeLabel(type);
       const timestamp = formatNotificationTimestamp(entry.createdAt);
+      const notificationId = escapeHtml(entry.id || "");
 
       return `
-        <article class="notification-item is-${type}">
-          <div class="notification-item-top">
-            <span class="notification-type">${escapeHtml(typeLabel)}</span>
-            <time class="notification-time">${escapeHtml(timestamp)}</time>
+        <article class="notification-item is-${type}" data-notification-id="${notificationId}">
+          <span class="notification-icon-wrap" aria-hidden="true">
+            ${getNotificationIconSvg(type)}
+          </span>
+          <div class="notification-main">
+            <div class="notification-item-top">
+              <span class="notification-type">${escapeHtml(typeLabel)}</span>
+              <time class="notification-time">${escapeHtml(timestamp)}</time>
+            </div>
+            <strong class="notification-title">${safeTitle}</strong>
+            ${safeMessage ? `<p class="notification-message">${safeMessage}</p>` : ""}
           </div>
-          <strong class="notification-title">${safeTitle}</strong>
-          ${safeMessage ? `<p class="notification-message">${safeMessage}</p>` : ""}
+          <button
+            class="notification-dismiss-btn"
+            type="button"
+            aria-label="Remover notificacao"
+            data-notification-dismiss="${notificationId}"
+          >
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M8.2 8.2L15.8 15.8M15.8 8.2L8.2 15.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+            </svg>
+          </button>
         </article>
       `;
     })
     .join("");
+}
+
+function removeNotificationHistoryEntry(notificationId) {
+  const normalizedId = String(notificationId || "").trim();
+  if (!normalizedId) return;
+  state.notificationHistory = (state.notificationHistory || []).filter((entry) => entry.id !== normalizedId);
+  renderNotificationHistory();
+  updateNotificationBadge();
 }
 
 function setNotificationsPanelOpen(open) {
@@ -744,15 +804,29 @@ function showToast(type, title, message, timeoutMs = 3600) {
   const normalizedType = getNotificationType(type);
   const rawTitle = String(title || "").trim();
   const rawMessage = String(message || "").trim();
-  const composedMessage = rawTitle && rawMessage ? `${rawTitle}\n${rawMessage}` : rawTitle || rawMessage || "Notificacao";
-  const safeComposedMessage = escapeHtml(composedMessage);
+  const fallbackTitle = rawTitle || "Notificacao";
+  const fallbackMessage = rawMessage;
+  const composedMessage = fallbackMessage ? `${fallbackTitle}: ${fallbackMessage}` : fallbackTitle;
+  const safeTitle = escapeHtml(fallbackTitle);
+  const safeDescription = escapeHtml(fallbackMessage);
+  const toastMarkup = `
+    <div class="toast-shell">
+      <span class="toast-icon-wrap toast-icon-${normalizedType}" aria-hidden="true">
+        ${getNotificationIconSvg(normalizedType, "toast-icon-svg")}
+      </span>
+      <div class="toast-content">
+        <strong class="toast-title">${safeTitle}</strong>
+        ${safeDescription ? `<p class="toast-description">${safeDescription}</p>` : ""}
+      </div>
+    </div>
+  `;
   const durationMs = Number.isFinite(Number(timeoutMs)) ? Math.max(1200, Number(timeoutMs)) : 3600;
 
   if (notyf && typeof notyf.open === "function") {
     try {
       notyf.open({
         type: normalizedType,
-        message: safeComposedMessage,
+        message: toastMarkup,
         duration: durationMs,
         dismissible: true
       });
@@ -817,8 +891,8 @@ function setUpdateRestartModalOpen(open) {
 
   const latest = formatVersionTag(state.autoUpdate.latestVersion);
   updateRestartText.textContent = latest
-    ? `A versao ${latest} do launcher foi baixada.\nDeseja reiniciar agora para aplicar a atualizacao?`
-    : "Uma nova versao do launcher foi baixada. Deseja reiniciar agora para aplicar?";
+    ? `A versao ${latest} do launcher foi baixada.\nDeseja reiniciar agora para aplicar a atualizacao sem reinstalar seus jogos?`
+    : "Uma nova versao do launcher foi baixada. Deseja reiniciar agora para aplicar sem reinstalar jogos?";
 }
 
 function renderAutoUpdateButton() {
@@ -828,11 +902,13 @@ function renderAutoUpdateButton() {
   const visible =
     autoUpdate.supported &&
     autoUpdate.configured &&
-    autoUpdate.enabled &&
-    AUTO_UPDATE_STATUS_VISIBLE.has(autoUpdate.status);
+    autoUpdate.enabled;
 
   topUpdateBtn.classList.toggle("is-hidden", !visible);
-  topUpdateBtn.classList.toggle("is-checking", autoUpdate.status === "downloading" || autoUpdate.status === "checking");
+  topUpdateBtn.classList.toggle(
+    "is-checking",
+    autoUpdate.status === "downloading" || autoUpdate.status === "checking" || autoUpdate.status === "installing"
+  );
   topUpdateBtn.classList.toggle("is-ready", autoUpdate.status === "downloaded" || autoUpdate.updateDownloaded);
   topUpdateBtn.classList.toggle("is-active", state.updateRestartModalOpen);
   topUpdateBtn.disabled = false;
@@ -842,10 +918,16 @@ function renderAutoUpdateButton() {
     const percent = Number(autoUpdate.progressPercent);
     const rounded = Number.isFinite(percent) ? Math.max(0, Math.min(100, Math.round(percent))) : 0;
     label = `Baixando atualizacao (${rounded}%)`;
+  } else if (autoUpdate.status === "checking") {
+    label = autoUpdate.message || "Verificando atualizacoes do launcher...";
   } else if (autoUpdate.status === "downloaded" || autoUpdate.updateDownloaded) {
     label = "Atualizacao pronta. Clique para reiniciar e instalar.";
+  } else if (autoUpdate.status === "installing") {
+    label = autoUpdate.message || "Aplicando atualizacao do launcher...";
   } else if (autoUpdate.status === "available") {
     label = autoUpdate.message || "Nova atualizacao encontrada.";
+  } else if (autoUpdate.status === "idle") {
+    label = autoUpdate.message || "Launcher atualizado. Clique para verificar novamente.";
   } else if (autoUpdate.status === "error") {
     label = autoUpdate.error || autoUpdate.message || "Falha no atualizador. Clique para tentar novamente.";
   }
@@ -865,6 +947,17 @@ function applyAutoUpdatePayload(payload, fromEvent = false) {
   }
 
   const latestVersionTag = formatVersionTag(next.latestVersion);
+  const transitionedToAvailable = previous.status !== "available" && next.status === "available";
+  if (transitionedToAvailable) {
+    notify(
+      "info",
+      "Atualizacao disponivel",
+      latestVersionTag
+        ? `${latestVersionTag} encontrada. Clique no icone de update para baixar.`
+        : "Nova versao encontrada. Clique no icone de update para baixar."
+    );
+  }
+
   const transitionedToDownloaded = !previous.updateDownloaded && next.updateDownloaded;
   if (transitionedToDownloaded) {
     if (state.lastAutoUpdateNotifiedVersion !== latestVersionTag) {
@@ -947,6 +1040,36 @@ async function checkForAutoUpdateManually() {
   }
 }
 
+async function downloadAutoUpdateNow() {
+  if (typeof window.launcherApi.autoUpdateDownload !== "function") {
+    notify("error", "Atualizacao", "API de download do updater indisponivel.");
+    return;
+  }
+
+  try {
+    const payload = await window.launcherApi.autoUpdateDownload();
+    applyAutoUpdatePayload(payload, false);
+    const status = String(payload?.status || "").toLowerCase();
+
+    if (status === "downloading") {
+      notify("info", "Atualizacao", payload?.message || "Download da atualizacao iniciado.");
+      return;
+    }
+
+    if (status === "downloaded") {
+      notify("success", "Atualizacao pronta", "Clique no icone verde para reiniciar e aplicar.");
+      return;
+    }
+
+    if (status === "error") {
+      notify("error", "Atualizacao", payload?.error || payload?.message || "Falha ao baixar atualizacao.");
+      return;
+    }
+  } catch (error) {
+    notify("error", "Atualizacao", error?.message || "Falha ao baixar atualizacao.");
+  }
+}
+
 async function restartAndInstallAutoUpdate() {
   if (typeof window.launcherApi.autoUpdateRestartAndInstall !== "function") {
     notify("error", "Atualizacao", "API de reinicio para update indisponivel.");
@@ -969,7 +1092,16 @@ async function handleTopUpdateButtonClick() {
     return;
   }
 
-  if (state.autoUpdate.status === "downloading" || state.autoUpdate.status === "checking") {
+  if (state.autoUpdate.status === "available") {
+    await downloadAutoUpdateNow();
+    return;
+  }
+
+  if (
+    state.autoUpdate.status === "downloading" ||
+    state.autoUpdate.status === "checking" ||
+    state.autoUpdate.status === "installing"
+  ) {
     const message = state.autoUpdate.message || "Atualizacao em andamento.";
     notify("info", "Atualizacao", message);
     return;
@@ -1250,7 +1382,10 @@ function getActionState(game) {
   }
 
   if (game.installed) {
-    return { action: "play", label: "Play Game", disabled: false };
+    if (game.running) {
+      return { action: "close", label: "FECHAR JOGO", disabled: false };
+    }
+    return { action: "play", label: "PLAY GAME", disabled: false };
   }
 
   if (game.comingSoon) {
@@ -1866,6 +2001,7 @@ function getDownloadPhaseLabel(progress) {
   if (progress.phase === "preparing") return "Preparando";
   if (progress.phase === "downloading") return "Baixando";
   if (progress.phase === "extracting") return "Extraindo";
+  if (progress.phase === "completed") return "Pronto";
   return "Processando";
 }
 
@@ -1885,6 +2021,61 @@ function getActiveDownloadEntries() {
   }
 
   entries.sort((a, b) => String(a.name).localeCompare(String(b.name), "pt-BR", { sensitivity: "base" }));
+  return entries;
+}
+
+function pruneRecentCompletedDownloads() {
+  const now = Date.now();
+  for (const [gameId, meta] of state.recentCompletedDownloadsByGameId.entries()) {
+    const completedAt = Number(meta?.completedAt || 0);
+    if (!Number.isFinite(completedAt) || completedAt <= 0) {
+      state.recentCompletedDownloadsByGameId.delete(gameId);
+      continue;
+    }
+    if (now - completedAt > RECENT_COMPLETED_DOWNLOAD_TTL_MS) {
+      state.recentCompletedDownloadsByGameId.delete(gameId);
+      continue;
+    }
+
+    const game = getGameById(gameId);
+    if (!game || !game.installed) {
+      state.recentCompletedDownloadsByGameId.delete(gameId);
+    }
+  }
+}
+
+function rememberRecentCompletedDownload(gameId) {
+  if (!gameId) return;
+  state.recentCompletedDownloadsByGameId.set(gameId, {
+    completedAt: Date.now()
+  });
+  pruneRecentCompletedDownloads();
+}
+
+function clearRecentCompletedDownload(gameId) {
+  if (!gameId) return;
+  state.recentCompletedDownloadsByGameId.delete(gameId);
+}
+
+function getRecentCompletedDownloadEntries() {
+  pruneRecentCompletedDownloads();
+  const entries = [];
+  for (const [gameId, meta] of state.recentCompletedDownloadsByGameId.entries()) {
+    const game = getGameById(gameId);
+    if (!game || !game.installed) {
+      continue;
+    }
+    const actionState = getActionState(game);
+    const action = actionState.action === "close" ? "close" : "play";
+    entries.push({
+      gameId,
+      completedAt: Number(meta?.completedAt || 0),
+      game,
+      action,
+      actionLabel: action === "close" ? "FECHAR" : "JOGAR"
+    });
+  }
+  entries.sort((a, b) => b.completedAt - a.completedAt);
   return entries;
 }
 
@@ -1922,11 +2113,14 @@ function renderDownloadsView() {
   if (!downloadsView || !downloadsActiveSection || !downloadsActiveList || !downloadsEmptyState) return;
 
   const activeDownloads = getActiveDownloadEntries();
+  const recentCompletedDownloads = getRecentCompletedDownloadEntries();
   const hasActiveDownloads = activeDownloads.length > 0;
+  const hasRecentCompleted = recentCompletedDownloads.length > 0;
+  const hasEntries = hasActiveDownloads || hasRecentCompleted;
 
-  downloadsActiveSection.classList.toggle("is-hidden", !hasActiveDownloads);
+  downloadsActiveSection.classList.toggle("is-hidden", !hasEntries);
   downloadsActiveSection.classList.toggle("is-collapsed", state.downloadsSectionCollapsed);
-  downloadsEmptyState.classList.toggle("is-hidden", hasActiveDownloads);
+  downloadsEmptyState.classList.toggle("is-hidden", hasEntries);
   if (downloadsActiveCollapseBtn) {
     downloadsActiveCollapseBtn.setAttribute(
       "aria-label",
@@ -1937,21 +2131,30 @@ function renderDownloadsView() {
     downloadsActiveCount.textContent = String(activeDownloads.length);
   }
 
-  if (!hasActiveDownloads) {
+  if (!hasEntries) {
     state.downloadsSectionCollapsed = false;
     downloadsActiveList.innerHTML = "";
     return;
   }
 
-  downloadsActiveList.innerHTML = activeDownloads
+  const activeMarkup = activeDownloads
     .map(({ gameId, name, progress }) => {
       const game = getGameById(gameId);
       const hasKnownTotalBytes = Number.isFinite(progress?.totalBytes) && progress.totalBytes > 0;
-      const percent = hasKnownTotalBytes && Number.isFinite(progress?.percent)
+      const hasKnownPercent = Number.isFinite(progress?.percent);
+      const percent = hasKnownPercent
         ? Math.max(0, Math.min(100, progress.percent))
-        : 0;
+        : progress?.phase === "extracting"
+          ? 96
+          : progress?.phase === "preparing"
+            ? 72
+            : 0;
       const percentText = `${Math.round(percent)}%`;
-      const indeterminateClass = progress?.phase === "downloading" && !hasKnownTotalBytes ? "is-indeterminate" : "";
+      const isIndeterminate =
+        progress?.phase === "preparing" ||
+        progress?.phase === "extracting" ||
+        (progress?.phase === "downloading" && !hasKnownTotalBytes);
+      const indeterminateClass = isIndeterminate ? "is-indeterminate" : "";
       const phaseText = getDownloadPhaseLabel(progress);
       const sourceLabel = String(progress?.sourceLabel || "").trim();
       const speedText = progress?.phase === "downloading" ? formatBytesPerSecond(getDownloadSpeedForGame(gameId)) : "--";
@@ -1982,6 +2185,55 @@ function renderDownloadsView() {
       `;
     })
     .join("");
+
+  const recentMarkup = recentCompletedDownloads
+    .map(({ gameId, game, action, actionLabel }) => {
+      const name = game?.name || "Jogo";
+      return `
+        <article class="downloads-item is-completed" data-open-game="${escapeHtml(gameId)}" aria-label="Instalacao concluida de ${escapeHtml(name)}">
+          <div class="downloads-item-cover-wrap">
+            <img class="downloads-item-cover" src="${escapeHtml(getCardImage(game || {}))}" alt="Capa de ${escapeHtml(name)}" loading="lazy" />
+          </div>
+
+          <div class="downloads-item-content">
+            <div class="downloads-item-top">
+              <strong>${escapeHtml(name)}</strong>
+              <div class="downloads-item-right">
+                <span class="downloads-item-speed">Pronto</span>
+                <span class="downloads-item-percent">100%</span>
+              </div>
+            </div>
+
+            <span class="downloads-item-phase">Instalacao concluida</span>
+
+            <div class="downloads-item-progress" aria-hidden="true">
+              <div class="downloads-item-progress-fill" style="width: 100%"></div>
+            </div>
+
+            <div class="downloads-item-actions">
+              <button
+                type="button"
+                class="downloads-item-action-btn"
+                data-download-action="${escapeHtml(action)}"
+                data-game-id="${escapeHtml(gameId)}"
+              >
+                ${escapeHtml(actionLabel)}
+              </button>
+            </div>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
+  const readyBlock = hasRecentCompleted
+    ? `
+      <div class="downloads-subsection-title">Prontos para jogar</div>
+      ${recentMarkup}
+    `
+    : "";
+
+  downloadsActiveList.innerHTML = `${activeMarkup}${readyBlock}`;
 }
 
 function renderStoreGrid() {
@@ -2114,7 +2366,8 @@ function renderStoreGrid() {
 
 function getLibraryCardSubtitle(game) {
   if (isGameUninstalling(game.id)) return "Removendo...";
-  if (isGameBusy(game.id)) return "Baixando...";
+  if (isGameBusy(game.id)) return `${getDownloadPhaseLabel(getInstallProgress(game.id))}...`;
+  if (game.running) return "Em execucao";
   if (game.installed) {
     return game.size && game.size !== "Tamanho nao informado" ? `Instalado • ${game.size}` : "Instalado";
   }
@@ -2124,8 +2377,9 @@ function getLibraryCardSubtitle(game) {
 
 function getLibraryCardActionLabel(game) {
   if (isGameUninstalling(game.id)) return "Removendo";
-  if (isGameBusy(game.id)) return "Baixando";
-  if (game.installed) return "Inicializar";
+  if (isGameBusy(game.id)) return getDownloadPhaseLabel(getInstallProgress(game.id));
+  if (game.running) return "Fechar jogo";
+  if (game.installed) return "Jogar";
   return "Abrir jogo";
 }
 
@@ -2422,17 +2676,28 @@ function renderDetailsProgress(game) {
   }
 
   const hasKnownTotalBytes = Number.isFinite(progress.totalBytes) && progress.totalBytes > 0;
-  const percent =
-    Number.isFinite(progress.percent) && hasKnownTotalBytes ? Math.max(0, Math.min(100, progress.percent)) : 34;
+  const hasKnownPercent = Number.isFinite(progress.percent);
+  const percent = hasKnownPercent
+    ? Math.max(0, Math.min(100, progress.percent))
+    : progress.phase === "extracting"
+      ? 96
+      : progress.phase === "preparing"
+        ? 72
+        : 34;
+  const indeterminate =
+    progress.phase === "preparing" ||
+    progress.phase === "extracting" ||
+    (progress.phase === "downloading" && !hasKnownTotalBytes);
   detailsProgress.classList.remove("is-hidden");
-  detailsProgress.classList.toggle("is-indeterminate", progress.phase === "downloading" && !hasKnownTotalBytes);
+  detailsProgress.classList.toggle("is-indeterminate", indeterminate);
   detailsProgressFill.style.width = `${percent}%`;
   detailsProgressText.textContent = getProgressText(progress);
 }
 
 function getDetailsStatusLabel(game) {
   if (isGameUninstalling(game.id)) return "Removendo";
-  if (isGameBusy(game.id)) return "Baixando";
+  if (isGameBusy(game.id)) return getDownloadPhaseLabel(getInstallProgress(game.id));
+  if (game.running) return "Em execucao";
   if (game.installed) {
     return game.size && game.size !== "Tamanho nao informado" ? `Instalado • ${game.size}` : "Instalado";
   }
@@ -2462,9 +2727,11 @@ function renderDetailsActions(game) {
   detailsAddLibraryBtn.disabled = !shouldShowLibraryToggle || !canToggleLibrary;
 
   const showPlay = game.installed && !isGameBusy(game.id) && !isGameUninstalling(game.id);
+  const playAction = showPlay ? (game.running ? "close" : "play") : "";
   detailsPlayBtn.classList.toggle("is-hidden", !showPlay);
   detailsPlayBtn.dataset.gameId = showPlay ? game.id : "";
-  detailsPlayBtn.textContent = "PLAY GAME";
+  detailsPlayBtn.dataset.action = playAction;
+  detailsPlayBtn.textContent = playAction === "close" ? "FECHAR JOGO" : "PLAY GAME";
 
   const showUninstall = game.installed || isGameUninstalling(game.id);
   detailsUninstallBtn.classList.toggle("is-hidden", !showUninstall);
@@ -2561,6 +2828,7 @@ async function refreshGames() {
 
     state.games = await window.launcherApi.getGames();
     syncLibraryWithInstalled();
+    pruneRecentCompletedDownloads();
     renderAll();
 
     if (!selectedGameId) {
@@ -2636,7 +2904,13 @@ async function handleGameAction(gameId, action) {
   try {
     if (action === "play") {
       try {
-        await window.launcherApi.playGame(gameId);
+        const result = await window.launcherApi.playGame(gameId);
+        await refreshGames();
+        if (result?.alreadyRunning) {
+          setStatus(`${game.name} ja esta em execucao.`);
+          notify("info", "Jogo em execucao", `${game.name} ja estava aberto.`);
+          return;
+        }
         setStatus(`Jogo iniciado: ${game.name}.`);
         notify("success", "Jogo iniciado", `${game.name} foi aberto com sucesso.`);
       } catch (error) {
@@ -2649,6 +2923,23 @@ async function handleGameAction(gameId, action) {
         }
         throw error;
       }
+      return;
+    }
+
+    if (action === "close") {
+      if (typeof window.launcherApi.closeGame !== "function") {
+        throw new Error("Fechar jogo nao esta disponivel nesta versao do launcher.");
+      }
+
+      const result = await window.launcherApi.closeGame(gameId);
+      await refreshGames();
+      if (result?.alreadyStopped) {
+        setStatus(`${game.name} ja estava fechado.`);
+        notify("info", "Jogo ja fechado", `${game.name} nao estava em execucao.`);
+        return;
+      }
+      setStatus(`Jogo fechado: ${game.name}.`);
+      notify("success", "Jogo fechado", `${game.name} foi encerrado com sucesso.`);
       return;
     }
 
@@ -2707,6 +2998,7 @@ async function handleGameAction(gameId, action) {
       try {
         await window.launcherApi.uninstallGame(gameId);
         removeFromLibrary(gameId);
+        clearRecentCompletedDownload(gameId);
         await refreshGames();
         setStatus(`${game.name} removido do computador e da biblioteca.`);
         notify("success", "Jogo removido", `${game.name} foi removido com sucesso.`);
@@ -2933,6 +3225,17 @@ function installEventBindings() {
     });
   }
 
+  if (notificationsList) {
+    notificationsList.addEventListener("click", (event) => {
+      const dismissButton = event.target.closest("[data-notification-dismiss]");
+      if (!dismissButton) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const notificationId = dismissButton.getAttribute("data-notification-dismiss") || "";
+      removeNotificationHistoryEntry(notificationId);
+    });
+  }
+
   if (railDownloadsBtn) {
     railDownloadsBtn.addEventListener("click", (event) => {
       event.preventDefault();
@@ -3133,7 +3436,18 @@ function installEventBindings() {
   });
 
   if (downloadsActiveList) {
-    downloadsActiveList.addEventListener("click", (event) => {
+    downloadsActiveList.addEventListener("click", async (event) => {
+      const actionButton = event.target.closest("[data-download-action]");
+      if (actionButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        const gameId = actionButton.dataset.gameId || "";
+        const action = actionButton.dataset.downloadAction || "play";
+        if (!gameId) return;
+        await handleGameAction(gameId, action);
+        return;
+      }
+
       const item = event.target.closest("[data-open-game]");
       if (!item) return;
       openDetails(item.dataset.openGame);
@@ -3196,8 +3510,9 @@ function installEventBindings() {
 
   detailsPlayBtn.addEventListener("click", async () => {
     const gameId = detailsPlayBtn.dataset.gameId || "";
+    const action = detailsPlayBtn.dataset.action || "play";
     if (!gameId) return;
-    await handleGameAction(gameId, "play");
+    await handleGameAction(gameId, action);
   });
 
   detailsUninstallBtn.addEventListener("click", async () => {
@@ -3281,6 +3596,10 @@ function installEventBindings() {
   window.launcherApi.onInstallProgress(async (payload) => {
     state.installProgressByGameId.set(payload.gameId, payload);
 
+    if (["preparing", "downloading", "extracting"].includes(payload.phase)) {
+      clearRecentCompletedDownload(payload.gameId);
+    }
+
     if (payload.phase === "downloading") {
       const backendSpeed = Number(payload.speedBps);
       if (Number.isFinite(backendSpeed) && backendSpeed >= 0) {
@@ -3329,6 +3648,7 @@ function installEventBindings() {
     }
 
     if (payload.phase === "failed") {
+      clearRecentCompletedDownload(payload.gameId);
       setStatus(payload.message || "Falha na instalacao.", true);
       notify("error", "Falha na instalacao", payload.message || "O download nao foi concluido.");
       setTimeout(() => {
@@ -3340,6 +3660,7 @@ function installEventBindings() {
     }
 
     if (payload.phase === "completed") {
+      rememberRecentCompletedDownload(payload.gameId);
       addToLibrary(payload.gameId);
       await refreshGames();
       fireConfettiFromElement(navLibraryBtn, true);
@@ -3354,7 +3675,7 @@ function installEventBindings() {
         state.installProgressByGameId.delete(payload.gameId);
         state.downloadSpeedByGameId.delete(payload.gameId);
         renderAll();
-      }, 1400);
+      }, 1200);
     }
   });
 

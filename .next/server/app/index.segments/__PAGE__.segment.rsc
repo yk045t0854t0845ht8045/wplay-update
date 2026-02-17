@@ -1,8 +1,8 @@
 1:"$Sreact.fragment"
-6:I[27611,["./_next/static/chunks/3b40b1073f83ffce.js"],"default"]
+6:I[27611,["./_next/static/chunks/0dd513ecbb29f5fe.js"],"default"]
 7:I[97367,["./_next/static/chunks/2f236954d6a65e12.js"],"OutletBoundary"]
 8:"$Sreact.suspense"
-2:T6065,
+2:T6062,
     <div class="bg-glow glow-left"></div>
     <div class="bg-glow glow-right"></div>
     <div class="bg-noise"></div>
@@ -182,7 +182,7 @@
 
             <header class="stage-header">
               <div class="stage-title">
-                <p class="kicker">WPLAY GAME HUB-00</p>
+                <p class="kicker">WPLAY GAME HUB</p>
                 <h1 id="viewTitle">Store</h1>
               </div>
 
@@ -445,8 +445,8 @@
     </div>
 
     
-0:{"buildId":"MbSN4aHH3bwH4xGg0WJxV","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
+0:{"buildId":"ZZlRmxS2trZGLBZ-wa0z0","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
 3:["$","$L6",null,{}]
-4:["$","script","script-0",{"src":"./_next/static/chunks/3b40b1073f83ffce.js","async":true}]
+4:["$","script","script-0",{"src":"./_next/static/chunks/0dd513ecbb29f5fe.js","async":true}]
 5:["$","$L7",null,{"children":["$","$8",null,{"name":"Next.MetadataOutlet","children":"$@9"}]}]
 9:null

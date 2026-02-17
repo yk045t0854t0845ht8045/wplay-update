@@ -32,6 +32,54 @@ function Invoke-Checked {
   }
 }
 
+function Get-GitStatusPorcelain {
+  $statusText = (& git status --porcelain=v1 | Out-String).Trim()
+  return [string]$statusText
+}
+
+function Sync-RepositoryBeforeRelease {
+  param(
+    [Parameter(Mandatory = $false)][string]$CommitMessage = "",
+    [Parameter(Mandatory = $false)][bool]$PushToRemote = $true
+  )
+
+  $pending = Get-GitStatusPorcelain
+  if (-not $pending) {
+    Write-Host ""
+    Write-Host "Repositorio Git ja esta sincronizado (sem alteracoes pendentes)." -ForegroundColor DarkGray
+    return
+  }
+
+  if (-not $CommitMessage) {
+    $CommitMessage = "chore: sync repo before update release"
+  }
+
+  Invoke-Step -Title "Sincronizando repositorio Git antes do update" -Action {
+    & git add -A | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+      throw "Falha ao executar: git add -A"
+    }
+
+    $stagedNames = (& git diff --cached --name-only | Out-String).Trim()
+    if (-not $stagedNames) {
+      Write-Host "Nenhum arquivo elegivel para commit apos git add -A. Seguindo..." -ForegroundColor DarkGray
+      return
+    }
+
+    & git commit -m $CommitMessage | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+      throw "Falha ao criar commit de sincronizacao do repositorio."
+    }
+
+    if ($PushToRemote) {
+      & git push origin HEAD | Out-Host
+      if ($LASTEXITCODE -ne 0) {
+        throw "Falha ao enviar commit de sincronizacao para origin/HEAD."
+      }
+    }
+  }
+}
+
 function Get-PlainTextFromSecureString {
   param([Parameter(Mandatory = $true)][System.Security.SecureString]$SecureValue)
   $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
@@ -318,11 +366,12 @@ function Wait-ReleaseByTag {
 
   $releaseUrl = "https://api.github.com/repos/$Owner/$Repo/releases/tags/$Tag"
   $releaseHtmlUrl = "https://github.com/$Owner/$Repo/releases/tag/$Tag"
+  $allowAuthenticatedApi = [bool]$ApiToken
   $apiHeaders = New-GitHubApiHeaders -Token $ApiToken
   $webHeaders = New-GitHubWebHeaders -Token $ApiToken
 
   for ($i = 1; $i -le $MaxAttempts; $i++) {
-    $canUseApi = [bool]$ApiToken
+    $canUseApi = $allowAuthenticatedApi
     if ($canUseApi) {
       try {
         $release = Invoke-RestMethod -Uri $releaseUrl -Headers $apiHeaders -Method GET
@@ -343,6 +392,14 @@ function Wait-ReleaseByTag {
         if ($statusCode -eq 404) {
           Write-Host "Aguardando release $Tag... tentativa $i/$MaxAttempts"
           Start-Sleep -Seconds $SleepSeconds
+          continue
+        }
+        if ($statusCode -eq 401) {
+          Write-Host "Token da API GitHub invalido/expirado (401). Continuando em modo publico..." -ForegroundColor Yellow
+          $allowAuthenticatedApi = $false
+          $apiHeaders = New-GitHubApiHeaders -Token ""
+          $webHeaders = New-GitHubWebHeaders -Token ""
+          Start-Sleep -Seconds 2
           continue
         }
         if ($statusCode -eq 403) {
@@ -471,6 +528,10 @@ try {
     Write-Host "Modo workflow ativo: sem token local. Publicacao sera feita via GitHub Actions." -ForegroundColor Yellow
   }
 
+  if ($Mode -eq "workflow") {
+    Sync-RepositoryBeforeRelease -CommitMessage "chore: sync repo before update release" -PushToRemote $true
+  }
+
   Invoke-Checked -Title "Incrementando versao ($VersionType)" -Command "npm.cmd" -Arguments @("version", $VersionType, "--no-git-tag-version")
 
   $nextVersion = Get-VersionFromPackageJson
@@ -507,9 +568,26 @@ try {
 
   $apiToken = Resolve-GitHubApiToken -ExplicitToken $GitHubToken
   if ($apiToken) {
-    Write-Host "Consulta da release via API autenticada." -ForegroundColor DarkCyan
-  } else {
+    try {
+      $validateHeaders = New-GitHubApiHeaders -Token $apiToken
+      $null = Invoke-RestMethod -Uri "https://api.github.com/rate_limit" -Headers $validateHeaders -Method GET
+      Write-Host "Consulta da release via API autenticada." -ForegroundColor DarkCyan
+    } catch {
+      $statusCode = Get-HttpStatusCodeFromError -ErrorRecord $_
+      if ($statusCode -eq 401) {
+        Write-Host "Token da API GitHub invalido/expirado. Usando fallback publico da release." -ForegroundColor Yellow
+        $apiToken = ""
+      } else {
+        Write-Host "API autenticada indisponivel no momento. Usando fallback publico da release." -ForegroundColor Yellow
+        $apiToken = ""
+      }
+    }
+  }
+  if (-not $apiToken) {
     Write-Host "Sem token para API. Usando fallback publico da release." -ForegroundColor DarkCyan
+  } else {
+    $env:GH_TOKEN = $apiToken
+    $env:GITHUB_TOKEN = $apiToken
   }
 
   $release = Wait-ReleaseByTag -Owner $owner -Repo $repo -Tag $tag -ApiToken $apiToken

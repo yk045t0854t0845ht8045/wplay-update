@@ -39,8 +39,10 @@ const GOOGLE_DRIVE_MAX_CONFIRM_HOPS = 6;
 const DEFENDER_SCAN_TIMEOUT_MS = 20 * 60 * 1000;
 const ARCHIVE_TOOL_TIMEOUT_MS = 25 * 60 * 1000;
 const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 1 * 60 * 1000;
-const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 12 * 60 * 1000;
-const AUTO_UPDATE_STARTUP_DELAY_MS = 2500;
+const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const AUTO_UPDATE_CHECK_COOLDOWN_MS = 45 * 1000;
+const AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS = 15 * 1000;
+const RUNNING_PROCESS_CACHE_TTL_MS = 2500;
 const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 5;
 const CATALOG_MIN_POLL_INTERVAL_SECONDS = 5;
 const CATALOG_MAX_POLL_INTERVAL_SECONDS = 300;
@@ -53,11 +55,13 @@ let activeAuthLoginRequest = null;
 let authSessionCache = null;
 let autoUpdateInitialized = false;
 let autoUpdateCheckInFlight = null;
+let autoUpdateDownloadInFlight = null;
 let autoUpdateIntervalId = null;
 let autoUpdateConfigSnapshot = null;
 let autoUpdateFeedValidationCompleted = false;
 let autoUpdateFeedValidationInFlight = null;
 let autoUpdateLastCheckOrigin = "";
+let autoUpdateLastRequestedAt = 0;
 let remoteCatalogInFlight = null;
 const remoteCatalogCache = {
   entries: null,
@@ -90,6 +94,10 @@ const autoUpdateState = {
   totalBytes: 0,
   lastCheckedAt: "",
   error: ""
+};
+const runningProcessCache = {
+  fetchedAt: 0,
+  namesLower: new Set()
 };
 
 function resolveWindowIconPath() {
@@ -162,6 +170,9 @@ function createWindow() {
 
   mainWindow.on("maximize", sendMaximizedState);
   mainWindow.on("unmaximize", sendMaximizedState);
+  mainWindow.on("focus", () => {
+    void checkForLauncherUpdate("focus");
+  });
   mainWindow.webContents.on("did-finish-load", () => {
     sendMaximizedState();
     broadcastAutoUpdateState();
@@ -585,6 +596,25 @@ function isAutoUpdateFeedFatalError(errorMessage) {
   return value.includes("[auto_update_feed]") || value.includes("latest.yml");
 }
 
+function isAutoUpdateTransientError(errorMessage) {
+  const value = String(errorMessage || "").toLowerCase();
+  if (!value) return false;
+  return (
+    value.includes("[auto_update_temp]") ||
+    value.includes("temporariamente") ||
+    value.includes("rate limit") ||
+    value.includes("timed out") ||
+    value.includes("etimedout") ||
+    value.includes("econnreset") ||
+    value.includes("econnrefused") ||
+    value.includes("enotfound") ||
+    value.includes("network") ||
+    value.includes("socket hang up") ||
+    value.includes("429") ||
+    value.includes("503")
+  );
+}
+
 function disableAutoUpdaterForSession(reasonMessage, errorMessage = "") {
   clearAutoUpdaterInterval();
   if (autoUpdateConfigSnapshot && typeof autoUpdateConfigSnapshot === "object") {
@@ -961,7 +991,7 @@ function wireAutoUpdaterEventsOnce() {
     if (shouldAutoRestartAfterStartup) {
       setTimeout(() => {
         try {
-          autoUpdater.quitAndInstall(false, true);
+          autoUpdater.quitAndInstall(true, true);
         } catch (error) {
           setAutoUpdateState({
             status: "error",
@@ -991,6 +1021,17 @@ function wireAutoUpdaterEventsOnce() {
     const formattedError = formatAutoUpdateError(error);
     if (isAutoUpdateFeedFatalError(formattedError)) {
       setAutoUpdateNoReleaseState(formattedError);
+      return;
+    }
+
+    if (isAutoUpdateTransientError(formattedError)) {
+      setAutoUpdateState({
+        status: "idle",
+        updateDownloaded: false,
+        message: "Atualizador temporariamente indisponivel. O launcher continuara tentando automaticamente.",
+        error: "",
+        lastCheckedAt: new Date().toISOString()
+      });
       return;
     }
 
@@ -1040,6 +1081,7 @@ function setupAutoUpdater() {
   autoUpdateConfigSnapshot = config;
   autoUpdateFeedValidationCompleted = false;
   autoUpdateFeedValidationInFlight = null;
+  autoUpdateLastRequestedAt = 0;
 
   if (!config.enabled) {
     setAutoUpdateState({
@@ -1106,12 +1148,6 @@ function setupAutoUpdater() {
     });
 
     scheduleAutoUpdaterInterval(config.checkIntervalMs);
-
-    if (config.updateOnLaunch) {
-      setTimeout(() => {
-        void checkForLauncherUpdate("startup");
-      }, AUTO_UPDATE_STARTUP_DELAY_MS);
-    }
   } catch (error) {
     setAutoUpdateState({
       supported: true,
@@ -1129,6 +1165,22 @@ async function checkForLauncherUpdate(origin = "manual") {
     return getPublicAutoUpdateState();
   }
 
+  const normalizedOrigin = String(origin || "").trim().toLowerCase() || "manual";
+  const nowMs = Date.now();
+  if (normalizedOrigin !== "manual") {
+    const elapsedSinceRequest = nowMs - autoUpdateLastRequestedAt;
+    if (elapsedSinceRequest >= 0 && elapsedSinceRequest < AUTO_UPDATE_CHECK_COOLDOWN_MS) {
+      return getPublicAutoUpdateState();
+    }
+    const lastCheckedAtMs = Date.parse(autoUpdateState.lastCheckedAt || "");
+    if (Number.isFinite(lastCheckedAtMs) && lastCheckedAtMs > 0) {
+      const elapsedSinceCheck = nowMs - lastCheckedAtMs;
+      if (elapsedSinceCheck >= 0 && elapsedSinceCheck < AUTO_UPDATE_CHECK_COOLDOWN_MS) {
+        return getPublicAutoUpdateState();
+      }
+    }
+  }
+
   const feedValid = await validateAutoUpdateFeedOnce();
   if (!feedValid) {
     return getPublicAutoUpdateState();
@@ -1138,7 +1190,7 @@ async function checkForLauncherUpdate(origin = "manual") {
     return autoUpdateCheckInFlight;
   }
 
-  if (origin === "manual" && autoUpdateState.status !== "checking") {
+  if (normalizedOrigin === "manual" && autoUpdateState.status !== "checking") {
     setAutoUpdateState({
       status: "checking",
       message: "Verificando atualizacoes...",
@@ -1146,7 +1198,8 @@ async function checkForLauncherUpdate(origin = "manual") {
     });
   }
 
-  autoUpdateLastCheckOrigin = String(origin || "").trim().toLowerCase() || "manual";
+  autoUpdateLastCheckOrigin = normalizedOrigin;
+  autoUpdateLastRequestedAt = nowMs;
   autoUpdateCheckInFlight = autoUpdater
     .checkForUpdates()
     .then(() => getPublicAutoUpdateState())
@@ -1154,6 +1207,16 @@ async function checkForLauncherUpdate(origin = "manual") {
       const formattedError = formatAutoUpdateError(error);
       if (isAutoUpdateFeedFatalError(formattedError)) {
         setAutoUpdateNoReleaseState(formattedError);
+        return getPublicAutoUpdateState();
+      }
+
+      if (isAutoUpdateTransientError(formattedError)) {
+        setAutoUpdateState({
+          status: "idle",
+          message: "Servico de update indisponivel no momento. Tentando novamente em segundo plano...",
+          error: "",
+          lastCheckedAt: new Date().toISOString()
+        });
         return getPublicAutoUpdateState();
       }
 
@@ -1172,6 +1235,59 @@ async function checkForLauncherUpdate(origin = "manual") {
   return autoUpdateCheckInFlight;
 }
 
+async function downloadLauncherUpdate() {
+  if (!autoUpdater || !autoUpdateConfigSnapshot?.enabled || !autoUpdateConfigSnapshot?.configured || !app.isPackaged) {
+    return getPublicAutoUpdateState();
+  }
+
+  if (autoUpdateState.updateDownloaded || autoUpdateState.status === "downloaded") {
+    return getPublicAutoUpdateState();
+  }
+
+  if (autoUpdateDownloadInFlight) {
+    return autoUpdateDownloadInFlight;
+  }
+
+  if (autoUpdateState.status !== "available") {
+    return checkForLauncherUpdate("manual");
+  }
+
+  setAutoUpdateState({
+    status: "downloading",
+    message: "Baixando atualizacao do launcher...",
+    error: ""
+  });
+
+  autoUpdateDownloadInFlight = autoUpdater
+    .downloadUpdate()
+    .then(() => getPublicAutoUpdateState())
+    .catch((error) => {
+      const formattedError = formatAutoUpdateError(error);
+      if (isAutoUpdateTransientError(formattedError)) {
+        setAutoUpdateState({
+          status: "available",
+          message: "Falha temporaria no download. Clique novamente para tentar.",
+          error: "",
+          lastCheckedAt: new Date().toISOString()
+        });
+        return getPublicAutoUpdateState();
+      }
+
+      setAutoUpdateState({
+        status: "error",
+        message: "Falha ao baixar atualizacao.",
+        error: formattedError,
+        lastCheckedAt: new Date().toISOString()
+      });
+      return getPublicAutoUpdateState();
+    })
+    .finally(() => {
+      autoUpdateDownloadInFlight = null;
+    });
+
+  return autoUpdateDownloadInFlight;
+}
+
 function restartAndInstallLauncherUpdate() {
   if (!autoUpdater) {
     throw new Error("Atualizador nao esta disponivel nesta build.");
@@ -1180,8 +1296,14 @@ function restartAndInstallLauncherUpdate() {
     throw new Error("Nenhuma atualizacao pronta para instalar.");
   }
 
+  setAutoUpdateState({
+    status: "installing",
+    message: "Aplicando atualizacao do launcher...",
+    error: ""
+  });
+
   setTimeout(() => {
-    autoUpdater.quitAndInstall(false, true);
+    autoUpdater.quitAndInstall(true, true);
   }, 140);
 
   return { ok: true };
@@ -4451,13 +4573,29 @@ async function installGame(gameId) {
         await fsp.copyFile(tempArchivePath, executableTarget);
       } else {
         await testArchiveIntegrity(tempArchivePath, game);
+        let extractionPercent = 96;
         emitInstallProgress({
           gameId,
           phase: "extracting",
-          percent: 96,
+          percent: extractionPercent,
           message: "Extraindo arquivos..."
         });
-        await extractArchive(tempArchivePath, installDir, game);
+
+        const extractionPulseTimer = setInterval(() => {
+          extractionPercent = Math.min(99, extractionPercent + 0.5);
+          emitInstallProgress({
+            gameId,
+            phase: "extracting",
+            percent: extractionPercent,
+            message: "Extraindo arquivos..."
+          });
+        }, 900);
+
+        try {
+          await extractArchive(tempArchivePath, installDir, game);
+        } finally {
+          clearInterval(extractionPulseTimer);
+        }
       }
 
       const executable = await resolveGameExecutable(game, installRoot, true);
@@ -4546,6 +4684,79 @@ function normalizeExecutableImageName(value) {
 function isGenericExecutableName(value) {
   const lower = String(value || "").toLowerCase();
   return ["game.exe", "launcher.exe", "start.exe", "setup.exe"].includes(lower);
+}
+
+function normalizeProcessNameForMatch(value) {
+  const normalized = normalizeExecutableImageName(value);
+  return String(normalized || "").trim().toLowerCase();
+}
+
+function parseWindowsTasklistCsvOutput(outputText) {
+  const names = new Set();
+  const text = String(outputText || "");
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    const match = line.match(/^"([^"]+)"/);
+    if (!match?.[1]) {
+      continue;
+    }
+    const lowerName = normalizeProcessNameForMatch(match[1]);
+    if (lowerName) {
+      names.add(lowerName);
+    }
+  }
+  return names;
+}
+
+async function listRunningProcessNamesLowerUncached() {
+  if (process.platform === "win32") {
+    try {
+      const result = await runCommandCapture("tasklist", ["/FO", "CSV", "/NH"], { timeoutMs: 7000 });
+      if (result?.timedOut) {
+        return new Set();
+      }
+      return parseWindowsTasklistCsvOutput(result?.output || "");
+    } catch (_error) {
+      return new Set();
+    }
+  }
+
+  try {
+    const result = await runCommandCapture("ps", ["-A", "-o", "comm="], { timeoutMs: 7000 });
+    if (result?.timedOut) {
+      return new Set();
+    }
+    const names = new Set();
+    const lines = String(result?.output || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      const lowerName = normalizeProcessNameForMatch(line);
+      if (lowerName) {
+        names.add(lowerName);
+      }
+    }
+    return names;
+  } catch (_error) {
+    return new Set();
+  }
+}
+
+async function getRunningProcessNamesLower() {
+  const now = Date.now();
+  if (
+    runningProcessCache.namesLower.size > 0 &&
+    now - runningProcessCache.fetchedAt >= 0 &&
+    now - runningProcessCache.fetchedAt < RUNNING_PROCESS_CACHE_TTL_MS
+  ) {
+    return runningProcessCache.namesLower;
+  }
+
+  const names = await listRunningProcessNamesLowerUncached();
+  runningProcessCache.fetchedAt = now;
+  runningProcessCache.namesLower = names;
+  return names;
 }
 
 async function terminateWindowsProcessByImageName(imageName) {
@@ -4652,6 +4863,27 @@ async function collectExecutableImageNamesForGame(game, installRootCandidates) {
   return [...new Set(ordered)];
 }
 
+function getProcessCandidatesForInstalledGame(game, executable, manifest) {
+  const allCandidates = new Set();
+  const add = (rawValue) => {
+    const normalized = normalizeExecutableImageName(rawValue);
+    if (normalized) {
+      allCandidates.add(normalized);
+    }
+  };
+
+  add(game?.launchExecutable);
+  add(manifest?.lastExecutableRelativePath);
+  add(executable?.relativePath);
+  add(executable?.absolutePath);
+
+  const strictCandidates = [...allCandidates].filter((name) => !isGenericExecutableName(name));
+  if (strictCandidates.length > 0) {
+    return strictCandidates;
+  }
+  return [...allCandidates];
+}
+
 async function tryTerminateGameProcesses(game, installRootCandidates) {
   const executableImageNames = await collectExecutableImageNamesForGame(game, installRootCandidates);
   const closedProcesses = [];
@@ -4713,15 +4945,18 @@ async function uninstallGame(gameId) {
 async function getGamesWithStatus() {
   const { games, settings } = await readCatalogBundle();
   const installRoot = getCurrentInstallRoot(settings);
+  const runningProcessNamesLower = await getRunningProcessNamesLower();
 
   const gamesWithStatus = await Promise.all(
     games.map(async (game) => {
       const executable = await resolveGameExecutable(game, installRoot, false);
       const installed = Boolean(executable.absolutePath);
       let resolvedSizeBytes = parseSizeBytes(game.sizeBytes);
+      let running = false;
+      let manifest = null;
 
       if (installed) {
-        const manifest = await readInstallManifest(executable.installDir);
+        manifest = await readInstallManifest(executable.installDir);
         const installedSnapshot = await getInstalledSizeSnapshot(executable.installDir, manifest);
         if (installedSnapshot.sizeBytes > 0) {
           resolvedSizeBytes = installedSnapshot.sizeBytes;
@@ -4745,6 +4980,11 @@ async function getGamesWithStatus() {
             sizeMeasuredAt: installedSnapshot.measuredAt
           }).catch(() => {});
         }
+
+        const processCandidates = getProcessCandidatesForInstalledGame(game, executable, manifest)
+          .map((value) => normalizeProcessNameForMatch(value))
+          .filter(Boolean);
+        running = processCandidates.some((candidate) => runningProcessNamesLower.has(candidate));
       }
 
       const resolvedSize = resolvedSizeBytes > 0 ? formatBytesShort(resolvedSizeBytes) : game.size;
@@ -4754,6 +4994,7 @@ async function getGamesWithStatus() {
         sizeBytes: resolvedSizeBytes,
         installedSizeBytes: installed ? resolvedSizeBytes : 0,
         installed,
+        running,
         installDir: executable.installDir,
         installRoot
       };
@@ -4856,13 +5097,68 @@ async function playGame(gameId) {
     throw new Error("Nao consegui localizar o executavel automaticamente. Reinstale o jogo com zip contendo game.exe.");
   }
 
+  const manifest = await readInstallManifest(installDir);
+  const processCandidates = getProcessCandidatesForInstalledGame(game, executable, manifest)
+    .map((value) => normalizeProcessNameForMatch(value))
+    .filter(Boolean);
+  if (processCandidates.length > 0) {
+    const runningProcessNamesLower = await getRunningProcessNamesLower();
+    const alreadyRunning = processCandidates.some((name) => runningProcessNamesLower.has(name));
+    if (alreadyRunning) {
+      return {
+        ok: true,
+        alreadyRunning: true
+      };
+    }
+  }
+
   const launchResult = await shell.openPath(executable.absolutePath);
   if (launchResult) {
     throw new Error(launchResult);
   }
 
+  runningProcessCache.fetchedAt = 0;
+  runningProcessCache.namesLower = new Set();
+
   return {
     ok: true
+  };
+}
+
+async function closeGame(gameId) {
+  const { games, settings } = await readCatalogBundle();
+  const game = games.find((entry) => entry.id === gameId);
+  if (!game) {
+    throw new Error("Jogo nao encontrado no catalogo.");
+  }
+
+  const installRootCandidates = getInstallRootCandidates(settings);
+  const closedProcesses = await tryTerminateGameProcesses(game, installRootCandidates).catch(() => []);
+  if (closedProcesses.length > 0) {
+    runningProcessCache.fetchedAt = 0;
+    runningProcessCache.namesLower = new Set();
+    return {
+      ok: true,
+      alreadyStopped: false,
+      closedProcesses
+    };
+  }
+
+  const expectedProcessNames = await collectExecutableImageNamesForGame(game, installRootCandidates).catch(() => []);
+  const expectedLower = expectedProcessNames
+    .map((value) => normalizeProcessNameForMatch(value))
+    .filter(Boolean);
+  const runningProcessNamesLower = await getRunningProcessNamesLower();
+  const hasExpectedProcessRunning = expectedLower.some((name) => runningProcessNamesLower.has(name));
+
+  if (hasExpectedProcessRunning) {
+    throw new Error("O jogo esta em execucao, mas nao foi possivel fechar automaticamente.");
+  }
+
+  return {
+    ok: true,
+    alreadyStopped: true,
+    closedProcesses: []
   };
 }
 
@@ -4892,8 +5188,16 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     await ensurePersistedAuthConfigFile().catch(() => {});
     registerAuthProtocolClient();
-    createWindow();
     setupAutoUpdater();
+
+    if (autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured && autoUpdateConfigSnapshot?.updateOnLaunch) {
+      await Promise.race([
+        checkForLauncherUpdate("startup"),
+        new Promise((resolve) => setTimeout(resolve, AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS))
+      ]).catch(() => {});
+    }
+
+    createWindow();
 
     if (authDeepLinkUrlBuffer) {
       void handleAuthDeepLink(authDeepLinkUrlBuffer);
@@ -4905,6 +5209,7 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:install-game", (_event, gameId) => installGame(gameId));
     ipcMain.handle("launcher:uninstall-game", (_event, gameId) => uninstallGame(gameId));
     ipcMain.handle("launcher:play-game", (_event, gameId) => playGame(gameId));
+    ipcMain.handle("launcher:close-game", (_event, gameId) => closeGame(gameId));
     ipcMain.handle("launcher:open-downloads-folder", () => openInstallFolder());
     ipcMain.handle("launcher:open-game-install-folder", (_event, gameId) => openGameInstallFolder(gameId));
     ipcMain.handle("launcher:auth-get-session", () => getAuthSessionState());
@@ -4912,6 +5217,7 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:auth-logout", () => logoutAuthSession());
     ipcMain.handle("launcher:auto-update-get-state", () => getPublicAutoUpdateState());
     ipcMain.handle("launcher:auto-update-check", () => checkForLauncherUpdate("manual"));
+    ipcMain.handle("launcher:auto-update-download", () => downloadLauncherUpdate());
     ipcMain.handle("launcher:auto-update-restart-and-install", () => restartAndInstallLauncherUpdate());
     ipcMain.handle("launcher:window-minimize", () => {
       if (!mainWindow || mainWindow.isDestroyed()) return false;

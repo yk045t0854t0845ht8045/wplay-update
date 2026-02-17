@@ -25,6 +25,7 @@ Preencha `config/updater.json`:
 Com `checkIntervalMinutes: 1`, launcher aberto detecta update em ate ~1 minuto.
 Com `autoRestartOnStartup: true`, se abrir o launcher e existir update, ele baixa e reinicia sozinho para aplicar (sem pedir novo download manual).
 Com `provider: "auto"`, o launcher prefere feed direto (`releases/latest/download`) para evitar erro 403 de rate limit da API do GitHub.
+O update do launcher agora e aplicado em modo silencioso (sem assistente de desinstalar/instalar na tela).
 
 ## 2) Comando unico (recomendado)
 
@@ -34,7 +35,12 @@ Agora existe comando unico:
 npm run update-now
 ```
 
-Antes de rodar esse comando, commit/push das alteracoes de codigo do launcher (ele cria commit/tag apenas da versao).
+Esse comando agora sincroniza o repositorio automaticamente antes da release:
+
+1. detecta alteracoes pendentes
+2. faz `git add -A`
+3. cria commit de sincronizacao
+4. faz `git push origin HEAD`
 
 Ele faz:
 
@@ -105,3 +111,15 @@ O icone de update so aparece quando:
 1. existe release valida com `latest.yml`
 2. a release tem versao maior que a instalada
 3. launcher esta rodando build instalado (nao `npm run dev`)
+
+## 7) Mudou so front-end e nao atualizou?
+
+Mesmo alterando apenas textos/CSS/JS de interface, o update so dispara quando existe nova release com versao maior.
+
+Fluxo correto:
+
+1. aplicar alteracoes no codigo
+2. rodar `npm run update-now` para gerar nova versao/tag/release
+3. confirmar no GitHub Release os arquivos `latest.yml`, `.exe` e `.blockmap`
+
+Sem nova release/versionamento, o launcher vai considerar que ja esta atualizado.

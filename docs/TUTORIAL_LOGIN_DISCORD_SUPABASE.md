@@ -116,6 +116,7 @@ npm run build:portable
 3. Proteja tabelas com RLS no Supabase.
 4. Restrinja politicas por `auth.uid()` e roles.
 5. `config/auth.json` esta no `.gitignore` para reduzir vazamento acidental.
+6. Em build instalado com auto-update, o launcher usa preferencialmente `userData/config/auth.json` (persistente entre atualizacoes).
 
 Exemplo de RLS minima:
 
@@ -132,11 +133,12 @@ using (id = auth.uid());
 
 ### `[AUTH_NOT_CONFIGURED]`
 - `config/auth.json` ausente ou incompleto.
+- Em app instalado, confira tambem `userData/config/auth.json` (arquivo persistente).
 
 ### `[AUTH_PROTOCOL]`
 - Protocolo `wplay://` nao foi registrado.
-- Feche o launcher e abra novamente como administrador.
-- No build instalado isso normalmente ja vem registrado.
+- Feche e abra o launcher novamente para concluir registro por usuario (HKCU).
+- No build instalado isso normalmente ja vem registrado sem permissao de administrador.
 
 ### Login abre navegador e nao volta pro launcher
 - Verifique se `wplay://auth/callback` esta em `Additional Redirect URLs` no Supabase.
