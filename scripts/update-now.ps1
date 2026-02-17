@@ -353,10 +353,12 @@ function Get-ReleaseAssetNames {
 
 function Merge-ReleaseAssetNames {
   param(
-    [Parameter(Mandatory = $true)][string[]]$Existing,
-    [Parameter(Mandatory = $true)][string[]]$Additional
+    [AllowNull()][string[]]$Existing = @(),
+    [AllowNull()][string[]]$Additional = @()
   )
-  return @($Existing + $Additional | Where-Object { $_ } | Select-Object -Unique)
+  $left = if ($null -eq $Existing) { @() } else { @($Existing) }
+  $right = if ($null -eq $Additional) { @() } else { @($Additional) }
+  return @($left + $right | Where-Object { $_ } | Select-Object -Unique)
 }
 
 function Test-ReleaseAssetsReady {
