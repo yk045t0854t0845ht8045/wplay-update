@@ -197,7 +197,7 @@ function Resolve-GitHubApiToken {
   return ""
 }
 
-function Get-LatestWorkflowRunSummary {
+function Get-LatestWorkflowRunInfo {
   param(
     [Parameter(Mandatory = $true)][string]$Owner,
     [Parameter(Mandatory = $true)][string]$Repo,
@@ -213,15 +213,35 @@ function Get-LatestWorkflowRunSummary {
       $run = $payload.workflow_runs[0]
     }
     if (-not $run) {
-      return ""
+      return $null
     }
-    $status = [string]$run.status
-    $conclusion = [string]$run.conclusion
-    $urlValue = [string]$run.html_url
-    return "workflow status=$status conclusion=$conclusion url=$urlValue"
+    return [pscustomobject]@{
+      status       = [string]$run.status
+      conclusion   = [string]$run.conclusion
+      html_url     = [string]$run.html_url
+      head_branch  = [string]$run.head_branch
+      display_title = [string]$run.display_title
+      event        = [string]$run.event
+      run_id       = [string]$run.id
+    }
   } catch {
+    return $null
+  }
+}
+
+function Get-LatestWorkflowRunSummary {
+  param(
+    [Parameter(Mandatory = $true)][string]$Owner,
+    [Parameter(Mandatory = $true)][string]$Repo,
+    [string]$ApiToken = ""
+  )
+
+  $run = Get-LatestWorkflowRunInfo -Owner $Owner -Repo $Repo -ApiToken $ApiToken
+  if (-not $run) {
     return ""
   }
+
+  return "workflow status=$($run.status) conclusion=$($run.conclusion) url=$($run.html_url)"
 }
 
 function New-GitHubApiHeaders {
@@ -393,6 +413,33 @@ function Test-ReleaseAssetsReady {
   }
 }
 
+function Assert-ReleaseWorkflowHealthy {
+  param(
+    [Parameter(Mandatory = $true)][string]$Owner,
+    [Parameter(Mandatory = $true)][string]$Repo,
+    [Parameter(Mandatory = $true)][string]$Tag,
+    [string]$ApiToken = ""
+  )
+
+  $run = Get-LatestWorkflowRunInfo -Owner $Owner -Repo $Repo -ApiToken $ApiToken
+  if (-not $run) {
+    return $null
+  }
+
+  $matchesTag = [string]$run.head_branch -eq [string]$Tag -or [string]$run.display_title -like "*$Tag*"
+  if ($matchesTag -and [string]$run.status -eq "completed") {
+    $conclusion = [string]$run.conclusion
+    if ($conclusion -and $conclusion -ne "success") {
+      throw (
+        "Workflow da release $Tag terminou com status '$conclusion'. " +
+        "Abra e corrija: $($run.html_url)"
+      )
+    }
+  }
+
+  return $run
+}
+
 function Wait-ReleaseByTag {
   param(
     [Parameter(Mandatory = $true)][string]$Owner,
@@ -419,23 +466,36 @@ function Wait-ReleaseByTag {
           $release | Add-Member -NotePropertyName "resolvedAssetNames" -NotePropertyValue $assetState.AssetNames -Force
           return $release
         }
+        $runInfo = Assert-ReleaseWorkflowHealthy -Owner $Owner -Repo $Repo -Tag $Tag -ApiToken $ApiToken
+        $runHint = if ($runInfo) {
+          " | workflow status=$($runInfo.status) conclusion=$($runInfo.conclusion)"
+        } else {
+          ""
+        }
         Write-Host (
           "Release $Tag criada, aguardando assets... " +
           "(latest.yml=$($assetState.HasManifest), exe=$($assetState.HasExe), blockmap=$($assetState.HasBlockmap)) " +
-          "tentativa $i/$MaxAttempts"
+          "tentativa $i/$MaxAttempts$runHint"
         )
         Start-Sleep -Seconds $SleepSeconds
         continue
       } catch {
         $statusCode = Get-HttpStatusCodeFromError -ErrorRecord $_
         if ($statusCode -eq 404) {
-          Write-Host "Aguardando release $Tag... tentativa $i/$MaxAttempts"
+          $runInfo = Assert-ReleaseWorkflowHealthy -Owner $Owner -Repo $Repo -Tag $Tag -ApiToken $ApiToken
+          $runHint = if ($runInfo) {
+            " | workflow status=$($runInfo.status) conclusion=$($runInfo.conclusion)"
+          } else {
+            ""
+          }
+          Write-Host "Aguardando release $Tag... tentativa $i/$MaxAttempts$runHint"
           Start-Sleep -Seconds $SleepSeconds
           continue
         }
         if ($statusCode -eq 401) {
           Write-Host "Token da API GitHub invalido/expirado (401). Continuando em modo publico..." -ForegroundColor Yellow
           $allowAuthenticatedApi = $false
+          $ApiToken = ""
           $apiHeaders = New-GitHubApiHeaders -Token ""
           $webHeaders = New-GitHubWebHeaders -Token ""
           Start-Sleep -Seconds 2
@@ -473,16 +533,28 @@ function Wait-ReleaseByTag {
 
     $releasePageProbe = Test-HttpUrlExists -Url $releaseHtmlUrl -Headers $webHeaders
     if ($releasePageProbe.Exists) {
+      $runInfo = Assert-ReleaseWorkflowHealthy -Owner $Owner -Repo $Repo -Tag $Tag -ApiToken $ApiToken
+      $runHint = if ($runInfo) {
+        " | workflow status=$($runInfo.status) conclusion=$($runInfo.conclusion)"
+      } else {
+        ""
+      }
       Write-Host (
         "Release $Tag criada, aguardando assets... " +
         "(latest.yml=$($assetState.HasManifest), exe=$($assetState.HasExe), blockmap=$($assetState.HasBlockmap)) " +
-        "tentativa $i/$MaxAttempts"
+        "tentativa $i/$MaxAttempts$runHint"
       )
       Start-Sleep -Seconds $SleepSeconds
       continue
     }
     if ($releasePageProbe.StatusCode -eq 404) {
-      Write-Host "Aguardando release $Tag... tentativa $i/$MaxAttempts"
+      $runInfo = Assert-ReleaseWorkflowHealthy -Owner $Owner -Repo $Repo -Tag $Tag -ApiToken $ApiToken
+      $runHint = if ($runInfo) {
+        " | workflow status=$($runInfo.status) conclusion=$($runInfo.conclusion)"
+      } else {
+        ""
+      }
+      Write-Host "Aguardando release $Tag... tentativa $i/$MaxAttempts$runHint"
       Start-Sleep -Seconds $SleepSeconds
       continue
     }
