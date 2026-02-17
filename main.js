@@ -5343,6 +5343,27 @@ async function openInstallFolder() {
   return installRoot;
 }
 
+async function openExternalUrl(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value) {
+    throw new Error("[OPEN_EXTERNAL_URL] URL vazia.");
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_error) {
+    throw new Error("[OPEN_EXTERNAL_URL] URL invalida.");
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("[OPEN_EXTERNAL_URL] Protocolo nao suportado. Use http/https.");
+  }
+
+  await shell.openExternal(parsed.toString());
+  return true;
+}
+
 async function openGameInstallFolder(gameId) {
   const { games, settings } = await readCatalogBundle();
   const game = games.find((entry) => entry.id === gameId);
@@ -5560,6 +5581,7 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:close-game", (_event, gameId) => closeGame(gameId));
     ipcMain.handle("launcher:open-downloads-folder", () => openInstallFolder());
     ipcMain.handle("launcher:open-game-install-folder", (_event, gameId) => openGameInstallFolder(gameId));
+    ipcMain.handle("launcher:open-external-url", (_event, rawUrl) => openExternalUrl(rawUrl));
     ipcMain.handle("launcher:auth-get-session", () => getAuthSessionState());
     ipcMain.handle("launcher:auth-login-discord", () => loginWithDiscord());
     ipcMain.handle("launcher:auth-logout", () => logoutAuthSession());

@@ -3116,6 +3116,12 @@ body.auth-locked .auth-gate {
   aspect-ratio: 16 / 9;
 }
 
+.video-embed-shell{
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
 .video-wrap iframe,
   .video-wrap video,
   .video-wrap img,
@@ -3132,6 +3138,38 @@ body.auth-locked .auth-gate {
   width: 100%;
   -o-object-fit: cover;
      object-fit: cover;
+}
+
+.video-open-youtube-btn{
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(9, 9, 10, 0.82);
+  color: rgba(245, 246, 248, 0.96);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.video-open-youtube-btn:hover{
+  background: rgba(22, 22, 26, 0.94);
+  border-color: rgba(255, 255, 255, 0.36);
+}
+
+.video-open-youtube-btn:focus-visible{
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(98, 150, 255, 0.42);
 }
 
 .gallery-strip{

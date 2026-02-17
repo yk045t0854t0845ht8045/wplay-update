@@ -481,6 +481,30 @@ async function handleAccountMenuAction(action) {
   }
 }
 
+async function openExternalUrl(urlValue) {
+  const raw = String(urlValue || "").trim();
+  if (!raw) return false;
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (_error) {
+    throw new Error("URL externa invalida.");
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Protocolo de URL nao suportado.");
+  }
+
+  if (typeof window.launcherApi.openExternalUrl === "function") {
+    const opened = await window.launcherApi.openExternalUrl(parsed.toString());
+    return Boolean(opened);
+  }
+
+  window.open(parsed.toString(), "_blank", "noopener,noreferrer");
+  return true;
+}
+
 function updateNotificationBadge() {
   if (!topNotificationsBadge) return;
   topNotificationsBadge.classList.toggle("is-hidden", state.unreadNotifications <= 0);
@@ -1534,13 +1558,17 @@ function parseYoutubeStartSeconds(value) {
   return total > 0 ? Math.floor(total) : 0;
 }
 
-function toYoutubeEmbed(urlValue) {
+function parseYoutubeSource(urlValue) {
   const rawInput = String(urlValue || "").trim();
-  if (!rawInput) return "";
+  if (!rawInput) return null;
 
   const idOnlyMatch = rawInput.match(/^[a-zA-Z0-9_-]{11}$/);
   if (idOnlyMatch) {
-    return `https://www.youtube.com/embed/${idOnlyMatch[0]}?rel=0&playsinline=1&enablejsapi=1&origin=https%3A%2F%2Fwww.youtube.com&widget_referrer=https%3A%2F%2Fwww.youtube.com`;
+    return {
+      videoId: idOnlyMatch[0],
+      list: "",
+      startSeconds: 0
+    };
   }
 
   const candidateUrl = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//i.test(rawInput)
@@ -1580,32 +1608,59 @@ function toYoutubeEmbed(urlValue) {
     }
 
     if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
-      return "";
+      return null;
     }
 
-    const params = new URLSearchParams();
-    params.set("rel", "0");
-    params.set("playsinline", "1");
-    params.set("enablejsapi", "1");
-    params.set("origin", "https://www.youtube.com");
-    params.set("widget_referrer", "https://www.youtube.com");
-    params.set("iv_load_policy", "3");
-    params.set("fs", "1");
-
-    const list = parsed.searchParams.get("list");
-    if (list) {
-      params.set("list", list);
-    }
-
+    const list = String(parsed.searchParams.get("list") || "").trim();
     const startSeconds = parseYoutubeStartSeconds(parsed.searchParams.get("t") || parsed.searchParams.get("start"));
-    if (startSeconds > 0) {
-      params.set("start", String(startSeconds));
-    }
 
-    return `https://www.youtube.com/embed/${videoId}?${params.toString()}`;
+    return {
+      videoId,
+      list,
+      startSeconds
+    };
   } catch (_error) {
-    return "";
+    return null;
   }
+}
+
+function toYoutubeEmbed(urlValue) {
+  const source = parseYoutubeSource(urlValue);
+  if (!source?.videoId) return "";
+
+  const params = new URLSearchParams();
+  params.set("rel", "0");
+  params.set("playsinline", "1");
+  params.set("iv_load_policy", "3");
+  params.set("fs", "1");
+
+  if (source.list) {
+    params.set("list", source.list);
+  }
+
+  if (source.startSeconds > 0) {
+    params.set("start", String(source.startSeconds));
+  }
+
+  return `https://www.youtube-nocookie.com/embed/${source.videoId}?${params.toString()}`;
+}
+
+function toYoutubeWatchUrl(urlValue) {
+  const source = parseYoutubeSource(urlValue);
+  if (!source?.videoId) return "";
+
+  const params = new URLSearchParams();
+  params.set("v", source.videoId);
+
+  if (source.list) {
+    params.set("list", source.list);
+  }
+
+  if (source.startSeconds > 0) {
+    params.set("t", String(source.startSeconds));
+  }
+
+  return `https://www.youtube.com/watch?${params.toString()}`;
 }
 
 function isDirectVideo(urlValue) {
@@ -2703,15 +2758,27 @@ function renderVideo(game) {
 
   const youtubeEmbed = toYoutubeEmbed(source);
   if (youtubeEmbed) {
+    const youtubeWatchUrl = toYoutubeWatchUrl(source);
+    const openYoutubeButton = youtubeWatchUrl
+      ? `
+          <button class="video-open-youtube-btn" type="button" data-open-youtube-url="${escapeHtml(youtubeWatchUrl)}">
+            Abrir no YouTube
+          </button>
+        `
+      : "";
+
     setDetailsVideoMarkup(`youtube:${game.id}:${youtubeEmbed}`, `
-      <iframe
-        src="${escapeHtml(youtubeEmbed)}"
-        title="Trailer de ${escapeHtml(game.name)}"
-        loading="lazy"
-        referrerpolicy="strict-origin-when-cross-origin"
-        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-        allowfullscreen
-      ></iframe>
+      <div class="video-embed-shell">
+        <iframe
+          src="${escapeHtml(youtubeEmbed)}"
+          title="Trailer de ${escapeHtml(game.name)}"
+          loading="lazy"
+          referrerpolicy="strict-origin-when-cross-origin"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowfullscreen
+        ></iframe>
+        ${openYoutubeButton}
+      </div>
     `);
     return;
   }
@@ -3613,6 +3680,27 @@ function installEventBindings() {
     renderVideo(game);
     renderGallery(game);
   });
+
+  if (detailsVideoWrap) {
+    detailsVideoWrap.addEventListener("click", async (event) => {
+      const openYoutubeButton = event.target.closest("[data-open-youtube-url]");
+      if (!openYoutubeButton) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const urlValue = String(openYoutubeButton.dataset.openYoutubeUrl || "").trim();
+      if (!urlValue) return;
+
+      try {
+        await openExternalUrl(urlValue);
+        setStatus("Abrindo trailer no YouTube...");
+      } catch (error) {
+        const message = error?.message || "Nao foi possivel abrir o video no navegador.";
+        setStatus(message, true);
+        notify("error", "Video", message);
+      }
+    });
+  }
 
   detailsAddLibraryBtn.addEventListener("click", () => {
     const gameId = detailsAddLibraryBtn.dataset.gameId || "";

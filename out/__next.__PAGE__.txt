@@ -1,8 +1,8 @@
 1:"$Sreact.fragment"
-6:I[27611,["./_next/static/chunks/5200c6bf7e49eedd.js"],"default"]
+6:I[27611,["./_next/static/chunks/750fc367cd4c07c9.js"],"default"]
 7:I[97367,["./_next/static/chunks/2f236954d6a65e12.js"],"OutletBoundary"]
 8:"$Sreact.suspense"
-2:T605d,
+2:T6058,
     <div class="bg-glow glow-left"></div>
     <div class="bg-glow glow-right"></div>
     <div class="bg-noise"></div>
@@ -445,8 +445,8 @@
     </div>
 
     
-0:{"buildId":"PIhuU2NKhvJBdzHgaKP06","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
+0:{"buildId":"yJ4RHrC8o7IFLj8IYBsf1","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
 3:["$","$L6",null,{}]
-4:["$","script","script-0",{"src":"./_next/static/chunks/5200c6bf7e49eedd.js","async":true}]
+4:["$","script","script-0",{"src":"./_next/static/chunks/750fc367cd4c07c9.js","async":true}]
 5:["$","$L7",null,{"children":["$","$8",null,{"name":"Next.MetadataOutlet","children":"$@9"}]}]
 9:null

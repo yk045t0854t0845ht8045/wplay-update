@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   closeGame: (gameId) => ipcRenderer.invoke("launcher:close-game", gameId),
   openDownloadsFolder: () => ipcRenderer.invoke("launcher:open-downloads-folder"),
   openGameInstallFolder: (gameId) => ipcRenderer.invoke("launcher:open-game-install-folder", gameId),
+  openExternalUrl: (urlValue) => ipcRenderer.invoke("launcher:open-external-url", urlValue),
   authGetSession: () => ipcRenderer.invoke("launcher:auth-get-session"),
   authLoginDiscord: () => ipcRenderer.invoke("launcher:auth-login-discord"),
   authLogout: () => ipcRenderer.invoke("launcher:auth-logout"),
