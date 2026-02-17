@@ -1665,14 +1665,141 @@ function toYoutubeWatchUrl(urlValue) {
   return `https://www.youtube.com/watch?${params.toString()}`;
 }
 
-function isDirectVideo(urlValue) {
+const DIRECT_VIDEO_EXTENSIONS = new Set(["mp4", "webm", "ogg", "mov", "m4v"]);
+
+function tryDecodeUriComponent(value) {
+  const raw = String(value || "");
+  if (!raw) return "";
+  try {
+    return decodeURIComponent(raw);
+  } catch (_error) {
+    return raw;
+  }
+}
+
+function extractDirectVideoExtension(value) {
+  const raw = String(value || "");
+  if (!raw) return "";
+
+  const candidates = [raw, tryDecodeUriComponent(raw)];
+  for (const candidate of candidates) {
+    const match = candidate.match(/\.([a-z0-9]{3,4})(?=$|[^a-z0-9])/i);
+    const ext = String(match?.[1] || "").toLowerCase();
+    if (DIRECT_VIDEO_EXTENSIONS.has(ext)) {
+      return ext;
+    }
+  }
+
+  return "";
+}
+
+function extensionToVideoMimeType(extension) {
+  const ext = String(extension || "").toLowerCase();
+  if (ext === "mp4") return "video/mp4";
+  if (ext === "webm") return "video/webm";
+  if (ext === "ogg") return "video/ogg";
+  if (ext === "mov") return "video/quicktime";
+  if (ext === "m4v") return "video/x-m4v";
+  return "";
+}
+
+function parseDirectVideoInfo(urlValue) {
   const value = String(urlValue || "").trim();
-  if (!value) return false;
-  if (/\.(mp4|webm|ogg|mov)(\?.*)?(#.*)?$/i.test(value)) return true;
+  if (!value) {
+    return {
+      isDirect: false,
+      mimeType: ""
+    };
+  }
+
+  const rawExtension = extractDirectVideoExtension(value);
+  if (rawExtension) {
+    return {
+      isDirect: true,
+      mimeType: extensionToVideoMimeType(rawExtension)
+    };
+  }
+
   const lower = value.toLowerCase();
-  if (lower.includes("response-content-type=video%2f") || lower.includes("response-content-type=video/")) return true;
-  if (lower.includes("content-type=video%2f") || lower.includes("content-type=video/")) return true;
-  return false;
+  if (lower.includes("response-content-type=video%2f") || lower.includes("response-content-type=video/")) {
+    const mimeMatch = lower.match(/response-content-type=([^&#]+)/i);
+    const decodedMime = tryDecodeUriComponent(mimeMatch?.[1] || "").toLowerCase();
+    const mimeType = decodedMime.startsWith("video/") ? decodedMime : "";
+    return { isDirect: true, mimeType };
+  }
+  if (lower.includes("content-type=video%2f") || lower.includes("content-type=video/")) {
+    const mimeMatch = lower.match(/content-type=([^&#]+)/i);
+    const decodedMime = tryDecodeUriComponent(mimeMatch?.[1] || "").toLowerCase();
+    const mimeType = decodedMime.startsWith("video/") ? decodedMime : "";
+    return { isDirect: true, mimeType };
+  }
+
+  const candidateUrl = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//i.test(value)
+    ? value
+    : `https://${value.replace(/^\/+/, "")}`;
+
+  try {
+    const parsed = new URL(candidateUrl);
+    const pathExtension = extractDirectVideoExtension(parsed.pathname);
+    if (pathExtension) {
+      return {
+        isDirect: true,
+        mimeType: extensionToVideoMimeType(pathExtension)
+      };
+    }
+
+    const queryValues = [];
+    for (const [key, queryValue] of parsed.searchParams.entries()) {
+      const lowerKey = String(key || "").toLowerCase();
+      if (
+        [
+          "filename",
+          "file",
+          "name",
+          "download",
+          "attachment",
+          "response-content-disposition",
+          "response-content-type",
+          "content-type"
+        ].includes(lowerKey)
+      ) {
+        queryValues.push(queryValue);
+      }
+    }
+
+    for (const queryValue of queryValues) {
+      const maybeMime = tryDecodeUriComponent(queryValue).toLowerCase();
+      if (maybeMime.startsWith("video/")) {
+        return { isDirect: true, mimeType: maybeMime };
+      }
+      const queryExtension = extractDirectVideoExtension(queryValue);
+      if (queryExtension) {
+        return {
+          isDirect: true,
+          mimeType: extensionToVideoMimeType(queryExtension)
+        };
+      }
+    }
+
+    const hashExtension = extractDirectVideoExtension(parsed.hash);
+    if (hashExtension) {
+      return {
+        isDirect: true,
+        mimeType: extensionToVideoMimeType(hashExtension)
+      };
+    }
+  } catch (_error) {
+    // Non-URL values fall back to false.
+  }
+
+  return {
+    isDirect: false,
+    mimeType: ""
+  };
+}
+
+function isDirectVideo(urlValue) {
+  return parseDirectVideoInfo(urlValue).isDirect;
 }
 
 function hasGameVideoSource(game) {
@@ -2803,10 +2930,14 @@ function renderVideo(game) {
     return;
   }
 
-  if (isDirectVideo(source)) {
+  const directVideoInfo = parseDirectVideoInfo(source);
+  if (directVideoInfo.isDirect) {
+    const sourceType = directVideoInfo.mimeType
+      ? ` type="${escapeHtml(directVideoInfo.mimeType)}"`
+      : "";
     setDetailsVideoMarkup(`video:${game.id}:${source}`, `
-      <video controls preload="metadata" poster="${escapeHtml(getBannerImage(game))}">
-        <source src="${escapeHtml(source)}" />
+      <video controls playsinline preload="metadata" poster="${escapeHtml(getBannerImage(game))}">
+        <source src="${escapeHtml(source)}"${sourceType} />
       </video>
     `);
     return;
