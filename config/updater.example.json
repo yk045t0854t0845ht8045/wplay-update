@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "owner": "SEU_USUARIO_OU_ORG",
+  "repo": "SEU_REPO_DO_LAUNCHER",
+  "channel": "latest",
+  "updateOnLaunch": true,
+  "autoDownload": true,
+  "checkIntervalMinutes": 1,
+  "allowPrerelease": false,
+  "allowDowngrade": false
+}

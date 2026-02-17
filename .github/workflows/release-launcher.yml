@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 jobs:
   build-and-release:
@@ -30,7 +31,14 @@ jobs:
       - name: Build renderer
         run: npm run next:build
 
+      - name: Release context
+        run: |
+          echo "Repo: ${{ github.repository }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Tag: ${{ github.ref_name }}"
+
       - name: Build and publish (GitHub Release)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win --x64 --publish always -c.publish.provider=github
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npx electron-builder --win --x64 --publish always -c.publish.provider=github -c.publish.owner=yk045t0854t0845ht8045 -c.publish.repo=wplay-update -c.publish.releaseType=release

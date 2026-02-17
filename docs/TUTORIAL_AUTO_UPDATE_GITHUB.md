@@ -53,20 +53,27 @@ Fluxo:
 
 Pronto: o GitHub Actions gera release automaticamente.
 
+Se a pipeline falhar no GitHub Actions, faca fallback local:
+
+```powershell
+$env:GH_TOKEN="SEU_TOKEN_GITHUB"
+npm run release:github
+```
+
 ## 4) Comportamento no launcher
 
 - Ao abrir: checa update em segundo plano.
 - Em execucao: checa periodicamente (`checkIntervalMinutes`).
 - Se achar update: aparece icone verde ao lado do sino.
 - Quando download terminar: clicar no icone abre modal para reiniciar e atualizar.
+- Com `checkIntervalMinutes: 1`, launcher aberto detecta update em ate ~1 minuto.
 
 ## 5) Comando alternativo local (sem Actions)
 
 Se quiser publicar release direto da sua maquina:
 
 ```powershell
-$env:GH_TOKEN="SEU_TOKEN_GITHUB"
-npm run release:github
+
 ```
 
 ## 6) Erros comuns
