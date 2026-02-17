@@ -509,14 +509,78 @@ async function ensurePersistedAuthConfigFile() {
     const steamWebApiKey = normalizeSteamWebApiKey(config.steamWebApiKey || config.steam_api_key);
     return Boolean((url && anonKey) || steamWebApiKey);
   };
+  const getNormalizedFields = (config) => {
+    if (!config || typeof config !== "object") {
+      return {
+        supabaseUrl: "",
+        supabaseAnonKey: "",
+        redirectUrl: "",
+        steamWebApiKey: ""
+      };
+    }
+    return {
+      supabaseUrl: normalizeSupabaseUrl(sanitizeAuthConfigValue(config.supabaseUrl)),
+      supabaseAnonKey: sanitizeAuthConfigValue(config.supabaseAnonKey),
+      redirectUrl: normalizeAuthRedirectUrl(sanitizeAuthConfigValue(config.redirectUrl)),
+      steamWebApiKey: normalizeSteamWebApiKey(config.steamWebApiKey || config.steam_api_key)
+    };
+  };
+  const mergeMissingAuthFields = (targetConfig, sourceConfig) => {
+    if (!targetConfig || typeof targetConfig !== "object" || !sourceConfig || typeof sourceConfig !== "object") {
+      return false;
+    }
 
-  const existingUserConfig = await readCandidate(userAuthConfigPath);
-  if (isConfigured(existingUserConfig)) {
-    return userAuthConfigPath;
-  }
+    const targetFields = getNormalizedFields(targetConfig);
+    const sourceFields = getNormalizedFields(sourceConfig);
+    let changed = false;
+
+    if (!targetFields.supabaseUrl && sourceFields.supabaseUrl) {
+      targetConfig.supabaseUrl = sourceFields.supabaseUrl;
+      changed = true;
+    }
+    if (!targetFields.supabaseAnonKey && sourceFields.supabaseAnonKey) {
+      targetConfig.supabaseAnonKey = sourceFields.supabaseAnonKey;
+      changed = true;
+    }
+    if (!targetFields.redirectUrl && sourceFields.redirectUrl) {
+      targetConfig.redirectUrl = sourceFields.redirectUrl;
+      changed = true;
+    }
+    if (!targetFields.steamWebApiKey && sourceFields.steamWebApiKey) {
+      targetConfig.steamWebApiKey = sourceFields.steamWebApiKey;
+      changed = true;
+    }
+
+    return changed;
+  };
 
   await fsp.mkdir(path.dirname(userAuthConfigPath), { recursive: true });
   const candidateSources = [getBundledAuthConfigPath(), getBundledAuthConfigExamplePath()];
+
+  const existingUserConfig = await readCandidate(userAuthConfigPath);
+  if (existingUserConfig && typeof existingUserConfig === "object") {
+    const mergedUserConfig = { ...existingUserConfig };
+    let changed = false;
+    for (const sourcePath of candidateSources) {
+      if (!(await pathExists(sourcePath))) {
+        continue;
+      }
+      const sourceConfig = await readCandidate(sourcePath);
+      if (!sourceConfig) {
+        continue;
+      }
+      changed = mergeMissingAuthFields(mergedUserConfig, sourceConfig) || changed;
+    }
+
+    if (changed) {
+      await fsp.writeFile(userAuthConfigPath, JSON.stringify(mergedUserConfig, null, 2), "utf8");
+    }
+
+    if (isConfigured(mergedUserConfig)) {
+      return userAuthConfigPath;
+    }
+  }
+
   let fallbackSourcePath = "";
   for (const sourcePath of candidateSources) {
     if (!(await pathExists(sourcePath))) {
@@ -636,22 +700,29 @@ function readAuthConfigFileSync() {
     return {};
   }
 
+  const merged = {};
   for (const parsedCandidate of parsedCandidates) {
-    const steamWebApiKey = normalizeSteamWebApiKey(parsedCandidate.steamWebApiKey || parsedCandidate.steam_api_key);
-    if (steamWebApiKey) {
-      return parsedCandidate;
+    const source = parsedCandidate && typeof parsedCandidate === "object" ? parsedCandidate : {};
+    const supabaseUrl = normalizeSupabaseUrl(sanitizeAuthConfigValue(source.supabaseUrl));
+    const supabaseAnonKey = sanitizeAuthConfigValue(source.supabaseAnonKey);
+    const redirectUrl = normalizeAuthRedirectUrl(sanitizeAuthConfigValue(source.redirectUrl));
+    const steamWebApiKey = normalizeSteamWebApiKey(source.steamWebApiKey || source.steam_api_key);
+
+    if (!sanitizeAuthConfigValue(merged.supabaseUrl) && supabaseUrl) {
+      merged.supabaseUrl = supabaseUrl;
+    }
+    if (!sanitizeAuthConfigValue(merged.supabaseAnonKey) && supabaseAnonKey) {
+      merged.supabaseAnonKey = supabaseAnonKey;
+    }
+    if (!sanitizeAuthConfigValue(merged.redirectUrl) && redirectUrl) {
+      merged.redirectUrl = redirectUrl;
+    }
+    if (!normalizeSteamWebApiKey(merged.steamWebApiKey || merged.steam_api_key) && steamWebApiKey) {
+      merged.steamWebApiKey = steamWebApiKey;
     }
   }
 
-  for (const parsedCandidate of parsedCandidates) {
-    const url = normalizeSupabaseUrl(sanitizeAuthConfigValue(parsedCandidate.supabaseUrl));
-    const anonKey = sanitizeAuthConfigValue(parsedCandidate.supabaseAnonKey);
-    if (url && anonKey) {
-      return parsedCandidate;
-    }
-  }
-
-  return parsedCandidates[0];
+  return merged;
 }
 
 function normalizeSupabaseUrl(value) {
