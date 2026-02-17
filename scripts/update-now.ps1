@@ -197,6 +197,10 @@ function Resolve-GitHubApiToken {
   return ""
 }
 
+function Get-PowerShellTokenHint {
+  return "No PowerShell, use: `$env:GH_TOKEN='SEU_TOKEN' ; `$env:GITHUB_TOKEN=`$env:GH_TOKEN"
+}
+
 function Get-LatestWorkflowRunInfo {
   param(
     [Parameter(Mandatory = $true)][string]$Owner,
@@ -495,7 +499,10 @@ function Wait-ReleaseByTag {
           continue
         }
         if ($statusCode -eq 401) {
-          Write-Host "Token da API GitHub invalido/expirado (401). Continuando em modo publico..." -ForegroundColor Yellow
+          Write-Host (
+            "Token da API GitHub invalido/expirado (401). Continuando em modo publico... " +
+            (Get-PowerShellTokenHint)
+          ) -ForegroundColor Yellow
           $allowAuthenticatedApi = $false
           $ApiToken = ""
           $apiHeaders = New-GitHubApiHeaders -Token ""
@@ -639,7 +646,13 @@ try {
     }
   } else {
     Write-Host ""
-    Write-Host "Modo workflow ativo: sem token local. Publicacao sera feita via GitHub Actions." -ForegroundColor Yellow
+    Write-Host "Modo workflow ativo: publicacao sera feita via GitHub Actions." -ForegroundColor Yellow
+    if ($GitHubToken -or $env:GH_TOKEN -or $env:GITHUB_TOKEN) {
+      Write-Host "Token detectado para consultas da API durante o monitoramento da release." -ForegroundColor DarkCyan
+    } else {
+      Write-Host "Sem token para API. O monitoramento usara fallback publico da release." -ForegroundColor DarkCyan
+      Write-Host (Get-PowerShellTokenHint) -ForegroundColor DarkGray
+    }
   }
 
   if ($Mode -eq "workflow") {
@@ -689,7 +702,10 @@ try {
     } catch {
       $statusCode = Get-HttpStatusCodeFromError -ErrorRecord $_
       if ($statusCode -eq 401) {
-        Write-Host "Token da API GitHub invalido/expirado. Usando fallback publico da release." -ForegroundColor Yellow
+        Write-Host (
+          "Token da API GitHub invalido/expirado. Usando fallback publico da release. " +
+          (Get-PowerShellTokenHint)
+        ) -ForegroundColor Yellow
         $apiToken = ""
       } else {
         Write-Host "API autenticada indisponivel no momento. Usando fallback publico da release." -ForegroundColor Yellow
