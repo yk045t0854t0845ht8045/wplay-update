@@ -2761,8 +2761,8 @@ function renderVideo(game) {
   const youtubeEmbed = toYoutubeEmbed(source);
   if (youtubeEmbed) {
     const youtubeWatchUrl = toYoutubeWatchUrl(source);
-    const watchPlayerUrl = youtubeWatchUrl
-      ? `${youtubeWatchUrl}${youtubeWatchUrl.includes("?") ? "&" : "?"}autoplay=0&hl=pt-BR`
+    const embedPlayerUrl = youtubeEmbed
+      ? `${youtubeEmbed}${youtubeEmbed.includes("?") ? "&" : "?"}autoplay=0&hl=pt-BR`
       : "";
     const videoActions = youtubeWatchUrl
       ? `
@@ -2777,11 +2777,11 @@ function renderVideo(game) {
     setDetailsVideoMarkup(`youtube:${game.id}:${youtubeEmbed}`, `
       <div class="video-embed-shell video-youtube-shell">
         ${
-          watchPlayerUrl
+          embedPlayerUrl
             ? `
               <webview
                 class="video-youtube-webview"
-                src="${escapeHtml(watchPlayerUrl)}"
+                src="${escapeHtml(embedPlayerUrl)}"
                 partition="persist:wplay-youtube"
                 allowfullscreen
               ></webview>

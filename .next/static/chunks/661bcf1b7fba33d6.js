@@ -276,7 +276,7 @@ Deseja reiniciar agora para aplicar a atualizacao sem reinstalar seus jogos?`:"U
       <div class="video-fallback">
         <img src="${tw(tM(e))}" alt="Preview de ${tw(e.name)}" />
       </div>
-    `);let o=function(e){let t=tR(e);if(!t?.videoId)return"";let a=new URLSearchParams;return a.set("rel","0"),a.set("playsinline","1"),a.set("modestbranding","1"),a.set("controls","1"),a.set("iv_load_policy","3"),a.set("fs","1"),t.list&&a.set("list",t.list),t.startSeconds>0&&a.set("start",String(t.startSeconds)),`https://www.youtube.com/embed/${t.videoId}?${a.toString()}`}(i);if(o){let t=function(e){let t=tR(e);if(!t?.videoId)return"";let a=new URLSearchParams;return a.set("v",t.videoId),t.list&&a.set("list",t.list),t.startSeconds>0&&a.set("t",String(t.startSeconds)),`https://www.youtube.com/watch?${a.toString()}`}(i),a=t?`${t}${t.includes("?")?"&":"?"}autoplay=0&hl=pt-BR`:"",n=t?`
+    `);let o=function(e){let t=tR(e);if(!t?.videoId)return"";let a=new URLSearchParams;return a.set("rel","0"),a.set("playsinline","1"),a.set("modestbranding","1"),a.set("controls","1"),a.set("iv_load_policy","3"),a.set("fs","1"),t.list&&a.set("list",t.list),t.startSeconds>0&&a.set("start",String(t.startSeconds)),`https://www.youtube.com/embed/${t.videoId}?${a.toString()}`}(i);if(o){let t=function(e){let t=tR(e);if(!t?.videoId)return"";let a=new URLSearchParams;return a.set("v",t.videoId),t.list&&a.set("list",t.list),t.startSeconds>0&&a.set("t",String(t.startSeconds)),`https://www.youtube.com/watch?${a.toString()}`}(i),a=o?`${o}${o.includes("?")?"&":"?"}autoplay=0&hl=pt-BR`:"",n=t?`
           <div class="video-actions-floating">
             <button class="video-open-youtube-btn" type="button" data-open-youtube-url="${tw(t)}">
               YouTube

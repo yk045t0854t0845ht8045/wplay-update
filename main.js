@@ -394,13 +394,8 @@ function createWindow() {
       const value = String(targetUrl || "").trim();
       if (!value) return;
 
-      try {
-        const parsed = new URL(value);
-        if (isYoutubePlaybackHost(parsed.hostname)) {
-          return;
-        }
-      } catch (_error) {
-        // Fall through and block unknown targets.
+      if (isAllowedYoutubeWebviewNavigation(value)) {
+        return;
       }
 
       event.preventDefault();
@@ -5423,18 +5418,20 @@ function isYoutubeHost(hostname) {
   );
 }
 
-function isYoutubePlaybackHost(hostname) {
-  const host = String(hostname || "").toLowerCase().trim();
-  if (!host) return false;
-  if (isYoutubeHost(host)) return true;
-  return (
-    host === "ytimg.com" ||
-    host.endsWith(".ytimg.com") ||
-    host === "googlevideo.com" ||
-    host.endsWith(".googlevideo.com") ||
-    host === "youtubei.googleapis.com" ||
-    host.endsWith(".youtubei.googleapis.com")
-  );
+function isAllowedYoutubeWebviewNavigation(urlValue) {
+  const value = String(urlValue || "").trim();
+  if (!value) return false;
+
+  try {
+    const parsed = new URL(value);
+    if (!isYoutubeHost(parsed.hostname)) {
+      return false;
+    }
+    const pathValue = String(parsed.pathname || "");
+    return pathValue === "/embed" || pathValue.startsWith("/embed/");
+  } catch (_error) {
+    return false;
+  }
 }
 
 async function openGameInstallFolder(gameId) {
