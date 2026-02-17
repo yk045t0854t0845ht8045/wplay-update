@@ -82,3 +82,11 @@ set
 ```
 
 Em ate ~5 segundos, o jogo aparece no launcher sem atualizar build.
+
+## 6) Teste pronto: REPO 2 (Google Drive)
+
+Para inserir/atualizar um jogo de teste `REPO 2` usando link `drive.usercontent`, execute:
+
+- `docs/SUPABASE_SQL_REPO2_TESTE.sql`
+
+Esse SQL ja sobe `download_sources` com prioridade para o link direto e fallbacks.

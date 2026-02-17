@@ -117,19 +117,19 @@ const notyf =
         types: [
           {
             type: "success",
-            background: "rgba(23, 24, 30, 0.98)",
+            background: "rgba(26, 26, 32, 0.98)",
             icon: false,
             className: "notyf-theme-success"
           },
           {
             type: "error",
-            background: "rgba(23, 24, 30, 0.98)",
+            background: "rgba(29, 26, 31, 0.98)",
             icon: false,
             className: "notyf-theme-error"
           },
           {
             type: "info",
-            background: "rgba(23, 24, 30, 0.98)",
+            background: "rgba(26, 26, 32, 0.98)",
             icon: false,
             className: "notyf-theme-info"
           }

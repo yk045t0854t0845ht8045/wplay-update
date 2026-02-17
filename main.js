@@ -44,6 +44,8 @@ const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const AUTO_UPDATE_CHECK_COOLDOWN_MS = 45 * 1000;
 const AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS = 15 * 1000;
 const AUTO_UPDATE_WINDOW_READY_CHECK_DELAY_MS = 3500;
+const AUTO_UPDATE_SPLASH_MAX_WAIT_MS = 90 * 1000;
+const AUTO_UPDATE_SPLASH_POLL_INTERVAL_MS = 250;
 const RUNNING_PROCESS_CACHE_TTL_MS = 2500;
 const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 5;
 const CATALOG_MIN_POLL_INTERVAL_SECONDS = 5;
@@ -52,6 +54,8 @@ const CATALOG_DEFAULT_SUPABASE_SCHEMA = "public";
 const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
 
 let mainWindow = null;
+let updateSplashWindow = null;
+let allowUpdateSplashWindowClose = false;
 let authDeepLinkUrlBuffer = "";
 let activeAuthLoginRequest = null;
 let authSessionCache = null;
@@ -144,6 +148,127 @@ function resolveRendererEntryPath() {
   throw new Error("Interface nao encontrada. Rode `npm run next:build` para gerar a pasta `out`.");
 }
 
+function resolveUpdateSplashEntryPath() {
+  const entryPath = path.join(__dirname, "renderer", "update-splash.html");
+  try {
+    if (fs.existsSync(entryPath)) {
+      return entryPath;
+    }
+  } catch (_error) {
+    // Fall through to explicit error.
+  }
+  throw new Error("Tela de update nao encontrada. Arquivo esperado: renderer/update-splash.html");
+}
+
+function createUpdateSplashWindow() {
+  if (updateSplashWindow && !updateSplashWindow.isDestroyed()) {
+    return updateSplashWindow;
+  }
+
+  const windowIconPath = resolveWindowIconPath();
+  allowUpdateSplashWindowClose = false;
+
+  updateSplashWindow = new BrowserWindow({
+    width: 420,
+    height: 560,
+    minWidth: 420,
+    minHeight: 560,
+    maxWidth: 420,
+    maxHeight: 560,
+    resizable: false,
+    movable: true,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    fullscreenable: false,
+    frame: false,
+    autoHideMenuBar: true,
+    title: "WPlay Updater",
+    backgroundColor: "#09090A",
+    icon: windowIconPath,
+    alwaysOnTop: true,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  updateSplashWindow.loadFile(resolveUpdateSplashEntryPath());
+
+  updateSplashWindow.on("close", (event) => {
+    if (!allowUpdateSplashWindowClose) {
+      event.preventDefault();
+    }
+  });
+
+  updateSplashWindow.on("closed", () => {
+    updateSplashWindow = null;
+    allowUpdateSplashWindowClose = false;
+  });
+
+  updateSplashWindow.webContents.on("did-finish-load", () => {
+    sendAutoUpdateStateToWindow(updateSplashWindow);
+  });
+
+  return updateSplashWindow;
+}
+
+function destroyUpdateSplashWindow() {
+  if (!updateSplashWindow || updateSplashWindow.isDestroyed()) {
+    updateSplashWindow = null;
+    allowUpdateSplashWindowClose = false;
+    return;
+  }
+
+  allowUpdateSplashWindowClose = true;
+  try {
+    updateSplashWindow.close();
+  } catch (_error) {
+    // Best effort close.
+  } finally {
+    if (updateSplashWindow && !updateSplashWindow.isDestroyed()) {
+      updateSplashWindow.destroy();
+    }
+    updateSplashWindow = null;
+    allowUpdateSplashWindowClose = false;
+  }
+}
+
+function isAutoUpdateStartupBlockingStatus(statusValue) {
+  const normalizedStatus = String(statusValue || "")
+    .trim()
+    .toLowerCase();
+  return normalizedStatus === "checking" || normalizedStatus === "downloading" || normalizedStatus === "installing";
+}
+
+function shouldUseStartupUpdateSplash() {
+  if (!app.isPackaged) {
+    return false;
+  }
+  if (!autoUpdateConfigSnapshot?.enabled || !autoUpdateConfigSnapshot?.configured) {
+    return false;
+  }
+  return Boolean(autoUpdateConfigSnapshot?.updateOnLaunch);
+}
+
+async function waitForStartupUpdateBlockingStateToFinish(maxWaitMs = AUTO_UPDATE_SPLASH_MAX_WAIT_MS) {
+  const timeoutMs = Math.max(0, Number(maxWaitMs) || 0);
+  if (timeoutMs <= 0) {
+    return true;
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!isAutoUpdateStartupBlockingStatus(autoUpdateState.status)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, AUTO_UPDATE_SPLASH_POLL_INTERVAL_MS));
+  }
+
+  return !isAutoUpdateStartupBlockingStatus(autoUpdateState.status);
+}
+
 function createWindow() {
   const windowIconPath = resolveWindowIconPath();
   mainWindow = new BrowserWindow({
@@ -155,6 +280,7 @@ function createWindow() {
     autoHideMenuBar: true,
     title: "WPlay",
     backgroundColor: "#080808",
+    show: false,
     icon: windowIconPath,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -176,6 +302,10 @@ function createWindow() {
     void checkForLauncherUpdate("focus");
   });
   mainWindow.webContents.on("did-finish-load", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+    }
+    destroyUpdateSplashWindow();
     sendMaximizedState();
     broadcastAutoUpdateState();
     if (autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured) {
@@ -635,11 +765,20 @@ function getPublicAutoUpdateState() {
   };
 }
 
-function broadcastAutoUpdateState() {
-  if (!mainWindow || mainWindow.isDestroyed()) {
+function sendAutoUpdateStateToWindow(targetWindow) {
+  if (!targetWindow || targetWindow.isDestroyed()) {
     return;
   }
-  mainWindow.webContents.send(AUTO_UPDATE_STATE_CHANNEL, getPublicAutoUpdateState());
+  try {
+    targetWindow.webContents.send(AUTO_UPDATE_STATE_CHANNEL, getPublicAutoUpdateState());
+  } catch (_error) {
+    // Ignore send failures for windows being destroyed.
+  }
+}
+
+function broadcastAutoUpdateState() {
+  sendAutoUpdateStateToWindow(mainWindow);
+  sendAutoUpdateStateToWindow(updateSplashWindow);
 }
 
 function setAutoUpdateState(nextPatch, shouldBroadcast = true) {
@@ -3216,6 +3355,18 @@ function normalizeDriveUrlValue(value) {
     .replace(/\\\//g, "/");
 }
 
+function readHtmlAttributeValue(tagText, attributeName) {
+  const tag = String(tagText || "");
+  const name = String(attributeName || "").trim();
+  if (!tag || !name) return "";
+
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>` + "`" + `]+))`, "i");
+  const match = tag.match(pattern);
+  if (!match) return "";
+  return String(match[1] ?? match[2] ?? match[3] ?? "").trim();
+}
+
 function decodeURIComponentSafe(value) {
   const text = String(value || "");
   if (!text) return "";
@@ -3353,6 +3504,14 @@ function detectDriveBlockingReason(bodyText, statusCode = 0) {
     return "Google Drive exibiu pagina de aviso de virus e nao liberou o download automaticamente.";
   }
 
+  if (
+    lower.includes("google drive nao pode fazer a verificacao de virus neste arquivo") ||
+    lower.includes("voce ainda quer fazer o download") ||
+    lower.includes("fazer o download mesmo assim")
+  ) {
+    return "Google Drive exibiu pagina de confirmacao de download (arquivo grande).";
+  }
+
   if (statusCode === 403 || lower.includes("access denied")) {
     return "Google Drive negou acesso ao arquivo. Verifique compartilhamento publico e API key.";
   }
@@ -3397,20 +3556,31 @@ function buildDriveConfirmUrl(html, sourceUrl) {
     return appendDriveResourceKey(decoded, sourceUrl);
   }
 
-  const downloadFormTag = rawHtml.match(/<form[^>]*id=['"]download-form['"][^>]*>/i)?.[0] || "";
+  const downloadFormBlock =
+    rawHtml.match(/<form[^>]*id=['"]download-form['"][^>]*>[\s\S]*?<\/form>/i)?.[0] ||
+    rawHtml.match(/<form[^>]*action=['"][^'"]*(?:drive\.usercontent\.google\.com\/download|drive\.google\.com\/uc)[^'"]*['"][^>]*>[\s\S]*?<\/form>/i)?.[0] ||
+    rawHtml.match(/<form[^>]*>[\s\S]*?(?:id=['"]uc-download-link['"]|fazer o download mesmo assim|download anyway)[\s\S]*?<\/form>/i)?.[0] ||
+    "";
+
+  const downloadFormTag =
+    downloadFormBlock.match(/<form[^>]*>/i)?.[0] ||
+    rawHtml.match(/<form[^>]*id=['"]download-form['"][^>]*>/i)?.[0] ||
+    "";
+
   const formAction =
-    downloadFormTag.match(/action=['"]([^'"]+)['"]/i)?.[1] ||
+    readHtmlAttributeValue(downloadFormTag, "action") ||
     rawHtml.match(/id=['"]download-form['"][^>]*action=['"]([^'"]+)['"]/i)?.[1] ||
     rawHtml.match(/action=['"]([^'"]+)['"][^>]*id=['"]download-form['"]/i)?.[1] ||
     "";
 
   const formInputs = [];
-  const inputTags = [...rawHtml.matchAll(/<input[^>]*>/gi)];
+  const inputSource = downloadFormBlock || rawHtml;
+  const inputTags = [...inputSource.matchAll(/<input[^>]*>/gi)];
   for (const tagMatch of inputTags) {
     const tag = String(tagMatch?.[0] || "");
-    const name = tag.match(/name=['"]([^'"]+)['"]/i)?.[1];
+    const name = readHtmlAttributeValue(tag, "name");
     if (!name) continue;
-    const value = tag.match(/value=['"]([^'"]*)['"]/i)?.[1] || "";
+    const value = readHtmlAttributeValue(tag, "value");
     formInputs.push([name, value]);
   }
 
@@ -5291,11 +5461,28 @@ if (!hasSingleInstanceLock) {
     registerAuthProtocolClient();
     setupAutoUpdater();
 
-    if (autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured && autoUpdateConfigSnapshot?.updateOnLaunch) {
+    const shouldCheckUpdateOnLaunch = Boolean(
+      autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured && autoUpdateConfigSnapshot?.updateOnLaunch
+    );
+    const useStartupUpdateSplash = shouldUseStartupUpdateSplash();
+
+    if (useStartupUpdateSplash) {
+      try {
+        createUpdateSplashWindow();
+      } catch (error) {
+        console.error("Nao foi possivel abrir tela de atualizacao:", error?.message || error);
+      }
+    }
+
+    if (shouldCheckUpdateOnLaunch) {
       await Promise.race([
         checkForLauncherUpdate("startup"),
         new Promise((resolve) => setTimeout(resolve, AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS))
       ]).catch(() => {});
+
+      if (useStartupUpdateSplash && isAutoUpdateStartupBlockingStatus(autoUpdateState.status)) {
+        await waitForStartupUpdateBlockingStateToFinish(AUTO_UPDATE_SPLASH_MAX_WAIT_MS).catch(() => {});
+      }
     }
 
     createWindow();
@@ -5360,5 +5547,6 @@ if (!hasSingleInstanceLock) {
 
   app.on("before-quit", () => {
     clearAutoUpdaterInterval();
+    destroyUpdateSplashWindow();
   });
 }

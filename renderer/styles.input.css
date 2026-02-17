@@ -253,7 +253,7 @@
   }
 
   .profile-badge {
-    @apply relative mt-0.5 h-[68px] w-[68px] overflow-hidden rounded-2xl border border-transparent bg-transparent text-slate-100 transition-all duration-200;
+    @apply relative mt-0.5 h-[64px] w-[64px] overflow-hidden rounded-2xl border border-transparent bg-transparent text-slate-100 transition-all duration-200;
     box-shadow: none;
     cursor: pointer;
   }
@@ -264,7 +264,9 @@
   }
 
   .profile-logo {
-    @apply block h-full w-full object-contain;
+    @apply m-[5%] block h-[90%] w-[90%] rounded-[0.85rem] border object-contain p-[0.34rem];
+    border-color: rgba(255, 255, 255, 0.08);
+    background: #111114;
     filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.28));
   }
 
@@ -609,9 +611,8 @@
   }
 
   .notifications-panel {
-    @apply absolute right-14 top-[52px] z-30 w-[364px] rounded-2xl border p-3.5;
-    border-color: rgba(255, 255, 255, 0.1);
-    background: #111116;
+    @apply absolute right-14 top-[52px] z-30 w-[364px] rounded-2xl border-0 p-3.5;
+    background: #131318;
     box-shadow: 0 22px 48px rgba(2, 8, 18, 0.52);
     backdrop-filter: blur(18px) saturate(1.08);
     overflow: hidden;
@@ -631,21 +632,18 @@
   }
 
   .notifications-clear-btn {
-    @apply rounded-lg border px-2.5 py-1 text-xs font-medium text-slate-200 transition-colors;
-    border-color: rgba(255, 255, 255, 0.14);
-    background: #17171d;
+    @apply rounded-lg border-0 px-2.5 py-1 text-xs font-medium text-slate-200 transition-colors;
+    background: #1a1a20;
     cursor: pointer;
   }
 
   .notifications-clear-btn:hover {
-    border-color: rgba(255, 255, 255, 0.26);
-    background: #1c1c24;
+    background: #202029;
   }
 
   .notifications-empty {
-    @apply rounded-xl border border-dashed px-3 py-4 text-center text-sm text-slate-400;
-    border-color: rgba(255, 255, 255, 0.16);
-    background: #17171d;
+    @apply rounded-xl border-0 px-3 py-4 text-center text-sm text-slate-400;
+    background: #1a1a20;
   }
 
   .notifications-list {
@@ -664,37 +662,33 @@
   }
 
   .notification-item {
-    @apply relative grid grid-cols-[32px_minmax(0,1fr)] items-start gap-2.5 overflow-hidden rounded-xl border px-3 py-2.5;
-    border-color: rgba(255, 255, 255, 0.14);
-    background: #17171d;
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+    @apply relative grid grid-cols-[32px_minmax(0,1fr)] items-start gap-2.5 overflow-hidden rounded-xl border-0 px-3 py-2.5;
+    background: #1a1a20;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
   }
 
   .notification-item.is-success {
-    border-color: rgba(113, 204, 157, 0.4);
+    background: #1a1c20;
   }
 
   .notification-item.is-error {
-    border-color: rgba(244, 138, 138, 0.46);
+    background: #1d1a1f;
   }
 
   .notification-icon-wrap {
     @apply mt-0.5 inline-flex h-8 w-8 items-center justify-center rounded-lg;
     color: #a7cbff;
-    background: rgba(70, 130, 216, 0.2);
-    box-shadow: inset 0 0 0 1px rgba(170, 210, 255, 0.3);
+    background: rgba(70, 130, 216, 0.24);
   }
 
   .notification-item.is-success .notification-icon-wrap {
     color: #77d8a8;
-    background: rgba(52, 120, 78, 0.3);
-    box-shadow: inset 0 0 0 1px rgba(124, 217, 170, 0.32);
+    background: rgba(52, 120, 78, 0.34);
   }
 
   .notification-item.is-error .notification-icon-wrap {
     color: #f8a6a6;
-    background: rgba(120, 45, 58, 0.32);
-    box-shadow: inset 0 0 0 1px rgba(246, 155, 155, 0.28);
+    background: rgba(120, 45, 58, 0.36);
   }
 
   .notification-icon-svg {
@@ -726,7 +720,7 @@
   }
 
   .notification-dismiss-btn {
-    @apply absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-md border border-transparent bg-transparent text-slate-300 transition-all duration-150;
+    @apply absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-md border-0 border-transparent bg-transparent text-slate-300 transition-all duration-150;
     opacity: 0;
     cursor: pointer;
     pointer-events: none;
@@ -744,8 +738,7 @@
 
   .notification-dismiss-btn:hover {
     color: #ffffff;
-    border-color: rgba(172, 209, 252, 0.26);
-    background: rgba(30, 43, 64, 0.88);
+    background: rgba(255, 255, 255, 0.08);
   }
 
   .stage-header {
@@ -1991,6 +1984,10 @@
   .notyf {
     z-index: 140 !important;
     pointer-events: none;
+    position: fixed !important;
+    inset: auto 18px 18px auto !important;
+    left: auto !important;
+    top: auto !important;
     right: 18px !important;
     bottom: 18px !important;
     width: min(420px, calc(100vw - 24px));
@@ -2009,8 +2006,8 @@
     min-width: 320px;
     max-width: 420px;
     border-radius: 16px;
-    border: 1px solid rgba(165, 206, 252, 0.32);
-    background: linear-gradient(170deg, rgba(13, 21, 35, 0.98), rgba(11, 17, 28, 0.98)) !important;
+    border: 0;
+    background: #1a1a20 !important;
     box-shadow: 0 18px 42px rgba(2, 8, 18, 0.5);
     transform-origin: bottom right;
     transform: translateY(calc(var(--stack-shift-y, 0px) * -1)) scale(var(--stack-scale, 1));
@@ -2035,14 +2032,14 @@
     @apply text-sm leading-relaxed text-slate-100;
     margin: 0 !important;
     width: 100%;
-    padding: 11px 40px 11px 11px;
+    padding: 0 !important;
   }
 
   .notyf__wrapper {
     align-items: flex-start !important;
     gap: 0 !important;
     min-height: auto !important;
-    padding: 0 !important;
+    padding: 0.75rem !important;
     position: relative;
   }
 
@@ -2057,7 +2054,6 @@
     @apply inline-flex h-8 w-8 items-center justify-center rounded-lg;
     color: #9fc7ff;
     background: rgba(66, 127, 214, 0.24);
-    box-shadow: inset 0 0 0 1px rgba(163, 204, 252, 0.34);
   }
 
   .toast-icon-svg {
@@ -2088,6 +2084,9 @@
     margin: 0 !important;
     opacity: 0;
     pointer-events: none;
+    border: 0 !important;
+    background: transparent !important;
+    color: rgba(219, 231, 247, 0.92) !important;
     transition: opacity 0.18s ease;
   }
 
@@ -2101,46 +2100,47 @@
     width: 20px;
     height: 20px;
     border-radius: 6px;
-    border: 1px solid transparent;
+    border: 0;
     background: transparent;
-    color: #dce8f8;
-    transition: all 0.16s ease;
+    color: inherit;
+    transition: background 0.16s ease, color 0.16s ease;
+  }
+
+  .notyf__dismiss-btn::before,
+  .notyf__dismiss-btn::after {
+    background: currentColor !important;
   }
 
   .notyf__dismiss-btn:hover {
-    border-color: rgba(171, 210, 255, 0.32);
-    background: rgba(29, 42, 63, 0.9);
+    background: rgba(255, 255, 255, 0.08);
     color: #ffffff;
   }
 
   .notyf-theme-success {
-    border-color: rgba(118, 212, 167, 0.44) !important;
+    background: #1a1c20 !important;
   }
 
   .notyf-theme-success .toast-icon-wrap {
     color: #78d9a9;
-    background: rgba(56, 126, 86, 0.32);
-    box-shadow: inset 0 0 0 1px rgba(122, 215, 168, 0.32);
+    background: rgba(56, 126, 86, 0.34);
   }
 
   .notyf-theme-error {
-    border-color: rgba(241, 151, 151, 0.48) !important;
+    background: #1d1a1f !important;
   }
 
   .notyf-theme-error .toast-icon-wrap {
     color: #f8a6a6;
-    background: rgba(129, 50, 63, 0.34);
-    box-shadow: inset 0 0 0 1px rgba(246, 155, 155, 0.3);
+    background: rgba(129, 50, 63, 0.36);
   }
 
   .notyf-theme-info {
-    border-color: rgba(159, 202, 252, 0.46) !important;
+    background: #1a1a20 !important;
   }
 
   .notyf-theme-info .toast-icon-wrap {
     color: #a4cbff;
     background: rgba(66, 127, 214, 0.24);
-    box-shadow: inset 0 0 0 1px rgba(163, 204, 252, 0.34);
   }
 }
 

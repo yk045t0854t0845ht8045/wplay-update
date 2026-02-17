@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WPlay Updater</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #09090a;
+        --panel: #111114;
+        --panel-border: rgba(255, 255, 255, 0.08);
+        --text: #f4f4f5;
+        --muted: #b6b6bf;
+        --track: rgba(255, 255, 255, 0.1);
+        --fill: #ffffff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: radial-gradient(circle at 20% 0%, rgba(255, 255, 255, 0.08), rgba(9, 9, 10, 0.98) 36%), var(--bg);
+        font-family: "Segoe UI", "Inter", sans-serif;
+        color: var(--text);
+        overflow: hidden;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .updater-shell {
+        width: 100%;
+        max-width: 360px;
+        min-height: 500px;
+        border-radius: 24px;
+        border: 1px solid var(--panel-border);
+        background: linear-gradient(175deg, rgba(18, 18, 22, 0.95), rgba(12, 12, 14, 0.95));
+        box-shadow: 0 28px 58px rgba(0, 0, 0, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+        padding: 34px 28px 30px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+      }
+
+      .logo-wrap {
+        width: 100%;
+        height: 132px;
+        display: grid;
+        place-items: center;
+      }
+
+      .logo-wrap img {
+        width: 100%;
+        max-width: 240px;
+        max-height: 110px;
+        object-fit: contain;
+        filter: drop-shadow(0 12px 24px rgba(0, 0, 0, 0.38));
+      }
+
+      h1 {
+        margin: 4px 0 0;
+        font-size: 28px;
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        text-align: center;
+      }
+
+      p {
+        margin: 0;
+        text-align: center;
+      }
+
+      .subtitle {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .progress-root {
+        margin-top: 6px;
+        width: 100%;
+        display: grid;
+        gap: 10px;
+      }
+
+      .progress-track {
+        width: 100%;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--track);
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        display: block;
+        width: 6%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, rgba(255, 255, 255, 0.72), var(--fill));
+        transition: width 180ms ease;
+      }
+
+      .progress-label {
+        color: var(--muted);
+        font-size: 13px;
+        min-height: 18px;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="updater-shell" role="status" aria-live="polite">
+      <div class="logo-wrap">
+        <img src="./assets/logo.png" alt="WPlay" />
+      </div>
+      <h1>Atualizando Sistema</h1>
+      <p class="subtitle" id="statusDescription">Atualizando sistema, aguarde...</p>
+      <section class="progress-root">
+        <div class="progress-track">
+          <span class="progress-fill" id="progressFill"></span>
+        </div>
+        <p class="progress-label" id="progressLabel">Preparando atualizacao...</p>
+      </section>
+    </main>
+
+    <script>
+      (() => {
+        const statusDescription = document.getElementById("statusDescription");
+        const progressFill = document.getElementById("progressFill");
+        const progressLabel = document.getElementById("progressLabel");
+
+        const clampPercent = (value) => {
+          const numeric = Number(value);
+          if (!Number.isFinite(numeric)) return 0;
+          return Math.max(0, Math.min(100, numeric));
+        };
+
+        const getDescription = (state) => {
+          const status = String(state?.status || "").toLowerCase();
+          if (status === "checking") return "Verificando atualizacoes do launcher...";
+          if (status === "downloading") return "Baixando atualizacao. Aguarde alguns instantes...";
+          if (status === "installing") return "Aplicando atualizacao no launcher...";
+          if (status === "downloaded") return "Atualizacao pronta. Reiniciando launcher...";
+          if (status === "idle") return "Sistema atualizado. Abrindo launcher...";
+          if (status === "error") return "Atualizacao temporariamente indisponivel. Abrindo launcher...";
+          return "Atualizando sistema, aguarde...";
+        };
+
+        const getProgressLabel = (state) => {
+          const status = String(state?.status || "").toLowerCase();
+          const percent = clampPercent(state?.progressPercent);
+          if (status === "downloading") {
+            return `Download ${percent.toFixed(1)}%`;
+          }
+          if (status === "checking") return "Checando nova versao...";
+          if (status === "downloaded") return "Atualizacao baixada";
+          if (status === "installing") return "Finalizando atualizacao...";
+          if (status === "idle") return "Versao atualizada";
+          if (status === "error") return "Sem update neste momento";
+          return "Preparando atualizacao...";
+        };
+
+        const getProgressPercent = (state) => {
+          const status = String(state?.status || "").toLowerCase();
+          if (status === "downloading") return clampPercent(state?.progressPercent);
+          if (status === "downloaded" || status === "installing" || status === "idle") return 100;
+          if (status === "checking") return 18;
+          return 8;
+        };
+
+        const render = (payload) => {
+          statusDescription.textContent = getDescription(payload);
+          progressLabel.textContent = getProgressLabel(payload);
+          progressFill.style.width = `${getProgressPercent(payload)}%`;
+        };
+
+        const bootstrap = async () => {
+          try {
+            if (window.launcherApi?.autoUpdateGetState) {
+              const state = await window.launcherApi.autoUpdateGetState();
+              render(state || {});
+            }
+          } catch (_error) {
+            render({});
+          }
+        };
+
+        if (window.launcherApi?.onAutoUpdateState) {
+          window.launcherApi.onAutoUpdateState((payload) => render(payload || {}));
+        }
+
+        bootstrap();
+      })();
+    </script>
+  </body>
+</html>
