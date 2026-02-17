@@ -2569,7 +2569,7 @@ function renderLibraryGrid() {
             <path d="M8.4 14.2H13.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
           </svg>
         </div>
-        <p class="library-empty-text">Sua biblioteca [34] esta vazia. Clique em Add to Library ou Download Game.</p>
+        <p class="library-empty-text">Sua biblioteca esta vazia. Clique em Add to Library ou Download Game.</p>
         <button class="library-empty-btn" type="button" data-go-store="true">Ir para Store</button>
       </div>
     `;
@@ -3800,7 +3800,7 @@ function installEventBindings() {
       addToLibrary(payload.gameId);
       await refreshGames();
       fireConfettiFromElement(navLibraryBtn, true);
-      setStatus("Download finalizado. O jogo foi para Sua biblioteca [34].");
+      setStatus("Download finalizado. O jogo foi para Sua biblioteca.");
       const installedGame = getGameById(payload.gameId);
       notify(
         "success",
