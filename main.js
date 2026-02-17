@@ -20,6 +20,7 @@ const TEMP_DIR_NAME = "_wyzer_temp";
 const MANIFEST_FILE_NAME = ".wyzer_manifest.json";
 const RUNTIME_CONFIG_FILE_NAME = "launcher.runtime.json";
 const AUTH_CONFIG_FILE_NAME = "auth.json";
+const AUTH_CONFIG_EXAMPLE_FILE_NAME = "auth.example.json";
 const UPDATER_CONFIG_FILE_NAME = "updater.json";
 const INSTALL_PROGRESS_CHANNEL = "launcher:install-progress";
 const AUTO_UPDATE_STATE_CHANNEL = "launcher:auto-update-state";
@@ -51,6 +52,7 @@ let autoUpdateIntervalId = null;
 let autoUpdateConfigSnapshot = null;
 let autoUpdateFeedValidationCompleted = false;
 let autoUpdateFeedValidationInFlight = null;
+let autoUpdateLastCheckOrigin = "";
 const activeInstalls = new Map();
 const activeUninstalls = new Set();
 const installSizeCache = new Map();
@@ -161,8 +163,16 @@ function getRuntimeConfigPath() {
   return path.join(app.getPath("userData"), RUNTIME_CONFIG_FILE_NAME);
 }
 
-function getAuthConfigPath() {
+function getBundledAuthConfigPath() {
   return path.join(app.getAppPath(), "config", AUTH_CONFIG_FILE_NAME);
+}
+
+function getBundledAuthConfigExamplePath() {
+  return path.join(app.getAppPath(), "config", AUTH_CONFIG_EXAMPLE_FILE_NAME);
+}
+
+function getUserAuthConfigPath() {
+  return path.join(app.getPath("userData"), "config", AUTH_CONFIG_FILE_NAME);
 }
 
 function getUpdaterConfigPath() {
@@ -182,6 +192,66 @@ function readRuntimeConfigSync() {
   }
 }
 
+async function ensurePersistedAuthConfigFile() {
+  const userAuthConfigPath = getUserAuthConfigPath();
+  const readCandidate = async (filePath) => {
+    try {
+      if (!(await pathExists(filePath))) {
+        return null;
+      }
+      const raw = await fsp.readFile(filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        return parsed;
+      }
+      return null;
+    } catch (_error) {
+      return null;
+    }
+  };
+  const isConfigured = (config) => {
+    if (!config || typeof config !== "object") {
+      return false;
+    }
+    const url = normalizeSupabaseUrl(sanitizeAuthConfigValue(config.supabaseUrl));
+    const anonKey = sanitizeAuthConfigValue(config.supabaseAnonKey);
+    return Boolean(url && anonKey);
+  };
+
+  const existingUserConfig = await readCandidate(userAuthConfigPath);
+  if (isConfigured(existingUserConfig)) {
+    return userAuthConfigPath;
+  }
+
+  await fsp.mkdir(path.dirname(userAuthConfigPath), { recursive: true });
+  const candidateSources = [getBundledAuthConfigPath(), getBundledAuthConfigExamplePath()];
+  let fallbackSourcePath = "";
+  for (const sourcePath of candidateSources) {
+    if (!(await pathExists(sourcePath))) {
+      continue;
+    }
+    if (!fallbackSourcePath) {
+      fallbackSourcePath = sourcePath;
+    }
+    const sourceConfig = await readCandidate(sourcePath);
+    if (!isConfigured(sourceConfig)) {
+      continue;
+    }
+    try {
+      await fsp.copyFile(sourcePath, userAuthConfigPath);
+      return userAuthConfigPath;
+    } catch (_error) {
+      // Try next source.
+    }
+  }
+
+  if (!existingUserConfig && fallbackSourcePath) {
+    await fsp.copyFile(fallbackSourcePath, userAuthConfigPath).catch(() => {});
+  }
+
+  return userAuthConfigPath;
+}
+
 async function writeRuntimeConfig(nextConfig) {
   const current = readRuntimeConfigSync();
   const merged = {
@@ -194,16 +264,35 @@ async function writeRuntimeConfig(nextConfig) {
 }
 
 function readAuthConfigFileSync() {
-  try {
-    const raw = fs.readFileSync(getAuthConfigPath(), "utf8");
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") {
-      return parsed;
+  const candidatePaths = [getUserAuthConfigPath(), getBundledAuthConfigPath(), getBundledAuthConfigExamplePath()];
+  const parsedCandidates = [];
+  for (const candidatePath of candidatePaths) {
+    try {
+      if (!fs.existsSync(candidatePath)) {
+        continue;
+      }
+      const raw = fs.readFileSync(candidatePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        parsedCandidates.push(parsed);
+      }
+    } catch (_error) {
+      // Try next source.
     }
-    return {};
-  } catch (_error) {
+  }
+  if (parsedCandidates.length === 0) {
     return {};
   }
+
+  for (const parsedCandidate of parsedCandidates) {
+    const url = normalizeSupabaseUrl(sanitizeAuthConfigValue(parsedCandidate.supabaseUrl));
+    const anonKey = sanitizeAuthConfigValue(parsedCandidate.supabaseAnonKey);
+    if (url && anonKey) {
+      return parsedCandidate;
+    }
+  }
+
+  return parsedCandidates[0];
 }
 
 function normalizeSupabaseUrl(value) {
@@ -218,6 +307,22 @@ function normalizeSupabaseUrl(value) {
   } catch (_error) {
     return "";
   }
+}
+
+function sanitizeAuthConfigValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const upper = raw.toUpperCase();
+  const compact = upper.replace(/[\s"'`]/g, "");
+  const looksLikePlainPlaceholder = /^(SEU|SUA)[A-Z0-9_-]{0,64}$/.test(compact);
+  const containsTemplateToken =
+    upper.includes("SEU-PROJETO") ||
+    upper.includes("SUA_SUPABASE_ANON_KEY") ||
+    upper.includes("SUPABASE_ANON_KEY");
+  if (looksLikePlainPlaceholder || containsTemplateToken) {
+    return "";
+  }
+  return raw;
 }
 
 function normalizeAuthRedirectUrl(value) {
@@ -236,9 +341,15 @@ function normalizeAuthRedirectUrl(value) {
 
 function resolveAuthConfig() {
   const fileConfig = readAuthConfigFileSync();
-  const supabaseUrl = normalizeSupabaseUrl(process.env.WPLAY_SUPABASE_URL || fileConfig.supabaseUrl);
-  const supabaseAnonKey = String(process.env.WPLAY_SUPABASE_ANON_KEY || fileConfig.supabaseAnonKey || "").trim();
-  const redirectUrl = normalizeAuthRedirectUrl(process.env.WPLAY_AUTH_REDIRECT_URL || fileConfig.redirectUrl);
+  const supabaseUrl = normalizeSupabaseUrl(
+    sanitizeAuthConfigValue(process.env.WPLAY_SUPABASE_URL || fileConfig.supabaseUrl)
+  );
+  const supabaseAnonKey = sanitizeAuthConfigValue(
+    String(process.env.WPLAY_SUPABASE_ANON_KEY || fileConfig.supabaseAnonKey || "")
+  );
+  const redirectUrl = normalizeAuthRedirectUrl(
+    sanitizeAuthConfigValue(process.env.WPLAY_AUTH_REDIRECT_URL || fileConfig.redirectUrl)
+  );
 
   return {
     supabaseUrl,
@@ -250,7 +361,7 @@ function resolveAuthConfig() {
 function assertAuthConfig(authConfig) {
   if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
     throw new Error(
-      "[AUTH_NOT_CONFIGURED] Supabase nao configurado. Preencha config/auth.json com supabaseUrl e supabaseAnonKey."
+      "[AUTH_NOT_CONFIGURED] Supabase nao configurado. Preencha config/auth.json (ou userData/config/auth.json) com supabaseUrl e supabaseAnonKey."
     );
   }
 }
@@ -329,6 +440,27 @@ function normalizeUpdaterOwnerOrRepo(value) {
     .replace(/[^a-zA-Z0-9_.-]/g, "");
 }
 
+function normalizeUpdaterProvider(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["auto", "github", "generic"].includes(normalized)) {
+    return normalized;
+  }
+  return "auto";
+}
+
+function resolveAutoUpdaterProvider(config) {
+  if (!config || typeof config !== "object") {
+    return "github";
+  }
+  if (config.provider === "github" || config.provider === "generic") {
+    return config.provider;
+  }
+  if (config.privateRepo || config.allowPrerelease) {
+    return "github";
+  }
+  return "generic";
+}
+
 function resolveAutoUpdaterConfig() {
   const fileConfig = readUpdaterConfigFileSync();
   const enabled = parseBoolean(process.env.WPLAY_UPDATER_ENABLED ?? fileConfig.enabled, true);
@@ -337,10 +469,15 @@ function resolveAutoUpdaterConfig() {
   const channel = String(process.env.WPLAY_UPDATER_CHANNEL || fileConfig.channel || "latest").trim() || "latest";
   const privateRepo = parseBoolean(process.env.WPLAY_UPDATER_PRIVATE ?? fileConfig.private, false);
   const token = String(process.env.WPLAY_UPDATER_TOKEN || fileConfig.token || "").trim();
+  const provider = normalizeUpdaterProvider(process.env.WPLAY_UPDATER_PROVIDER || fileConfig.provider || "auto");
   const allowPrerelease = parseBoolean(process.env.WPLAY_UPDATER_ALLOW_PRERELEASE ?? fileConfig.allowPrerelease, false);
   const allowDowngrade = parseBoolean(process.env.WPLAY_UPDATER_ALLOW_DOWNGRADE ?? fileConfig.allowDowngrade, false);
   const autoDownload = parseBoolean(process.env.WPLAY_UPDATER_AUTO_DOWNLOAD ?? fileConfig.autoDownload, true);
   const updateOnLaunch = parseBoolean(process.env.WPLAY_UPDATER_ON_LAUNCH ?? fileConfig.updateOnLaunch, true);
+  const autoRestartOnStartup = parseBoolean(
+    process.env.WPLAY_UPDATER_AUTO_RESTART_ON_STARTUP ?? fileConfig.autoRestartOnStartup,
+    true
+  );
   const intervalMinutes = parsePositiveInteger(
     process.env.WPLAY_UPDATER_CHECK_INTERVAL_MINUTES ?? fileConfig.checkIntervalMinutes
   );
@@ -358,10 +495,12 @@ function resolveAutoUpdaterConfig() {
     channel,
     privateRepo,
     token,
+    provider,
     allowPrerelease,
     allowDowngrade,
     autoDownload,
     updateOnLaunch,
+    autoRestartOnStartup,
     checkIntervalMs
   };
 }
@@ -412,6 +551,13 @@ function formatAutoUpdateError(error) {
       `[AUTO_UPDATE_FEED] Release de update nao encontrada em ${repoLabel}. ` +
       "Publique uma release do launcher com latest.yml."
     );
+  }
+
+  if (
+    (lower.includes("403") || lower.includes("429") || lower.includes("rate limit")) &&
+    (lower.includes("github") || lower.includes("forbidden") || lower.includes("api"))
+  ) {
+    return "[AUTO_UPDATE_TEMP] GitHub limitou temporariamente as consultas de update. O launcher tentara novamente automaticamente.";
   }
 
   if (raw.length > 260) {
@@ -487,6 +633,104 @@ function getExpectedUpdateManifestNames(channelValue) {
   return names;
 }
 
+function getGenericUpdateBaseUrl(config) {
+  const owner = String(config?.owner || "").trim();
+  const repo = String(config?.repo || "").trim();
+  if (!owner || !repo) {
+    return "";
+  }
+  return `https://github.com/${owner}/${repo}/releases/latest/download`;
+}
+
+function isRetryableAutoUpdateStatus(status) {
+  return [403, 429, 500, 502, 503, 504].includes(Number(status) || 0);
+}
+
+function buildAutoUpdateRequestHeaders(config) {
+  const headers = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "WPlay-Launcher-Updater"
+  };
+  if (config?.token) {
+    headers.Authorization = `Bearer ${config.token}`;
+  }
+  return headers;
+}
+
+async function probeGenericManifestAvailability(config, expectedManifests) {
+  const baseUrl = getGenericUpdateBaseUrl(config);
+  if (!baseUrl) {
+    return {
+      ok: false,
+      status: 0,
+      retryable: false,
+      noRelease: false,
+      message: "owner/repo invalidos para validar manifest."
+    };
+  }
+
+  const headers = buildAutoUpdateRequestHeaders(config);
+  let sawRetryable = false;
+  let sawNon404Error = false;
+  let lastStatus = 0;
+  let lastMessage = "";
+
+  for (const manifestName of expectedManifests) {
+    const url = `${baseUrl}/${manifestName}`;
+    try {
+      const response = await axios.get(url, {
+        headers,
+        timeout: 20_000,
+        maxRedirects: 6,
+        responseType: "text",
+        transformResponse: [(value) => value],
+        validateStatus: (status) => status >= 200 && status < 500
+      });
+      lastStatus = Number(response.status) || 0;
+
+      if (response.status === 200) {
+        return {
+          ok: true,
+          manifestName,
+          url,
+          status: 200,
+          retryable: false,
+          noRelease: false,
+          message: ""
+        };
+      }
+
+      if (response.status === 404) {
+        continue;
+      }
+
+      if (isRetryableAutoUpdateStatus(response.status)) {
+        sawRetryable = true;
+      } else {
+        sawNon404Error = true;
+      }
+      lastMessage = `HTTP ${response.status} em ${url}`;
+    } catch (error) {
+      const status = Number(error?.response?.status) || 0;
+      lastStatus = status;
+      if (isRetryableAutoUpdateStatus(status)) {
+        sawRetryable = true;
+      } else {
+        sawNon404Error = true;
+      }
+      lastMessage = formatAutoUpdateError(error);
+    }
+  }
+
+  return {
+    ok: false,
+    status: lastStatus,
+    retryable: sawRetryable,
+    noRelease: !sawRetryable && !sawNon404Error,
+    message: lastMessage || "Manifest de update ainda indisponivel."
+  };
+}
+
 async function validateAutoUpdateFeedOnce() {
   if (autoUpdateFeedValidationCompleted) {
     return true;
@@ -503,63 +747,126 @@ async function validateAutoUpdateFeedOnce() {
 
   const owner = String(config.owner || "").trim();
   const repo = String(config.repo || "").trim();
-  const releaseApiUrl = `https://api.github.com/repos/${owner}/${repo}/releases/latest`;
-  const headers = {
-    Accept: "application/vnd.github+json",
-    "User-Agent": "WPlay-Launcher-Updater"
-  };
-  if (config.token) {
-    headers.Authorization = `Bearer ${config.token}`;
-  }
+  const feedProvider = resolveAutoUpdaterProvider(config);
+  const expectedManifests = getExpectedUpdateManifestNames(config.channel);
 
-  autoUpdateFeedValidationInFlight = axios
-    .get(releaseApiUrl, {
-      headers,
-      timeout: 20_000,
-      validateStatus: (status) => status >= 200 && status < 500
-    })
-    .then((response) => {
-      if (response.status === 404) {
+  autoUpdateFeedValidationInFlight = (async () => {
+    if (feedProvider === "generic") {
+      const genericProbe = await probeGenericManifestAvailability(config, expectedManifests);
+      if (genericProbe.ok) {
+        autoUpdateFeedValidationCompleted = true;
+        return true;
+      }
+      if (genericProbe.noRelease) {
         setAutoUpdateNoReleaseState(
           `Sem release de update no repo ${owner}/${repo}. Publique uma release do launcher quando quiser atualizar.`
         );
         return false;
       }
-
-      if (response.status >= 400) {
+      if (genericProbe.retryable) {
         setAutoUpdateState({
-          status: "error",
-          message: "Falha ao validar feed de update.",
-          error: `[AUTO_UPDATE_FEED] GitHub API retornou ${response.status} para ${owner}/${repo}.`,
+          status: "idle",
+          message: "Feed de update temporariamente indisponivel. Tentando novamente em instantes...",
+          error: "",
+          lastCheckedAt: new Date().toISOString()
+        });
+        return false;
+      }
+      setAutoUpdateState({
+        status: "error",
+        message: "Falha ao validar feed de update.",
+        error: `[AUTO_UPDATE_FEED] Nao foi possivel acessar manifest de update em ${owner}/${repo}.`,
+        lastCheckedAt: new Date().toISOString()
+      });
+      return false;
+    }
+
+    const releaseApiUrl = `https://api.github.com/repos/${owner}/${repo}/releases/latest`;
+    const headers = buildAutoUpdateRequestHeaders(config);
+    const response = await axios.get(releaseApiUrl, {
+      headers,
+      timeout: 20_000,
+      validateStatus: (status) => status >= 200 && status < 500
+    });
+
+    if (response.status === 404) {
+      setAutoUpdateNoReleaseState(
+        `Sem release de update no repo ${owner}/${repo}. Publique uma release do launcher quando quiser atualizar.`
+      );
+      return false;
+    }
+
+    if (response.status >= 400) {
+      const fallbackProbe = await probeGenericManifestAvailability(config, expectedManifests);
+      if (fallbackProbe.ok) {
+        autoUpdateFeedValidationCompleted = true;
+        return true;
+      }
+
+      if (response.status === 403 || response.status === 429 || fallbackProbe.retryable) {
+        setAutoUpdateState({
+          status: "idle",
+          message: "GitHub limitou temporariamente a validacao do update. Tentando novamente automaticamente...",
+          error: "",
           lastCheckedAt: new Date().toISOString()
         });
         return false;
       }
 
-      const expectedManifests = getExpectedUpdateManifestNames(config.channel);
-      const assets = Array.isArray(response.data?.assets) ? response.data.assets : [];
-      const hasManifest = assets.some((asset) =>
-        expectedManifests.has(String(asset?.name || "").trim().toLowerCase())
-      );
-
-      if (!hasManifest) {
-        const releaseTag = String(response.data?.tag_name || "").trim() || "(sem tag)";
-        const expectedList = [...expectedManifests].join(" ou ");
-        setAutoUpdateNoReleaseState(
-          `[AUTO_UPDATE_FEED] A release ${releaseTag} em ${owner}/${repo} nao possui ${expectedList}.`
-        );
-        return false;
-      }
-
-      autoUpdateFeedValidationCompleted = true;
-      return true;
-    })
-    .catch((error) => {
-      const formattedError = formatAutoUpdateError(error);
       setAutoUpdateState({
         status: "error",
-        message: "Falha ao validar feed do updater.",
-        error: formattedError,
+        message: "Falha ao validar feed de update.",
+        error: `[AUTO_UPDATE_FEED] GitHub API retornou ${response.status} para ${owner}/${repo}.`,
+        lastCheckedAt: new Date().toISOString()
+      });
+      return false;
+    }
+
+    const assets = Array.isArray(response.data?.assets) ? response.data.assets : [];
+    const hasManifest = assets.some((asset) =>
+      expectedManifests.has(String(asset?.name || "").trim().toLowerCase())
+    );
+
+    if (!hasManifest) {
+      const fallbackProbe = await probeGenericManifestAvailability(config, expectedManifests);
+      if (fallbackProbe.ok) {
+        autoUpdateFeedValidationCompleted = true;
+        return true;
+      }
+
+      const releaseTag = String(response.data?.tag_name || "").trim() || "(sem tag)";
+      const expectedList = [...expectedManifests].join(" ou ");
+      setAutoUpdateNoReleaseState(
+        `[AUTO_UPDATE_FEED] A release ${releaseTag} em ${owner}/${repo} nao possui ${expectedList}.`
+      );
+      return false;
+    }
+
+    autoUpdateFeedValidationCompleted = true;
+    return true;
+  })()
+    .catch(async (error) => {
+      const fallbackProbe = await probeGenericManifestAvailability(config, expectedManifests).catch(() => ({
+        ok: false,
+        retryable: false
+      }));
+      if (fallbackProbe.ok) {
+        autoUpdateFeedValidationCompleted = true;
+        return true;
+      }
+
+      const formattedError = formatAutoUpdateError(error);
+      const transient =
+        fallbackProbe.retryable ||
+        formattedError.toLowerCase().includes("[auto_update_temp]") ||
+        formattedError.toLowerCase().includes("rate limit");
+
+      setAutoUpdateState({
+        status: transient ? "idle" : "error",
+        message: transient
+          ? "Validacao de update temporariamente indisponivel. O launcher continuara tentando automaticamente."
+          : "Falha ao validar feed do updater.",
+        error: transient ? "" : formattedError,
         lastCheckedAt: new Date().toISOString()
       });
       return false;
@@ -623,15 +930,35 @@ function wireAutoUpdaterEventsOnce() {
 
   autoUpdater.on("update-downloaded", (info) => {
     const latestVersion = String(info?.version || "").trim();
+    const shouldAutoRestartAfterStartup =
+      Boolean(autoUpdateConfigSnapshot?.autoRestartOnStartup) && autoUpdateLastCheckOrigin === "startup";
+
     setAutoUpdateState({
       status: "downloaded",
       latestVersion,
       updateDownloaded: true,
       progressPercent: 100,
-      message: "Atualizacao pronta. Clique no icone verde para reiniciar e aplicar.",
+      message: shouldAutoRestartAfterStartup
+        ? "Atualizacao pronta. Reiniciando automaticamente para aplicar..."
+        : "Atualizacao pronta. Clique no icone verde para reiniciar e aplicar.",
       error: "",
       lastCheckedAt: new Date().toISOString()
     });
+
+    if (shouldAutoRestartAfterStartup) {
+      setTimeout(() => {
+        try {
+          autoUpdater.quitAndInstall(false, true);
+        } catch (error) {
+          setAutoUpdateState({
+            status: "error",
+            message: "Falha ao reiniciar launcher para aplicar atualizacao.",
+            error: formatAutoUpdateError(error),
+            lastCheckedAt: new Date().toISOString()
+          });
+        }
+      }, 1100);
+    }
   });
 
   autoUpdater.on("update-not-available", (info) => {
@@ -731,15 +1058,24 @@ function setupAutoUpdater() {
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.allowPrerelease = config.allowPrerelease;
     autoUpdater.allowDowngrade = config.allowDowngrade;
-    autoUpdater.setFeedURL({
-      provider: "github",
-      owner: config.owner,
-      repo: config.repo,
-      releaseType: config.allowPrerelease ? "prerelease" : "release",
-      channel: config.channel,
-      private: config.privateRepo,
-      token: config.token || undefined
-    });
+    const feedProvider = resolveAutoUpdaterProvider(config);
+    if (feedProvider === "generic") {
+      autoUpdater.setFeedURL({
+        provider: "generic",
+        url: getGenericUpdateBaseUrl(config),
+        channel: config.channel
+      });
+    } else {
+      autoUpdater.setFeedURL({
+        provider: "github",
+        owner: config.owner,
+        repo: config.repo,
+        releaseType: config.allowPrerelease ? "prerelease" : "release",
+        channel: config.channel,
+        private: config.privateRepo,
+        token: config.token || undefined
+      });
+    }
 
     setAutoUpdateState({
       supported: true,
@@ -797,6 +1133,7 @@ async function checkForLauncherUpdate(origin = "manual") {
     });
   }
 
+  autoUpdateLastCheckOrigin = String(origin || "").trim().toLowerCase() || "manual";
   autoUpdateCheckInFlight = autoUpdater
     .checkForUpdates()
     .then(() => getPublicAutoUpdateState())
@@ -835,6 +1172,21 @@ function restartAndInstallLauncherUpdate() {
   }, 140);
 
   return { ok: true };
+}
+
+function isStartupUpdatePending() {
+  if (!autoUpdateConfigSnapshot?.autoRestartOnStartup) {
+    return false;
+  }
+  if (autoUpdateLastCheckOrigin !== "startup") {
+    return false;
+  }
+  return (
+    autoUpdateState.status === "checking" ||
+    autoUpdateState.status === "downloading" ||
+    autoUpdateState.status === "downloaded" ||
+    Boolean(autoUpdateState.updateDownloaded)
+  );
 }
 
 function buildStoredAuthSession(payload, user) {
@@ -3607,6 +3959,12 @@ function emitInstallProgress(payload) {
 }
 
 async function installGame(gameId) {
+  if (isStartupUpdatePending()) {
+    throw new Error(
+      "Atualizacao do launcher em andamento. Aguarde concluir e o launcher reiniciar antes de instalar jogos."
+    );
+  }
+
   if (activeInstalls.has(gameId)) {
     throw new Error("Este jogo ja esta sendo instalado.");
   }
@@ -4190,7 +4548,8 @@ if (!hasSingleInstanceLock) {
     void handleAuthDeepLink(urlValue);
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    await ensurePersistedAuthConfigFile().catch(() => {});
     registerAuthProtocolClient();
     createWindow();
     setupAutoUpdater();

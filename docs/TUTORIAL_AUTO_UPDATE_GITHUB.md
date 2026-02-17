@@ -1,101 +1,107 @@
 # Tutorial Auto Update (GitHub Releases)
 
-Este guia ativa atualizacao automatica do launcher sem seus amigos baixarem outro `.exe` manualmente.
+Este guia publica o launcher com update automatico para todos os usuarios.
 
-## 1) O que precisa
+## 1) Configuracao do updater
 
-- Repositorio do launcher no GitHub
-- App instalado via **NSIS** (`npm run build`)
-- `config/updater.json` preenchido
-- Release com arquivos do Electron Builder (`latest.yml`, `.exe`, `.blockmap`)
-
-Observacao: build `portable` normalmente nao participa do fluxo padrao de auto update.
-
-## 2) Configurar updater no projeto
-
-Copie:
-
-`config/updater.example.json` -> `config/updater.json`
-
-Exemplo:
+Preencha `config/updater.json`:
 
 ```json
 {
   "enabled": true,
-  "owner": "SEU_USUARIO_OU_ORG",
-  "repo": "SEU_REPO_DO_LAUNCHER",
+  "owner": "yk045t0854t0845ht8045",
+  "repo": "wplay-update",
+  "provider": "auto",
   "channel": "latest",
   "updateOnLaunch": true,
+  "autoRestartOnStartup": true,
   "autoDownload": true,
-  "checkIntervalMinutes": 12,
+  "checkIntervalMinutes": 1,
   "allowPrerelease": false,
   "allowDowngrade": false
 }
 ```
 
-## 3) Publicar releases automaticamente com tag
+Com `checkIntervalMinutes: 1`, launcher aberto detecta update em ate ~1 minuto.
+Com `autoRestartOnStartup: true`, se abrir o launcher e existir update, ele baixa e reinicia sozinho para aplicar (sem pedir novo download manual).
+Com `provider: "auto"`, o launcher prefere feed direto (`releases/latest/download`) para evitar erro 403 de rate limit da API do GitHub.
 
-O projeto ja inclui workflow:
+## 2) Comando unico (recomendado)
 
-`/.github/workflows/release-launcher.yml`
-
-Ele roda em tag `v*`, builda e publica no GitHub Release com os arquivos de update.
-
-Fluxo:
-
-1. Ajuste `version` no `package.json` (ex: `1.0.1`).
-2. Commit:
-   `git add .`
-   `git commit -m "release 1.0.1"`
-3. Crie tag e envie:
-   `git tag v1.0.1`
-   `git push origin main --tags`
-
-Pronto: o GitHub Actions gera release automaticamente.
-
-Se a pipeline falhar no GitHub Actions, faca fallback local:
+Agora existe comando unico:
 
 ```powershell
-$env:GH_TOKEN="SEU_TOKEN_GITHUB"
-npm run release:github
+npm run update-now
 ```
 
-## 4) Comportamento no launcher
+Antes de rodar esse comando, commit/push das alteracoes de codigo do launcher (ele cria commit/tag apenas da versao).
 
-- Ao abrir: checa update em segundo plano.
-- Em execucao: checa periodicamente (`checkIntervalMinutes`).
-- Se achar update: aparece icone verde ao lado do sino.
-- Quando download terminar: clicar no icone abre modal para reiniciar e atualizar.
-- Com `checkIntervalMinutes: 1`, launcher aberto detecta update em ate ~1 minuto.
+Ele faz:
 
-## 5) Comando alternativo local (sem Actions)
-
-Se quiser publicar release direto da sua maquina:
-
-```powershell
-
-```
-
-## 6) Erros comuns
-
-- `owner/repo` errado em `config/updater.json`
-- release sem `latest.yml`
-- app nao instalado (rodando em dev)
-- usar build `portable` esperando update automatico
-
-### Erro: Cannot find latest.yml
-
-Se aparecer algo como:
-
-`Cannot find latest.yml in the latest release artifacts ...`
-
-Significa que o updater esta apontando para um repo/release que nao e do launcher (normalmente repo de jogos/assets).
-
-Correcao:
-
-1. Use um repo exclusivo para o launcher (ex: `wplay-launcher`).
-2. Publique release do launcher com Electron Builder (`npm run release:github`), para gerar:
+1. incrementa versao automaticamente (`patch`)
+2. cria commit/tag de release
+3. envia para GitHub
+4. aguarda o GitHub Actions publicar release completa com:
    - `latest.yml`
    - instalador `.exe`
    - `.blockmap`
-3. So depois disso deixe `enabled: true` em `config/updater.json`.
+
+O script so conclui quando os 3 arquivos estiverem disponiveis (evita falso erro por release criada antes do upload terminar).
+O workflow do GitHub tambem valida os 3 assets ao final e falha com mensagem clara se faltar algo.
+
+Modo padrao (`workflow`) nao precisa token local.
+
+Se aparecer erro `403` por rate limit durante a espera da release, rode com token apenas para consulta da API:
+
+```powershell
+$env:GH_TOKEN="SEU_TOKEN"
+npm run update-now
+```
+
+## 3) Modo local (opcional)
+
+Se quiser forcar publicacao local via token (sem esperar Actions):
+
+```powershell
+npm run update-now -- -Mode local
+```
+
+Nesse modo, ele:
+
+1. valida token no repo de update
+2. incrementa versao automaticamente (`patch`)
+3. builda o launcher
+4. publica release no GitHub com:
+   - `latest.yml`
+   - instalador `.exe`
+   - `.blockmap`
+
+Se nao houver `GH_TOKEN` no ambiente, o script pede o token na hora.
+
+## 4) Token necessario (somente modo local)
+
+PAT (fine-grained) com acesso ao repo `wplay-update`:
+
+- Repository access: `wplay-update`
+- Permissions:
+  - `Contents: Read and write`
+  - `Metadata: Read`
+
+## 5) Validar release publicada
+
+```powershell
+$version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+$release = Invoke-RestMethod -Uri "https://api.github.com/repos/yk045t0854t0845ht8045/wplay-update/releases/tags/v$version" -Headers @{ "User-Agent"="WPlay" }
+$release.assets | Select-Object name,size,browser_download_url
+$release.assets.name -contains "latest.yml"
+```
+
+Tem que retornar `True` no ultimo comando.
+
+## 6) Por que o icone verde nao aparece?
+
+O icone de update so aparece quando:
+
+1. existe release valida com `latest.yml`
+2. a release tem versao maior que a instalada
+3. launcher esta rodando build instalado (nao `npm run dev`)

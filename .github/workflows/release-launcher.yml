@@ -42,3 +42,51 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
         run: npx electron-builder --win --x64 --publish always
+
+      - name: Verify release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ownerRepo = "${{ github.repository }}"
+          $owner, $repo = $ownerRepo.Split("/")
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag) {
+            throw "Tag do release nao encontrada (github.ref_name vazio)."
+          }
+          $apiUrl = "https://api.github.com/repos/$owner/$repo/releases/tags/$tag"
+          $headers = @{
+            "Authorization" = "Bearer $env:GH_TOKEN"
+            "User-Agent"    = "WPlay-ReleaseWorkflow"
+            "Accept"        = "application/vnd.github+json"
+          }
+
+          $maxAttempts = 30
+          $sleepSeconds = 10
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+              $release = Invoke-RestMethod -Uri $apiUrl -Headers $headers -Method GET
+            } catch {
+              Write-Host "Aguardando release $tag... tentativa $attempt/$maxAttempts"
+              Start-Sleep -Seconds $sleepSeconds
+              continue
+            }
+
+            $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
+            $hasManifest = $assetNames -contains "latest.yml"
+            $hasExe = ($assetNames | Where-Object { $_ -match "\.exe$" } | Select-Object -First 1) -ne $null
+            $hasBlockmap = ($assetNames | Where-Object { $_ -match "\.blockmap$" } | Select-Object -First 1) -ne $null
+
+            if ($hasManifest -and $hasExe -and $hasBlockmap) {
+              Write-Host "Release validada com sucesso: latest.yml + .exe + .blockmap"
+              exit 0
+            }
+
+            $assetList = if ($assetNames.Count -gt 0) { $assetNames -join ", " } else { "(nenhum asset ainda)" }
+            Write-Host "Release criada, aguardando assets (latest.yml=$hasManifest, exe=$hasExe, blockmap=$hasBlockmap) tentativa $attempt/$maxAttempts"
+            Write-Host "Assets atuais: $assetList"
+            Start-Sleep -Seconds $sleepSeconds
+          }
+
+          throw "Release $tag sem assets obrigatorios apos $maxAttempts tentativas (latest.yml + .exe + .blockmap)."

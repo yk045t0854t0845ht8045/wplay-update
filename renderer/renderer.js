@@ -337,7 +337,7 @@ async function ensureAuthenticated() {
     if (!state.authConfigured) {
       setAuthGateVisible(true);
       setAuthGateStatus(
-        "Supabase nao configurado. Configure config/auth.json antes de entrar.",
+        "Supabase nao configurado. Preencha config/auth.json (ou AppData/Roaming/WPlay/config/auth.json) antes de entrar.",
         true
       );
       if (authRetryBtn) {
@@ -917,7 +917,15 @@ async function checkForAutoUpdateManually() {
     const status = String(payload?.status || "").toLowerCase();
 
     if (status === "idle") {
-      notify("info", "Atualizacao", "Voce ja esta na versao mais recente.");
+      const idleMessage = String(payload?.message || "").trim();
+      const hasTransientSignal =
+        /temporari|indisponivel|limit/i.test(idleMessage) &&
+        /update|atualiza|github|feed/i.test(idleMessage);
+      notify(
+        "info",
+        "Atualizacao",
+        hasTransientSignal && idleMessage ? idleMessage : "Voce ja esta na versao mais recente."
+      );
       return;
     }
 
