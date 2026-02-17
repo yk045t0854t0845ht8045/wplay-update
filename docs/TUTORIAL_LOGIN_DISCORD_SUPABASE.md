@@ -1,4 +1,7 @@
-# Tutorial: Login com Discord + Supabase (WPlay)
+# Tutorial: Login com Discord + Supabase (WPlay) [LEGADO]
+
+> Fluxo legado. O launcher atual usa login Steam.
+> Use `docs/TUTORIAL_LOGIN_STEAM.md`.
 
 Este guia configura o login obrigatorio no launcher usando Discord via Supabase.
 

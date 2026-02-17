@@ -78,7 +78,7 @@ const updateRestartNowBtn = document.getElementById("updateRestartNowBtn");
 const updateRestartLaterBtn = document.getElementById("updateRestartLaterBtn");
 const authGate = document.getElementById("authGate");
 const authGateStatus = document.getElementById("authGateStatus");
-const authDiscordLoginBtn = document.getElementById("authDiscordLoginBtn");
+const authSteamLoginBtn = document.getElementById("authSteamLoginBtn");
 const authRetryBtn = document.getElementById("authRetryBtn");
 
 const FALLBACK_CARD_IMAGE = "https://placehold.co/640x360/0f0f0f/f2f2f2?text=Game";
@@ -94,6 +94,12 @@ const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = 15 * 1000;
 const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = 60 * 1000;
 const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = 8 * 1000;
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
+const DETAILS_ACTION_ICON_IMAGE_URLS = {
+  // Cole aqui links PNG (https://...) para trocar icones do botao principal.
+  play: "https://imgur.com/CT3XpWU.png",
+  close: "https://imgur.com/CT3XpWU.png",
+  install: "https://imgur.com/vpSXqIW.png"
+};
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
   minute: "2-digit"
@@ -209,7 +215,7 @@ function getAuthDisplayName(session) {
 
 function getAuthEmail(session) {
   if (!session || typeof session !== "object") return "";
-  return String(session?.user?.email || "").trim();
+  return String(session?.user?.email || session?.user?.id || "").trim();
 }
 
 function getAuthAvatarUrl(session) {
@@ -244,7 +250,7 @@ function renderTopAccountButton() {
 
   if (!loggedIn) {
     setAccountMenuOpen(false);
-    topAccountBtn.setAttribute("aria-label", "Entrar com Discord");
+    topAccountBtn.setAttribute("aria-label", "Entrar com Steam");
     topAccountBtn.title = "Conta";
     topAccountBtn.innerHTML = `
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -295,9 +301,9 @@ function setAccountMenuOpen(open) {
 
 function setAuthButtonsState(loading) {
   const isLoading = Boolean(loading);
-  if (authDiscordLoginBtn) {
-    authDiscordLoginBtn.disabled = isLoading;
-    authDiscordLoginBtn.textContent = isLoading ? "Abrindo Discord..." : "Continuar com Discord";
+  if (authSteamLoginBtn) {
+    authSteamLoginBtn.disabled = isLoading;
+    authSteamLoginBtn.textContent = isLoading ? "Abrindo Steam..." : "Continuar com Steam";
   }
   if (authRetryBtn) {
     authRetryBtn.disabled = isLoading;
@@ -343,23 +349,23 @@ async function ensureAuthenticated() {
     if (!state.authConfigured) {
       setAuthGateVisible(true);
       setAuthGateStatus(
-        "Supabase nao configurado. Preencha config/auth.json (ou AppData/Roaming/WPlay/config/auth.json) antes de entrar.",
+        "Steam nao configurado. Preencha steamWebApiKey em config/auth.json antes de entrar.",
         true
       );
       if (authRetryBtn) {
         authRetryBtn.classList.remove("is-hidden");
       }
-      setStatus("Configure o Supabase para liberar login com Discord.", true);
+      setStatus("Configure Steam Web API Key para liberar login com Steam.", true);
       return;
     }
 
     if (!authenticated) {
       setAuthGateVisible(true);
-      setAuthGateStatus("Entre com Discord para continuar.");
+      setAuthGateStatus("Entre com Steam para continuar.");
       if (authRetryBtn) {
         authRetryBtn.classList.add("is-hidden");
       }
-      setStatus("Login necessario. Use Continuar com Discord.");
+      setStatus("Login necessario. Use Continuar com Steam.");
       return;
     }
 
@@ -369,7 +375,7 @@ async function ensureAuthenticated() {
     state.authSession = null;
     renderTopAccountButton();
     setAuthGateVisible(true);
-    setAuthGateStatus(error?.message || "Falha ao verificar login com Discord.", true);
+    setAuthGateStatus(error?.message || "Falha ao verificar login com Steam.", true);
     if (authRetryBtn) {
       authRetryBtn.classList.remove("is-hidden");
     }
@@ -380,22 +386,22 @@ async function ensureAuthenticated() {
   }
 }
 
-async function startDiscordLogin() {
+async function startSteamLogin() {
   if (state.authBusy) return;
-  if (typeof window.launcherApi.authLoginDiscord !== "function") {
+  if (typeof window.launcherApi.authLoginSteam !== "function") {
     setAuthGateStatus("API de login indisponivel nesta versao.", true);
     return;
   }
 
   state.authBusy = true;
-  setAuthGateStatus("Abrindo Discord para autenticacao...");
+  setAuthGateStatus("Abrindo Steam para autenticacao...");
   setAuthButtonsState(true);
 
   try {
-    const result = await window.launcherApi.authLoginDiscord();
+    const result = await window.launcherApi.authLoginSteam();
     const authenticated = Boolean(result?.authenticated && result?.session?.user?.id);
     if (!authenticated) {
-      throw new Error("Nao foi possivel concluir login Discord.");
+      throw new Error("Nao foi possivel concluir login Steam.");
     }
 
     state.authSession = result.session;
@@ -407,21 +413,21 @@ async function startDiscordLogin() {
     state.authSession = null;
     renderTopAccountButton();
     setAuthGateVisible(true);
-    setAuthGateStatus(error?.message || "Falha ao autenticar com Discord.", true);
+    setAuthGateStatus(error?.message || "Falha ao autenticar com Steam.", true);
     if (authRetryBtn) {
       authRetryBtn.classList.remove("is-hidden");
     }
     setStatus(`Erro de login: ${error?.message || "erro desconhecido"}`, true);
-    notify("error", "Login falhou", error?.message || "Nao foi possivel autenticar com Discord.");
+    notify("error", "Login falhou", error?.message || "Nao foi possivel autenticar com Steam.");
   } finally {
     state.authBusy = false;
     setAuthButtonsState(false);
   }
 }
 
-async function logoutDiscordSession() {
+async function logoutSteamSession() {
   if (state.authBusy) return;
-  const confirmed = window.confirm("Deseja sair da sua conta Discord no launcher?");
+  const confirmed = window.confirm("Deseja sair da sua conta Steam no launcher?");
   if (!confirmed) return;
 
   state.authBusy = true;
@@ -432,9 +438,9 @@ async function logoutDiscordSession() {
     state.authSession = null;
     renderTopAccountButton();
     setAuthGateVisible(true);
-    setAuthGateStatus("Sessao encerrada. Entre com Discord para continuar.");
+    setAuthGateStatus("Sessao encerrada. Entre com Steam para continuar.");
     setStatus("Logout realizado.");
-    notify("info", "Sessao encerrada", "Voce saiu da conta Discord.");
+    notify("info", "Sessao encerrada", "Voce saiu da conta Steam.");
   } catch (error) {
     setStatus(`Falha ao sair: ${error?.message || "erro desconhecido"}`, true);
     notify("error", "Erro ao sair", error?.message || "Nao foi possivel encerrar sessao.");
@@ -477,7 +483,7 @@ async function handleAccountMenuAction(action) {
   }
 
   if (menuAction === "logout") {
-    await logoutDiscordSession();
+    await logoutSteamSession();
   }
 }
 
@@ -1236,6 +1242,30 @@ function setButtonLabel(button, text) {
   button.textContent = text;
 }
 
+function getDetailsActionIconImageUrl(action) {
+  const key = String(action || "").trim().toLowerCase();
+  const value = String(DETAILS_ACTION_ICON_IMAGE_URLS[key] || "").trim();
+  if (!value) return "";
+  if (!/^https?:\/\//i.test(value)) return "";
+  return value;
+}
+
+function applyDetailsActionIcon(action) {
+  if (!detailsActionBtn) return;
+  const actionKey = String(action || "").trim().toLowerCase();
+  const iconUrl = getDetailsActionIconImageUrl(actionKey);
+
+  detailsActionBtn.removeAttribute("data-custom-icon");
+  detailsActionBtn.style.removeProperty("--details-action-icon-url");
+
+  if (!iconUrl) {
+    return;
+  }
+
+  detailsActionBtn.setAttribute("data-custom-icon", "true");
+  detailsActionBtn.style.setProperty("--details-action-icon-url", `url('${escapeCssUrl(iconUrl)}')`);
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -1273,7 +1303,13 @@ function getFirstStatValue(game, keys) {
 
 function formatPlayTimeFromHours(hours) {
   const safeHours = Number(hours);
-  if (!Number.isFinite(safeHours) || safeHours <= 0) {
+  if (!Number.isFinite(safeHours)) {
+    return "--";
+  }
+  if (safeHours === 0) {
+    return "0m";
+  }
+  if (safeHours < 0) {
     return "--";
   }
 
@@ -1288,6 +1324,7 @@ function formatPlayTimeFromHours(hours) {
 
 function formatPlayTimeStat(game) {
   const raw = getFirstStatValue(game, [
+    "userPlayTimeHours",
     "averagePlayTime",
     "avgPlayTime",
     "playTime",
@@ -1314,6 +1351,7 @@ function formatPlayTimeStat(game) {
 
 function formatAchievementStat(game) {
   const raw = getFirstStatValue(game, [
+    "userAchievementPercent",
     "averageAchievement",
     "avgAchievement",
     "achievementRate",
@@ -1499,7 +1537,7 @@ function getActionState(game) {
 
   if (game.installed) {
     if (game.running) {
-      return { action: "close", label: "FECHAR JOGO", disabled: false };
+      return { action: "close", label: "PARAR JOGO", disabled: false };
     }
     return { action: "play", label: "PLAY GAME", disabled: false };
   }
@@ -2358,7 +2396,7 @@ function getRecentCompletedDownloadEntries() {
       completedAt: Number(meta?.completedAt || 0),
       game,
       action,
-      actionLabel: action === "close" ? "FECHAR" : "JOGAR"
+      actionLabel: action === "close" ? "PARAR JOGO" : "JOGAR"
     });
   }
   entries.sort((a, b) => b.completedAt - a.completedAt);
@@ -3062,6 +3100,7 @@ function renderDetailsActions(game) {
   detailsActionBtn.dataset.gameId = game.id;
   detailsActionBtn.dataset.action = actionState.action;
   setButtonLabel(detailsActionBtn, actionState.label);
+  applyDetailsActionIcon(actionState.action);
   detailsActionBtn.disabled = actionState.disabled;
 
   const inLibrary = isInLibrary(game.id);
@@ -3078,7 +3117,7 @@ function renderDetailsActions(game) {
   detailsPlayBtn.classList.toggle("is-hidden", !showPlay);
   detailsPlayBtn.dataset.gameId = showPlay ? game.id : "";
   detailsPlayBtn.dataset.action = playAction;
-  detailsPlayBtn.textContent = playAction === "close" ? "FECHAR JOGO" : "PLAY GAME";
+  detailsPlayBtn.textContent = playAction === "close" ? "PARAR JOGO" : "PLAY GAME";
 
   const showUninstall = game.installed || isGameUninstalling(game.id);
   detailsUninstallBtn.classList.toggle("is-hidden", !showUninstall);
@@ -3238,7 +3277,7 @@ function fireConfettiFromElement(element, strong = false) {
 async function handleGameAction(gameId, action) {
   if (!state.authSession?.user?.id) {
     setAuthGateVisible(true);
-    setAuthGateStatus("Entre com Discord para continuar.");
+    setAuthGateStatus("Entre com Steam para continuar.");
     setStatus("Login necessario para continuar.");
     return;
   }
@@ -3416,9 +3455,9 @@ function installEventBindings() {
   startAutoUpdateRealtimeSync();
   scheduleAutoUpdateBackgroundCheckSoon(2500);
 
-  if (authDiscordLoginBtn) {
-    authDiscordLoginBtn.addEventListener("click", () => {
-      void startDiscordLogin();
+  if (authSteamLoginBtn) {
+    authSteamLoginBtn.addEventListener("click", () => {
+      void startSteamLogin();
     });
   }
 
@@ -3463,7 +3502,7 @@ function installEventBindings() {
 
       if (!state.authSession?.user?.id) {
         setAuthGateVisible(true);
-        setAuthGateStatus("Entre com Discord para continuar.");
+        setAuthGateStatus("Entre com Steam para continuar.");
         return;
       }
 

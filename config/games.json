@@ -54,6 +54,7 @@
       "developedBy": "semiwork",
       "publishedBy": "semiwork",
       "releaseDate": "26 Feb 2025",
+      "steamAppId": 3241660,
       "averagePlayTime": "16hs",
       "averageAchievement": "27%",
       "trailerUrl": "https://storage.googleapis.com/store-screenapp-production/vid/699393f8f099288b1e3221c3/bcd67128-d87a-40d6-8782-e261ba991a36.mov?X-Amz-Algorithm=AWS4-HMAC-SHA256\u0026X-Amz-Content-Sha256=UNSIGNED-PAYLOAD\u0026X-Amz-Credential=GOOG1EINEQV5X2QGY62PSZMBMUR7IGGVLKNDB6ABP5GL6O6FKO76DWA2IE3SB%2F20260216%2Fauto%2Fs3%2Faws4_request\u0026X-Amz-Date=20260216T220236Z\u0026X-Amz-Expires=604800\u0026X-Amz-Signature=95d9f28b707e0a80f69b27bcf4b9a6e20ea547eb34750e110e63b8e5a3f22ffe\u0026X-Amz-SignedHeaders=host\u0026response-content-disposition=attachment%3B%20filename%3D%22bcd67128-d87a-40d6-8782-e261ba991a36.mp4%22%3B%20filename%2A%3D%20UTF-8%27%27YTDown.com_YouTube_R_E_P_O_Official_Release_Trailer_Media_oSfoK8eSeD8_001_1080p.mp4%3B\u0026response-content-type=video%2Fmp4\u0026x-amz-checksum-mode=ENABLED\u0026x-id=GetObject#t=0.mp4",
@@ -92,6 +93,7 @@
           "priority": 8
         }
       ],
+      "steam_app_id": 3241660,
       "launch_executable": "PASTA\\JOGO.EXE",
       "enabled": true,
       "sort_order": 100

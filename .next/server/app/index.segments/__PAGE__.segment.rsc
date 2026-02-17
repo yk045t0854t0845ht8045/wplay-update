@@ -1,8 +1,8 @@
 1:"$Sreact.fragment"
-6:I[27611,["./_next/static/chunks/ff6052066b34a804.js"],"default"]
+6:I[27611,["./_next/static/chunks/e9398c4ac9930b6b.js"],"default"]
 7:I[97367,["./_next/static/chunks/2f236954d6a65e12.js"],"OutletBoundary"]
 8:"$Sreact.suspense"
-2:T6058,
+2:T6050,
     <div class="bg-glow glow-left"></div>
     <div class="bg-glow glow-right"></div>
     <div class="bg-noise"></div>
@@ -42,13 +42,13 @@
             <img src="./assets/logo.png" alt="" aria-hidden="true" />
             <span>WPlay</span>
           </div>
-          <h2>Entrar com Discord</h2>
+          <h2>Entrar com Steam</h2>
           <p>
-            Para acessar o launcher, faca login com sua conta Discord.
+            Para acessar o launcher, faca login com sua conta Steam.
             O acesso so e liberado apos autenticacao valida.
           </p>
           <p id="authGateStatus" class="auth-gate-status">Validando sessao...</p>
-          <button id="authDiscordLoginBtn" class="auth-discord-btn" type="button">Continuar com Discord</button>
+          <button id="authSteamLoginBtn" class="auth-discord-btn" type="button">Continuar com Steam</button>
           <button id="authRetryBtn" class="auth-retry-btn is-hidden" type="button">Tentar novamente</button>
         </div>
       </section>
@@ -445,8 +445,8 @@
     </div>
 
     
-0:{"buildId":"k7s0PaAJnXvx7aMfBegE4","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
+0:{"buildId":"5Ls0Nv60zjYw46cXJlXkq","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
 3:["$","$L6",null,{}]
-4:["$","script","script-0",{"src":"./_next/static/chunks/ff6052066b34a804.js","async":true}]
+4:["$","script","script-0",{"src":"./_next/static/chunks/e9398c4ac9930b6b.js","async":true}]
 5:["$","$L7",null,{"children":["$","$8",null,{"name":"Next.MetadataOutlet","children":"$@9"}]}]
 9:null

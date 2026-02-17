@@ -1437,7 +1437,10 @@
   }
 
   .hero-action-btn {
-    @apply inline-flex h-14 min-w-[208px] items-center justify-between gap-3 rounded-xl border px-4 text-[1.02rem] font-semibold tracking-[0.01em] transition-all duration-200;
+    @apply inline-flex h-14 items-center justify-start gap-2.5 rounded-xl border px-4 text-[1.02rem] font-semibold tracking-[0.01em] transition-all duration-200;
+    width: fit-content;
+    min-width: 0;
+    max-width: 100%;
     cursor: pointer;
   }
 
@@ -1483,9 +1486,10 @@
   }
 
   .hero-action-icon-box {
-    @apply grid h-10 w-10 place-items-center rounded-lg border;
-    border-color: currentColor;
+    @apply grid h-9 w-9 place-items-center rounded-md;
+    border: 0;
     background: transparent;
+    flex: 0 0 auto;
   }
 
   .hero-action-icon {
@@ -1521,8 +1525,23 @@
   }
 
   #detailsActionBtn[data-action="play"] .hero-action-icon-box {
-    border-color: rgba(15, 23, 42, 0.22);
-    background: rgba(255, 255, 255, 0.64);
+    border: 0;
+    background: transparent;
+  }
+
+  #detailsActionBtn[data-custom-icon="true"] .hero-action-icon {
+    display: none !important;
+  }
+
+  #detailsActionBtn[data-custom-icon="true"] .hero-action-icon-box::before {
+    content: "";
+    display: block;
+    width: 20px;
+    height: 20px;
+    background-image: var(--details-action-icon-url);
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
   }
 
   #detailsActionBtn[data-action="busy"] .hero-action-icon.icon-busy {
@@ -2370,7 +2389,7 @@
   }
 
   .hero-action-btn {
-    min-width: 186px;
+    min-width: 0;
   }
 
   .details-bottom {

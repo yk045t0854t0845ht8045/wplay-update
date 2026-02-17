@@ -2919,10 +2919,9 @@ body.auth-locked .auth-gate {
 .hero-action-btn{
   display: inline-flex;
   height: 3.5rem;
-  min-width: 208px;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
+  justify-content: flex-start;
+  gap: 0.625rem;
   border-radius: 0.75rem;
   border-width: 1px;
   padding-left: 1rem;
@@ -2933,6 +2932,10 @@ body.auth-locked .auth-gate {
   transition-property: all;
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   transition-duration: 200ms;
+  width: -moz-fit-content;
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
   cursor: pointer;
 }
 
@@ -2982,13 +2985,13 @@ body.auth-locked .auth-gate {
 
 .hero-action-icon-box{
   display: grid;
-  height: 2.5rem;
-  width: 2.5rem;
+  height: 2.25rem;
+  width: 2.25rem;
   place-items: center;
-  border-radius: 0.5rem;
-  border-width: 1px;
-  border-color: currentColor;
+  border-radius: 0.375rem;
+  border: 0;
   background: transparent;
+  flex: 0 0 auto;
 }
 
 .hero-action-icon{
@@ -3025,8 +3028,23 @@ body.auth-locked .auth-gate {
 }
 
 #detailsActionBtn[data-action="play"] .hero-action-icon-box {
-  border-color: rgba(15, 23, 42, 0.22);
-  background: rgba(255, 255, 255, 0.64);
+  border: 0;
+  background: transparent;
+}
+
+#detailsActionBtn[data-custom-icon="true"] .hero-action-icon {
+  display: none !important;
+}
+
+#detailsActionBtn[data-custom-icon="true"] .hero-action-icon-box::before {
+  content: "";
+  display: block;
+  width: 20px;
+  height: 20px;
+  background-image: var(--details-action-icon-url);
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
 }
 
 #detailsActionBtn[data-action="busy"] .hero-action-icon.icon-busy {
@@ -4265,7 +4283,7 @@ body.auth-locked .auth-gate {
   }
 
   .hero-action-btn {
-    min-width: 186px;
+    min-width: 0;
   }
 
   .details-bottom {

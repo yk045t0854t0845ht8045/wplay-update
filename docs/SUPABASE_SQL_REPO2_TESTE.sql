@@ -27,6 +27,7 @@ insert into public.launcher_games (
   published_by,
   release_date,
   trailer_url,
+  steam_app_id,
   gallery,
   genres,
   average_play_time,
@@ -79,6 +80,7 @@ insert into public.launcher_games (
   'semiwork',
   '26 Feb 2025',
   'https://www.youtube.com/watch?v=oSfoK8eSeD8',
+  3241660,
   '[
     "https://imgur.com/CkC4BWy.png",
     "https://imgur.com/3XnsrX0.png",
@@ -117,6 +119,7 @@ set
   published_by = excluded.published_by,
   release_date = excluded.release_date,
   trailer_url = excluded.trailer_url,
+  steam_app_id = excluded.steam_app_id,
   gallery = excluded.gallery,
   genres = excluded.genres,
   average_play_time = excluded.average_play_time,

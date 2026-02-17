@@ -23,7 +23,8 @@ Arquivo: `config/auth.json`
 {
   "supabaseUrl": "https://SEU-PROJETO.supabase.co",
   "supabaseAnonKey": "SUA_SUPABASE_ANON_KEY",
-  "redirectUrl": "wplay://auth/callback"
+  "redirectUrl": "wplay://auth/callback",
+  "steamWebApiKey": "SUA_STEAM_WEB_API_KEY"
 }
 ```
 

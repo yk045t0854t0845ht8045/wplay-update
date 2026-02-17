@@ -32,6 +32,7 @@ const AUTH_PROTOCOL_SCHEME = "wplay";
 const AUTH_CALLBACK_URL_DEFAULT = `${AUTH_PROTOCOL_SCHEME}://auth/callback`;
 const AUTH_LOGIN_TIMEOUT_MS = 3 * 60 * 1000;
 const AUTH_EXPIRY_SKEW_SECONDS = 30;
+const AUTH_STEAM_SESSION_TTL_SECONDS = 180 * 24 * 60 * 60;
 const DOWNLOAD_STREAM_TIMEOUT_MS = Math.max(
   2 * 60 * 1000,
   Number(process.env.WPLAY_DOWNLOAD_TIMEOUT_MS) || 45 * 60 * 1000
@@ -55,6 +56,11 @@ const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
 const WINDOWS_APP_USER_MODEL_ID = "com.wplay.app";
 const YOUTUBE_EMBED_REFERER = "https://www.youtube.com/";
 const YOUTUBE_EMBED_ORIGIN = "https://www.youtube.com";
+const STEAM_OPENID_URL = "https://steamcommunity.com/openid/login";
+const STEAM_API_BASE_URL = "https://api.steampowered.com";
+const STEAM_PROFILE_CACHE_TTL_MS = 5 * 60 * 1000;
+const STEAM_OWNED_GAMES_CACHE_TTL_MS = 5 * 60 * 1000;
+const STEAM_ACHIEVEMENTS_CACHE_TTL_MS = 15 * 60 * 1000;
 
 if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
   try {
@@ -116,6 +122,17 @@ const autoUpdateState = {
 const runningProcessCache = {
   fetchedAt: 0,
   namesLower: new Set()
+};
+const steamUserDataCache = {
+  steamId: "",
+  profile: null,
+  profileFetchedAt: 0,
+  profileInFlight: null,
+  ownedGamesByAppId: new Map(),
+  ownedGamesFetchedAt: 0,
+  ownedGamesInFlight: null,
+  achievementsByAppId: new Map(),
+  achievementsInFlight: new Map()
 };
 
 function resolveWindowIconPath() {
@@ -489,7 +506,8 @@ async function ensurePersistedAuthConfigFile() {
     }
     const url = normalizeSupabaseUrl(sanitizeAuthConfigValue(config.supabaseUrl));
     const anonKey = sanitizeAuthConfigValue(config.supabaseAnonKey);
-    return Boolean(url && anonKey);
+    const steamWebApiKey = normalizeSteamWebApiKey(config.steamWebApiKey || config.steam_api_key);
+    return Boolean((url && anonKey) || steamWebApiKey);
   };
 
   const existingUserConfig = await readCandidate(userAuthConfigPath);
@@ -619,6 +637,13 @@ function readAuthConfigFileSync() {
   }
 
   for (const parsedCandidate of parsedCandidates) {
+    const steamWebApiKey = normalizeSteamWebApiKey(parsedCandidate.steamWebApiKey || parsedCandidate.steam_api_key);
+    if (steamWebApiKey) {
+      return parsedCandidate;
+    }
+  }
+
+  for (const parsedCandidate of parsedCandidates) {
     const url = normalizeSupabaseUrl(sanitizeAuthConfigValue(parsedCandidate.supabaseUrl));
     const anonKey = sanitizeAuthConfigValue(parsedCandidate.supabaseAnonKey);
     if (url && anonKey) {
@@ -652,11 +677,17 @@ function sanitizeAuthConfigValue(value) {
   const containsTemplateToken =
     upper.includes("SEU-PROJETO") ||
     upper.includes("SUA_SUPABASE_ANON_KEY") ||
-    upper.includes("SUPABASE_ANON_KEY");
+    upper.includes("SUPABASE_ANON_KEY") ||
+    upper.includes("SUA_STEAM_WEB_API_KEY") ||
+    upper.includes("STEAM_WEB_API_KEY");
   if (looksLikePlainPlaceholder || containsTemplateToken) {
     return "";
   }
   return raw;
+}
+
+function normalizeSteamWebApiKey(value) {
+  return sanitizeAuthConfigValue(value);
 }
 
 function normalizeAuthRedirectUrl(value) {
@@ -684,49 +715,210 @@ function resolveAuthConfig() {
   const redirectUrl = normalizeAuthRedirectUrl(
     sanitizeAuthConfigValue(process.env.WPLAY_AUTH_REDIRECT_URL || fileConfig.redirectUrl)
   );
+  const steamWebApiKey = normalizeSteamWebApiKey(
+    process.env.WPLAY_STEAM_WEB_API_KEY || fileConfig.steamWebApiKey || fileConfig.steam_api_key
+  );
 
   return {
     supabaseUrl,
     supabaseAnonKey,
-    redirectUrl
+    redirectUrl,
+    steamWebApiKey
   };
 }
 
-function assertAuthConfig(authConfig) {
-  if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
+function assertSteamAuthConfig(authConfig) {
+  if (!authConfig.steamWebApiKey) {
     throw new Error(
-      "[AUTH_NOT_CONFIGURED] Supabase nao configurado. Preencha config/auth.json (ou userData/config/auth.json) com supabaseUrl e supabaseAnonKey."
+      "[AUTH_NOT_CONFIGURED] Steam nao configurado. Preencha config/auth.json com steamWebApiKey (Steam Web API Key)."
     );
   }
 }
 
-function normalizeAuthUser(user) {
-  if (!user || typeof user !== "object") {
+function normalizeSteamId(value) {
+  const raw = String(value || "").trim();
+  if (!/^\d{17}$/.test(raw)) {
+    return "";
+  }
+  return raw;
+}
+
+function createAuthStateToken() {
+  return crypto.randomBytes(18).toString("hex");
+}
+
+function normalizeSteamPersonaName(value, fallback = "Steam User") {
+  const name = String(value || "").trim();
+  return name || fallback;
+}
+
+function normalizeSteamAvatarUrl(player = {}) {
+  return String(player.avatarfull || player.avatarmedium || player.avatar || "").trim();
+}
+
+function buildStoredSteamSession(player = {}) {
+  const steamId = normalizeSteamId(player.steamid || player.steamId || player.id);
+  if (!steamId) {
     return null;
   }
 
-  const userMetadata = user.user_metadata && typeof user.user_metadata === "object" ? user.user_metadata : {};
-  const providerMetadata = user.identities?.[0]?.identity_data || {};
-  const displayName = String(
-    userMetadata.full_name ||
-      userMetadata.name ||
-      userMetadata.preferred_username ||
-      providerMetadata.global_name ||
-      providerMetadata.username ||
-      user.email ||
-      ""
-  ).trim();
-  const avatarUrl = String(
-    userMetadata.avatar_url || userMetadata.picture || providerMetadata.avatar_url || providerMetadata.avatar || ""
-  ).trim();
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const displayName = normalizeSteamPersonaName(player.personaname || player.displayName, "Steam User");
+  const avatarUrl = normalizeSteamAvatarUrl(player);
 
   return {
-    id: String(user.id || "").trim(),
-    email: String(user.email || "").trim(),
-    displayName,
-    avatarUrl,
-    provider: "discord"
+    provider: "steam",
+    steamId,
+    accessToken: `steam:${steamId}`,
+    refreshToken: "",
+    tokenType: "steam",
+    expiresAt: nowSeconds + AUTH_STEAM_SESSION_TTL_SECONDS,
+    issuedAt: nowSeconds,
+    user: {
+      id: steamId,
+      email: "",
+      displayName,
+      avatarUrl,
+      provider: "steam"
+    }
   };
+}
+
+function buildSteamOpenIdAuthorizeUrl(authConfig, stateToken) {
+  const state = String(stateToken || "").trim();
+  if (!state) {
+    throw new Error("[AUTH_STATE] Nao foi possivel gerar token de autenticacao.");
+  }
+
+  const returnTo = new URL(authConfig.redirectUrl);
+  returnTo.searchParams.set("provider", "steam");
+  returnTo.searchParams.set("state", state);
+
+  const realm = `${returnTo.protocol}//${returnTo.host}`;
+  const url = new URL(STEAM_OPENID_URL);
+  url.searchParams.set("openid.ns", "http://specs.openid.net/auth/2.0");
+  url.searchParams.set("openid.mode", "checkid_setup");
+  url.searchParams.set("openid.return_to", returnTo.toString());
+  url.searchParams.set("openid.realm", realm);
+  url.searchParams.set("openid.identity", "http://specs.openid.net/auth/2.0/identifier_select");
+  url.searchParams.set("openid.claimed_id", "http://specs.openid.net/auth/2.0/identifier_select");
+  return url.toString();
+}
+
+function parseSteamAuthCallbackPayload(rawUrl, authConfig) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(rawUrl);
+  } catch (_error) {
+    return null;
+  }
+
+  let expectedRedirect;
+  try {
+    expectedRedirect = new URL(authConfig.redirectUrl);
+  } catch (_error) {
+    return null;
+  }
+
+  const sameTarget =
+    parsedUrl.protocol.toLowerCase() === expectedRedirect.protocol.toLowerCase() &&
+    parsedUrl.hostname.toLowerCase() === expectedRedirect.hostname.toLowerCase() &&
+    parsedUrl.pathname === expectedRedirect.pathname;
+
+  if (!sameTarget) {
+    return null;
+  }
+
+  const search = new URLSearchParams(parsedUrl.search || "");
+  const provider = String(search.get("provider") || "").trim().toLowerCase();
+  if (provider && provider !== "steam") {
+    return null;
+  }
+
+  const payload = {
+    provider: "steam",
+    state: String(search.get("state") || "").trim(),
+    openidMode: String(search.get("openid.mode") || "").trim(),
+    openidClaimedId: String(search.get("openid.claimed_id") || "").trim(),
+    openidIdentity: String(search.get("openid.identity") || "").trim(),
+    rawQuery: search
+  };
+
+  return payload;
+}
+
+function extractSteamIdFromClaimedId(claimedId) {
+  const value = String(claimedId || "").trim();
+  if (!value) return "";
+  const match = value.match(/steamcommunity\.com\/openid\/id\/(\d{17})/i);
+  return normalizeSteamId(match?.[1] || "");
+}
+
+async function verifySteamOpenIdResponse(searchParams) {
+  const source = searchParams instanceof URLSearchParams ? searchParams : new URLSearchParams(searchParams || "");
+  const payload = new URLSearchParams();
+
+  for (const [key, value] of source.entries()) {
+    if (!String(key || "").toLowerCase().startsWith("openid.")) {
+      continue;
+    }
+    payload.set(key, value);
+  }
+
+  payload.set("openid.mode", "check_authentication");
+
+  const response = await axios.post(STEAM_OPENID_URL, payload.toString(), {
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status >= 400) {
+    return false;
+  }
+
+  const body = String(response.data || "");
+  return /is_valid\s*:\s*true/i.test(body);
+}
+
+async function fetchSteamPlayerSummary(steamId, steamWebApiKey) {
+  const normalizedSteamId = normalizeSteamId(steamId);
+  const apiKey = normalizeSteamWebApiKey(steamWebApiKey);
+  if (!normalizedSteamId || !apiKey) {
+    return null;
+  }
+
+  const endpoint = `${STEAM_API_BASE_URL}/ISteamUser/GetPlayerSummaries/v0002/`;
+  const response = await axios.get(endpoint, {
+    params: {
+      key: apiKey,
+      steamids: normalizedSteamId
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status >= 400) {
+    return null;
+  }
+
+  const players = Array.isArray(response.data?.response?.players) ? response.data.response.players : [];
+  const player = players.find((entry) => normalizeSteamId(entry?.steamid) === normalizedSteamId);
+  return player || null;
+}
+
+function clearSteamUserDataCache() {
+  steamUserDataCache.steamId = "";
+  steamUserDataCache.profile = null;
+  steamUserDataCache.profileFetchedAt = 0;
+  steamUserDataCache.profileInFlight = null;
+  steamUserDataCache.ownedGamesByAppId = new Map();
+  steamUserDataCache.ownedGamesFetchedAt = 0;
+  steamUserDataCache.ownedGamesInFlight = null;
+  steamUserDataCache.achievementsByAppId = new Map();
+  steamUserDataCache.achievementsInFlight = new Map();
 }
 
 function parsePositiveInteger(value) {
@@ -1664,28 +1856,14 @@ function isStartupUpdatePending() {
   );
 }
 
-function buildStoredAuthSession(payload, user) {
-  const accessToken = String(payload.access_token || payload.accessToken || "").trim();
-  const refreshToken = String(payload.refresh_token || payload.refreshToken || "").trim();
-  const tokenType = String(payload.token_type || payload.tokenType || "bearer").trim() || "bearer";
-
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  const expiresAtRaw = parsePositiveInteger(payload.expires_at || payload.expiresAt);
-  const expiresInRaw = parsePositiveInteger(payload.expires_in || payload.expiresIn);
-  const expiresAt = expiresAtRaw || (expiresInRaw > 0 ? nowSeconds + expiresInRaw : nowSeconds + 3600);
-
-  return {
-    accessToken,
-    refreshToken,
-    tokenType,
-    expiresAt,
-    issuedAt: nowSeconds,
-    user: normalizeAuthUser(user || payload.user)
-  };
-}
-
 function getPublicAuthSession(storedSession) {
-  if (!storedSession || !storedSession.accessToken || !storedSession.user?.id) {
+  if (!storedSession || !storedSession.user?.id) {
+    return null;
+  }
+
+  const provider = String(storedSession.provider || storedSession.user?.provider || "discord").toLowerCase();
+  const hasAccess = provider === "steam" ? true : Boolean(storedSession.accessToken);
+  if (!hasAccess) {
     return null;
   }
 
@@ -1695,13 +1873,17 @@ function getPublicAuthSession(storedSession) {
       email: storedSession.user.email,
       displayName: storedSession.user.displayName,
       avatarUrl: storedSession.user.avatarUrl,
-      provider: storedSession.user.provider || "discord"
+      provider: storedSession.user.provider || provider || "discord"
     },
     expiresAt: parsePositiveInteger(storedSession.expiresAt)
   };
 }
 
 function isStoredAuthSessionExpired(storedSession) {
+  const provider = String(storedSession?.provider || storedSession?.user?.provider || "").toLowerCase();
+  if (provider === "steam") {
+    return false;
+  }
   const expiresAt = parsePositiveInteger(storedSession?.expiresAt);
   if (!expiresAt) return true;
   const nowSeconds = Math.floor(Date.now() / 1000);
@@ -1778,67 +1960,9 @@ async function clearPersistedAuthSession() {
   });
 }
 
-async function requestSupabaseUser(accessToken, authConfig) {
-  const response = await axios.get(`${authConfig.supabaseUrl}/auth/v1/user`, {
-    headers: {
-      apikey: authConfig.supabaseAnonKey,
-      Authorization: `Bearer ${accessToken}`
-    },
-    timeout: 30_000,
-    validateStatus: (status) => status >= 200 && status < 500
-  });
-
-  if (response.status >= 400) {
-    throw new Error("Nao foi possivel validar usuario no Supabase.");
-  }
-
-  return response.data;
-}
-
-async function refreshStoredAuthSession(storedSession, authConfig) {
-  if (!storedSession?.refreshToken) {
-    return null;
-  }
-
-  const response = await axios.post(
-    `${authConfig.supabaseUrl}/auth/v1/token?grant_type=refresh_token`,
-    {
-      refresh_token: storedSession.refreshToken
-    },
-    {
-      headers: {
-        apikey: authConfig.supabaseAnonKey,
-        "Content-Type": "application/json"
-      },
-      timeout: 30_000,
-      validateStatus: (status) => status >= 200 && status < 500
-    }
-  );
-
-  if (response.status >= 400 || !response.data) {
-    return null;
-  }
-
-  const nextSession = buildStoredAuthSession(response.data, response.data.user || storedSession.user);
-  if (!nextSession.accessToken) {
-    return null;
-  }
-
-  if (!nextSession.user?.id) {
-    const user = await requestSupabaseUser(nextSession.accessToken, authConfig);
-    nextSession.user = normalizeAuthUser(user);
-  }
-
-  if (!nextSession.user?.id) {
-    return null;
-  }
-
-  return nextSession;
-}
-
 async function resolveValidStoredAuthSession() {
   const authConfig = resolveAuthConfig();
-  const configured = Boolean(authConfig.supabaseUrl && authConfig.supabaseAnonKey);
+  const configured = Boolean(authConfig.steamWebApiKey);
   if (!configured) {
     return {
       configured: false,
@@ -1854,85 +1978,45 @@ async function resolveValidStoredAuthSession() {
     };
   }
 
-  if (isStoredAuthSessionExpired(session)) {
-    const refreshed = await refreshStoredAuthSession(session, authConfig).catch(() => null);
-    if (!refreshed) {
-      await clearPersistedAuthSession();
-      return {
-        configured: true,
-        session: null
-      };
+  const provider = String(session.provider || session.user?.provider || "").toLowerCase();
+  if (provider !== "steam") {
+    await clearPersistedAuthSession();
+    clearSteamUserDataCache();
+    return {
+      configured: true,
+      session: null
+    };
+  }
+
+  const steamId = normalizeSteamId(session.steamId || session.user?.id);
+  if (!steamId) {
+    await clearPersistedAuthSession();
+    clearSteamUserDataCache();
+    return {
+      configured: true,
+      session: null
+    };
+  }
+
+  const cacheStale = Date.now() - Number(steamUserDataCache.profileFetchedAt || 0) > STEAM_PROFILE_CACHE_TTL_MS;
+  const shouldRefreshProfile = !session.user?.displayName || cacheStale;
+  if (shouldRefreshProfile) {
+    const profile = await fetchSteamPlayerSummary(steamId, authConfig.steamWebApiKey).catch(() => null);
+    if (profile) {
+      const refreshed = buildStoredSteamSession(profile);
+      if (refreshed) {
+        session = refreshed;
+        await persistAuthSession(session);
+        steamUserDataCache.steamId = steamId;
+        steamUserDataCache.profile = profile;
+        steamUserDataCache.profileFetchedAt = Date.now();
+      }
     }
-    session = refreshed;
-    await persistAuthSession(session);
-  } else if (!session.user?.id) {
-    const user = await requestSupabaseUser(session.accessToken, authConfig).catch(() => null);
-    if (!user) {
-      await clearPersistedAuthSession();
-      return {
-        configured: true,
-        session: null
-      };
-    }
-    session.user = normalizeAuthUser(user);
-    await persistAuthSession(session);
   }
 
   return {
     configured: true,
     session
-  };
-}
-
-function buildDiscordAuthorizeUrl(authConfig) {
-  const authorizeUrl = new URL("/auth/v1/authorize", authConfig.supabaseUrl);
-  authorizeUrl.searchParams.set("provider", "discord");
-  authorizeUrl.searchParams.set("redirect_to", authConfig.redirectUrl);
-  authorizeUrl.searchParams.set("scopes", "identify email");
-  return authorizeUrl.toString();
-}
-
-function parseAuthCallbackPayload(rawUrl, authConfig) {
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(rawUrl);
-  } catch (_error) {
-    return null;
-  }
-
-  let expectedRedirect;
-  try {
-    expectedRedirect = new URL(authConfig.redirectUrl);
-  } catch (_error) {
-    return null;
-  }
-
-  const sameTarget =
-    parsedUrl.protocol.toLowerCase() === expectedRedirect.protocol.toLowerCase() &&
-    parsedUrl.hostname.toLowerCase() === expectedRedirect.hostname.toLowerCase() &&
-    parsedUrl.pathname === expectedRedirect.pathname;
-
-  if (!sameTarget) {
-    return null;
-  }
-
-  const mergedParams = new URLSearchParams(parsedUrl.search || "");
-  const hashRaw = String(parsedUrl.hash || "").replace(/^#/, "");
-  const hashParams = new URLSearchParams(hashRaw);
-  for (const [key, value] of hashParams.entries()) {
-    mergedParams.set(key, value);
-  }
-
-  return {
-    state: String(mergedParams.get("state") || "").trim(),
-    access_token: String(mergedParams.get("access_token") || "").trim(),
-    refresh_token: String(mergedParams.get("refresh_token") || "").trim(),
-    token_type: String(mergedParams.get("token_type") || "").trim(),
-    expires_in: parsePositiveInteger(mergedParams.get("expires_in")),
-    expires_at: parsePositiveInteger(mergedParams.get("expires_at")),
-    error: String(mergedParams.get("error") || "").trim(),
-    error_code: String(mergedParams.get("error_code") || "").trim(),
-    error_description: String(mergedParams.get("error_description") || "").trim()
   };
 }
 
@@ -1957,7 +2041,7 @@ async function handleAuthDeepLink(rawUrl) {
   }
 
   const authConfig = resolveAuthConfig();
-  const parsedPayload = parseAuthCallbackPayload(urlValue, authConfig);
+  const parsedPayload = parseSteamAuthCallbackPayload(urlValue, authConfig);
   if (!parsedPayload) {
     return false;
   }
@@ -1970,46 +2054,51 @@ async function handleAuthDeepLink(rawUrl) {
     return true;
   }
 
-  if (parsedPayload.error) {
-    if (parsedPayload.error_code === "bad_oauth_state" || parsedPayload.error === "invalid_request") {
-      finishActiveAuthLogin(
-        new Error(
-          "[AUTH_STATE] Sessao OAuth invalida no navegador. Feche as abas de login do Supabase/Discord e tente novamente."
-        )
-      );
-      return true;
-    }
+  if (String(activeAuthLoginRequest.provider || "").toLowerCase() !== "steam") {
+    finishActiveAuthLogin(new Error("[AUTH_STATE] Login em andamento nao corresponde ao callback recebido."));
+    return true;
+  }
 
+  const expectedState = String(activeAuthLoginRequest.state || "").trim();
+  if (!parsedPayload.state || !expectedState || parsedPayload.state !== expectedState) {
     finishActiveAuthLogin(
-      new Error(
-        `[AUTH_OAUTH_DENIED] ${parsedPayload.error_description || parsedPayload.error || "Login com Discord cancelado."}`
-      )
+      new Error("[AUTH_STATE] Sessao de login Steam invalida. Feche abas antigas e tente novamente.")
     );
     return true;
   }
 
-  if (!parsedPayload.access_token || !parsedPayload.refresh_token) {
-    if (parsedPayload.error_code === "bad_oauth_state" || parsedPayload.error === "invalid_request") {
-      finishActiveAuthLogin(
-        new Error(
-          "[AUTH_STATE] Sessao OAuth invalida no navegador. Feche as abas de login do Supabase/Discord e tente novamente."
-        )
-      );
-      return true;
-    }
-
-    finishActiveAuthLogin(new Error("[AUTH_CALLBACK_INVALID] Tokens de login nao foram recebidos."));
+  const openidMode = String(parsedPayload.openidMode || "").trim().toLowerCase();
+  if (!openidMode || openidMode !== "id_res") {
+    finishActiveAuthLogin(new Error("[AUTH_OAUTH_DENIED] Login Steam cancelado ou invalido."));
     return true;
   }
 
   try {
-    const user = await requestSupabaseUser(parsedPayload.access_token, authConfig);
-    const storedSession = buildStoredAuthSession(parsedPayload, user);
-    if (!storedSession.accessToken || !storedSession.user?.id) {
-      throw new Error("[AUTH_CALLBACK_INVALID] Sessao recebida esta incompleta.");
+    const openIdValid = await verifySteamOpenIdResponse(parsedPayload.rawQuery);
+    if (!openIdValid) {
+      throw new Error("[AUTH_CALLBACK_INVALID] Nao foi possivel validar resposta OpenID da Steam.");
+    }
+
+    const steamId = normalizeSteamId(extractSteamIdFromClaimedId(parsedPayload.openidClaimedId));
+    if (!steamId) {
+      throw new Error("[AUTH_CALLBACK_INVALID] SteamID nao encontrado no retorno da autenticacao.");
+    }
+
+    const player = await fetchSteamPlayerSummary(steamId, authConfig.steamWebApiKey);
+    if (!player) {
+      throw new Error("[AUTH_STEAM_PROFILE] Nao foi possivel carregar perfil Steam. Verifique steamWebApiKey.");
+    }
+
+    const storedSession = buildStoredSteamSession(player);
+    if (!storedSession || !storedSession.user?.id) {
+      throw new Error("[AUTH_CALLBACK_INVALID] Sessao Steam recebida esta incompleta.");
     }
 
     await persistAuthSession(storedSession);
+    clearSteamUserDataCache();
+    steamUserDataCache.steamId = steamId;
+    steamUserDataCache.profile = player;
+    steamUserDataCache.profileFetchedAt = Date.now();
     finishActiveAuthLogin(null, {
       authenticated: true,
       configured: true,
@@ -2017,8 +2106,9 @@ async function handleAuthDeepLink(rawUrl) {
     });
   } catch (error) {
     await clearPersistedAuthSession();
+    clearSteamUserDataCache();
     finishActiveAuthLogin(
-      new Error(error?.message || "[AUTH_LOGIN_FAILED] Nao foi possivel concluir login com Discord.")
+      new Error(error?.message || "[AUTH_LOGIN_FAILED] Nao foi possivel concluir login com Steam.")
     );
   }
 
@@ -2131,13 +2221,13 @@ async function getAuthSessionState() {
   };
 }
 
-async function loginWithDiscord() {
+async function loginWithSteam() {
   if (activeAuthLoginRequest) {
     throw new Error("Ja existe um login em andamento. Conclua o processo no navegador.");
   }
 
   const authConfig = resolveAuthConfig();
-  assertAuthConfig(authConfig);
+  assertSteamAuthConfig(authConfig);
 
   const protocolReady = await registerAuthProtocolClient();
   if (!protocolReady) {
@@ -2146,7 +2236,8 @@ async function loginWithDiscord() {
     );
   }
 
-  const authorizeUrl = buildDiscordAuthorizeUrl(authConfig);
+  const stateToken = createAuthStateToken();
+  const authorizeUrl = buildSteamOpenIdAuthorizeUrl(authConfig, stateToken);
 
   const loginPromise = new Promise((resolve, reject) => {
     const timeoutId = setTimeout(() => {
@@ -2155,6 +2246,8 @@ async function loginWithDiscord() {
 
     activeAuthLoginRequest = {
       timeoutId,
+      provider: "steam",
+      state: stateToken,
       resolve,
       reject
     };
@@ -2163,7 +2256,7 @@ async function loginWithDiscord() {
   try {
     await shell.openExternal(authorizeUrl);
   } catch (error) {
-    finishActiveAuthLogin(new Error(error?.message || "Falha ao abrir navegador para login Discord."));
+    finishActiveAuthLogin(new Error(error?.message || "Falha ao abrir navegador para login Steam."));
     throw error;
   }
 
@@ -2179,26 +2272,8 @@ async function loginWithDiscord() {
 }
 
 async function logoutAuthSession() {
-  const authConfig = resolveAuthConfig();
-  const hasConfig = Boolean(authConfig.supabaseUrl && authConfig.supabaseAnonKey);
-  const currentSession = readPersistedAuthSessionSync();
-
-  if (hasConfig && currentSession?.accessToken) {
-    await axios.post(
-      `${authConfig.supabaseUrl}/auth/v1/logout`,
-      {},
-      {
-        headers: {
-          apikey: authConfig.supabaseAnonKey,
-          Authorization: `Bearer ${currentSession.accessToken}`
-        },
-        timeout: 15_000,
-        validateStatus: () => true
-      }
-    ).catch(() => {});
-  }
-
   await clearPersistedAuthSession();
+  clearSteamUserDataCache();
   return { ok: true };
 }
 
@@ -2459,6 +2534,7 @@ function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
     publishedBy: pickFirstDefinedValue(merged, ["publishedBy", "published_by"]),
     releaseDate: pickFirstDefinedValue(merged, ["releaseDate", "release_date"]),
     trailerUrl: pickFirstDefinedValue(merged, ["trailerUrl", "trailer_url", "video_url"]),
+    steamAppId: pickFirstDefinedValue(merged, ["steamAppId", "steam_app_id", "steamGameId", "steam_game_id"]),
     gallery,
     genres,
     averagePlayTime: pickFirstDefinedValue(merged, ["averagePlayTime", "average_play_time"]),
@@ -2911,6 +2987,7 @@ async function readCatalogBundle() {
       const trailerUrl = normalizeOptionalString(
         entry.trailerUrl || entry.videoUrl || entry.youtubeUrl || entry.youtube || entry.trailer
       );
+      const steamAppId = parsePositiveInteger(entry.steamAppId ?? entry.steam_app_id ?? entry.steamGameId);
       const gallery = normalizeStringArray(entry.gallery || entry.screenshots || entry.images);
       const genres = normalizeStringArray(entry.genres || entry.tags || entry.genre);
       const averagePlayTime = normalizeStatValue(
@@ -2975,6 +3052,7 @@ async function readCatalogBundle() {
         releaseDate,
         trailerUrl,
         videoUrl: trailerUrl,
+        steamAppId: steamAppId > 0 ? steamAppId : 0,
         gallery,
         genres,
         averagePlayTime,
@@ -5313,6 +5391,262 @@ async function uninstallGame(gameId) {
   }
 }
 
+function getSteamSessionSnapshot() {
+  const stored = readPersistedAuthSessionSync();
+  if (!stored || typeof stored !== "object") {
+    return null;
+  }
+
+  const provider = String(stored.provider || stored.user?.provider || "").toLowerCase();
+  if (provider !== "steam") {
+    return null;
+  }
+
+  const steamId = normalizeSteamId(stored.steamId || stored.user?.id);
+  if (!steamId) {
+    return null;
+  }
+
+  return {
+    steamId,
+    user: stored.user || null
+  };
+}
+
+function ensureSteamUserCacheScope(steamId) {
+  const normalizedSteamId = normalizeSteamId(steamId);
+  if (!normalizedSteamId) {
+    clearSteamUserDataCache();
+    return;
+  }
+  if (steamUserDataCache.steamId && steamUserDataCache.steamId !== normalizedSteamId) {
+    clearSteamUserDataCache();
+  }
+  if (!steamUserDataCache.steamId) {
+    steamUserDataCache.steamId = normalizedSteamId;
+  }
+}
+
+function parseSteamAppId(value) {
+  const parsed = parsePositiveInteger(value);
+  return parsed > 0 ? parsed : 0;
+}
+
+async function fetchSteamOwnedGamesByAppId(steamId, steamWebApiKey) {
+  const endpoint = `${STEAM_API_BASE_URL}/IPlayerService/GetOwnedGames/v0001/`;
+  const response = await axios.get(endpoint, {
+    params: {
+      key: steamWebApiKey,
+      steamid: steamId,
+      include_played_free_games: 1,
+      include_appinfo: 0,
+      format: "json"
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status >= 400) {
+    throw new Error(`[STEAM_OWNED_GAMES_HTTP_${response.status}]`);
+  }
+
+  const games = Array.isArray(response.data?.response?.games) ? response.data.response.games : [];
+  const map = new Map();
+  for (const game of games) {
+    const appId = parseSteamAppId(game?.appid);
+    if (!appId) continue;
+    const playtimeMinutes = parsePositiveInteger(game?.playtime_forever);
+    map.set(appId, playtimeMinutes);
+  }
+  return map;
+}
+
+async function getSteamOwnedGamesByAppIdCached(steamId, steamWebApiKey) {
+  ensureSteamUserCacheScope(steamId);
+  const cacheAge = Date.now() - Number(steamUserDataCache.ownedGamesFetchedAt || 0);
+  const hasFreshCache =
+    steamUserDataCache.ownedGamesByAppId instanceof Map &&
+    steamUserDataCache.ownedGamesByAppId.size >= 0 &&
+    cacheAge >= 0 &&
+    cacheAge < STEAM_OWNED_GAMES_CACHE_TTL_MS;
+
+  if (hasFreshCache) {
+    return steamUserDataCache.ownedGamesByAppId;
+  }
+
+  if (steamUserDataCache.ownedGamesInFlight) {
+    return steamUserDataCache.ownedGamesInFlight;
+  }
+
+  steamUserDataCache.ownedGamesInFlight = fetchSteamOwnedGamesByAppId(steamId, steamWebApiKey)
+    .then((ownedGamesMap) => {
+      steamUserDataCache.ownedGamesByAppId = ownedGamesMap;
+      steamUserDataCache.ownedGamesFetchedAt = Date.now();
+      return ownedGamesMap;
+    })
+    .catch((error) => {
+      if (!(steamUserDataCache.ownedGamesByAppId instanceof Map)) {
+        steamUserDataCache.ownedGamesByAppId = new Map();
+      }
+      steamUserDataCache.ownedGamesFetchedAt = Date.now();
+      if (steamUserDataCache.ownedGamesByAppId.size > 0) {
+        return steamUserDataCache.ownedGamesByAppId;
+      }
+      throw error;
+    })
+    .finally(() => {
+      steamUserDataCache.ownedGamesInFlight = null;
+    });
+
+  return steamUserDataCache.ownedGamesInFlight;
+}
+
+async function fetchSteamAchievementPercent(steamId, appId, steamWebApiKey) {
+  const endpoint = `${STEAM_API_BASE_URL}/ISteamUserStats/GetPlayerAchievements/v0001/`;
+  const response = await axios.get(endpoint, {
+    params: {
+      key: steamWebApiKey,
+      steamid: steamId,
+      appid: appId
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status >= 400) {
+    throw new Error(`[STEAM_ACHIEV_HTTP_${response.status}]`);
+  }
+
+  const playerstats = response.data?.playerstats || {};
+  const success = playerstats?.success !== false;
+  if (!success) {
+    return null;
+  }
+
+  const achievements = Array.isArray(playerstats?.achievements) ? playerstats.achievements : [];
+  if (!achievements.length) {
+    return null;
+  }
+
+  const unlocked = achievements.filter((entry) => Number(entry?.achieved) === 1 || entry?.achieved === true).length;
+  const percent = (unlocked / achievements.length) * 100;
+  if (!Number.isFinite(percent)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, percent));
+}
+
+async function getSteamAchievementPercentCached(steamId, appId, steamWebApiKey) {
+  ensureSteamUserCacheScope(steamId);
+  const safeAppId = parseSteamAppId(appId);
+  if (!safeAppId) {
+    return null;
+  }
+
+  const current = steamUserDataCache.achievementsByAppId.get(safeAppId);
+  const currentAge = Date.now() - Number(current?.fetchedAt || 0);
+  if (current && currentAge >= 0 && currentAge < STEAM_ACHIEVEMENTS_CACHE_TTL_MS) {
+    return Number.isFinite(current.percent) ? current.percent : null;
+  }
+
+  const inFlight = steamUserDataCache.achievementsInFlight.get(safeAppId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const nextPromise = fetchSteamAchievementPercent(steamId, safeAppId, steamWebApiKey)
+    .then((percent) => {
+      steamUserDataCache.achievementsByAppId.set(safeAppId, {
+        percent: Number.isFinite(percent) ? percent : null,
+        fetchedAt: Date.now()
+      });
+      return Number.isFinite(percent) ? percent : null;
+    })
+    .catch((_error) => {
+      steamUserDataCache.achievementsByAppId.set(safeAppId, {
+        percent: null,
+        fetchedAt: Date.now()
+      });
+      return null;
+    })
+    .finally(() => {
+      steamUserDataCache.achievementsInFlight.delete(safeAppId);
+    });
+
+  steamUserDataCache.achievementsInFlight.set(safeAppId, nextPromise);
+  return nextPromise;
+}
+
+async function applySteamStatsToCatalogGames(games = []) {
+  if (!Array.isArray(games) || games.length === 0) {
+    return [];
+  }
+
+  const authConfig = resolveAuthConfig();
+  const steamWebApiKey = normalizeSteamWebApiKey(authConfig.steamWebApiKey);
+  if (!steamWebApiKey) {
+    return games;
+  }
+
+  const steamSession = getSteamSessionSnapshot();
+  if (!steamSession?.steamId) {
+    return games;
+  }
+
+  ensureSteamUserCacheScope(steamSession.steamId);
+
+  const appIds = [...new Set(games.map((game) => parseSteamAppId(game?.steamAppId)).filter((value) => value > 0))];
+  if (appIds.length === 0) {
+    return games;
+  }
+
+  const safeAppIds = appIds.slice(0, 40);
+  let ownedGamesByAppId = new Map();
+  try {
+    ownedGamesByAppId = await getSteamOwnedGamesByAppIdCached(steamSession.steamId, steamWebApiKey);
+  } catch (_error) {
+    ownedGamesByAppId = new Map();
+  }
+
+  const achievementByAppId = new Map();
+  await Promise.all(
+    safeAppIds.map(async (appId) => {
+      const percent = await getSteamAchievementPercentCached(steamSession.steamId, appId, steamWebApiKey);
+      if (Number.isFinite(percent)) {
+        achievementByAppId.set(appId, percent);
+      }
+    })
+  );
+
+  return games.map((game) => {
+    const appId = parseSteamAppId(game?.steamAppId);
+    if (!appId) {
+      return game;
+    }
+
+    const hasOwnedGame = ownedGamesByAppId.has(appId);
+    const playtimeMinutesRaw = Number(ownedGamesByAppId.get(appId));
+    const playtimeMinutes = Number.isFinite(playtimeMinutesRaw) && playtimeMinutesRaw >= 0 ? Math.floor(playtimeMinutesRaw) : 0;
+    const playtimeHours = playtimeMinutes / 60;
+    const achievementPercent = achievementByAppId.get(appId);
+    const hasPlaytime = hasOwnedGame;
+    const hasAchievement = Number.isFinite(achievementPercent);
+
+    if (!hasPlaytime && !hasAchievement) {
+      return game;
+    }
+
+    return {
+      ...game,
+      userPlayTimeMinutes: hasPlaytime ? playtimeMinutes : null,
+      userPlayTimeHours: hasPlaytime ? playtimeHours : null,
+      userAchievementPercent: hasAchievement ? achievementPercent : null,
+      averagePlayTime: hasPlaytime ? playtimeHours : game.averagePlayTime,
+      averageAchievement: hasAchievement ? achievementPercent : game.averageAchievement
+    };
+  });
+}
+
 async function getGamesWithStatus() {
   const { games, settings } = await readCatalogBundle();
   const installRoot = getCurrentInstallRoot(settings);
@@ -5372,7 +5706,8 @@ async function getGamesWithStatus() {
     })
   );
 
-  return gamesWithStatus;
+  const gamesWithSteamStats = await applySteamStatsToCatalogGames(gamesWithStatus);
+  return gamesWithSteamStats;
 }
 
 async function openInstallFolder() {
@@ -5653,7 +5988,8 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:open-game-install-folder", (_event, gameId) => openGameInstallFolder(gameId));
     ipcMain.handle("launcher:open-external-url", (_event, rawUrl) => openExternalUrl(rawUrl));
     ipcMain.handle("launcher:auth-get-session", () => getAuthSessionState());
-    ipcMain.handle("launcher:auth-login-discord", () => loginWithDiscord());
+    ipcMain.handle("launcher:auth-login-steam", () => loginWithSteam());
+    ipcMain.handle("launcher:auth-login-discord", () => loginWithSteam());
     ipcMain.handle("launcher:auth-logout", () => logoutAuthSession());
     ipcMain.handle("launcher:auto-update-get-state", () => getPublicAutoUpdateState());
     ipcMain.handle("launcher:auto-update-check", () => checkForLauncherUpdate("manual"));
