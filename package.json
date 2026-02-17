@@ -1,6 +1,6 @@
 {
   "name": "wplay",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Launcher de jogos em Electron com download, instalacao e execucao.",
   "author": "WPlay",
   "main": "main.js",
