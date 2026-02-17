@@ -66,7 +66,6 @@ if (process.platform === "win32" && typeof app.setAppUserModelId === "function")
 
 let mainWindow = null;
 let updateSplashWindow = null;
-let youtubePlayerWindow = null;
 let allowUpdateSplashWindowClose = false;
 let youtubeRequestHeaderHookInstalled = false;
 let authDeepLinkUrlBuffer = "";
@@ -364,7 +363,8 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      webviewTag: true
     }
   });
 
@@ -379,6 +379,33 @@ function createWindow() {
   mainWindow.on("unmaximize", sendMaximizedState);
   mainWindow.on("focus", () => {
     void checkForLauncherUpdate("focus");
+  });
+  mainWindow.webContents.on("did-attach-webview", (_event, guestWebContents) => {
+    if (!guestWebContents) return;
+
+    guestWebContents.setWindowOpenHandler(({ url }) => {
+      if (String(url || "").trim()) {
+        void shell.openExternal(String(url));
+      }
+      return { action: "deny" };
+    });
+
+    guestWebContents.on("will-navigate", (event, targetUrl) => {
+      const value = String(targetUrl || "").trim();
+      if (!value) return;
+
+      try {
+        const parsed = new URL(value);
+        if (isYoutubePlaybackHost(parsed.hostname)) {
+          return;
+        }
+      } catch (_error) {
+        // Fall through and block unknown targets.
+      }
+
+      event.preventDefault();
+      void shell.openExternal(value);
+    });
   });
   mainWindow.webContents.on("did-finish-load", () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -5396,62 +5423,18 @@ function isYoutubeHost(hostname) {
   );
 }
 
-async function openYoutubePlayer(rawUrl, rawTitle = "") {
-  const value = String(rawUrl || "").trim();
-  if (!value) {
-    throw new Error("[YOUTUBE_PLAYER] URL vazia.");
-  }
-
-  let parsed;
-  try {
-    parsed = new URL(value);
-  } catch (_error) {
-    throw new Error("[YOUTUBE_PLAYER] URL invalida.");
-  }
-
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error("[YOUTUBE_PLAYER] Protocolo nao suportado. Use http/https.");
-  }
-  if (!isYoutubeHost(parsed.hostname)) {
-    throw new Error("[YOUTUBE_PLAYER] URL nao pertence ao YouTube.");
-  }
-
-  const title = String(rawTitle || "").trim() || "WPlay Trailer";
-  const windowIconPath = resolveWindowIconPath();
-
-  if (!youtubePlayerWindow || youtubePlayerWindow.isDestroyed()) {
-    youtubePlayerWindow = new BrowserWindow({
-      width: 1240,
-      height: 760,
-      minWidth: 980,
-      minHeight: 620,
-      title,
-      backgroundColor: "#09090A",
-      autoHideMenuBar: true,
-      icon: windowIconPath,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false
-      }
-    });
-
-    youtubePlayerWindow.setMenuBarVisibility(false);
-    youtubePlayerWindow.setAutoHideMenuBar(true);
-
-    youtubePlayerWindow.on("closed", () => {
-      youtubePlayerWindow = null;
-    });
-  } else {
-    youtubePlayerWindow.setTitle(title);
-  }
-
-  await youtubePlayerWindow.loadURL(parsed.toString());
-  if (youtubePlayerWindow.isMinimized()) {
-    youtubePlayerWindow.restore();
-  }
-  youtubePlayerWindow.show();
-  youtubePlayerWindow.focus();
-  return true;
+function isYoutubePlaybackHost(hostname) {
+  const host = String(hostname || "").toLowerCase().trim();
+  if (!host) return false;
+  if (isYoutubeHost(host)) return true;
+  return (
+    host === "ytimg.com" ||
+    host.endsWith(".ytimg.com") ||
+    host === "googlevideo.com" ||
+    host.endsWith(".googlevideo.com") ||
+    host === "youtubei.googleapis.com" ||
+    host.endsWith(".youtubei.googleapis.com")
+  );
 }
 
 async function openGameInstallFolder(gameId) {
@@ -5672,7 +5655,6 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:open-downloads-folder", () => openInstallFolder());
     ipcMain.handle("launcher:open-game-install-folder", (_event, gameId) => openGameInstallFolder(gameId));
     ipcMain.handle("launcher:open-external-url", (_event, rawUrl) => openExternalUrl(rawUrl));
-    ipcMain.handle("launcher:open-youtube-player", (_event, rawUrl, rawTitle) => openYoutubePlayer(rawUrl, rawTitle));
     ipcMain.handle("launcher:auth-get-session", () => getAuthSessionState());
     ipcMain.handle("launcher:auth-login-discord", () => loginWithDiscord());
     ipcMain.handle("launcher:auth-logout", () => logoutAuthSession());
@@ -5721,9 +5703,5 @@ if (!hasSingleInstanceLock) {
   app.on("before-quit", () => {
     clearAutoUpdaterInterval();
     destroyUpdateSplashWindow();
-    if (youtubePlayerWindow && !youtubePlayerWindow.isDestroyed()) {
-      youtubePlayerWindow.destroy();
-      youtubePlayerWindow = null;
-    }
   });
 }

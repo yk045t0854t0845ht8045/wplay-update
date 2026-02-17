@@ -11,7 +11,6 @@ contextBridge.exposeInMainWorld("launcherApi", {
   openDownloadsFolder: () => ipcRenderer.invoke("launcher:open-downloads-folder"),
   openGameInstallFolder: (gameId) => ipcRenderer.invoke("launcher:open-game-install-folder", gameId),
   openExternalUrl: (urlValue) => ipcRenderer.invoke("launcher:open-external-url", urlValue),
-  openYoutubePlayer: (urlValue, title) => ipcRenderer.invoke("launcher:open-youtube-player", urlValue, title),
   authGetSession: () => ipcRenderer.invoke("launcher:auth-get-session"),
   authLoginDiscord: () => ipcRenderer.invoke("launcher:auth-login-discord"),
   authLogout: () => ipcRenderer.invoke("launcher:auth-logout"),

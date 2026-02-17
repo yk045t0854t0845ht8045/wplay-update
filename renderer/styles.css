@@ -3122,6 +3122,18 @@ body.auth-locked .auth-gate {
   width: 100%;
 }
 
+.video-youtube-shell{
+  background: #000;
+}
+
+.video-youtube-webview{
+  display: block;
+  height: 100%;
+  width: 100%;
+  border: 0;
+  background: #000;
+}
+
 .video-wrap iframe,
   .video-wrap video,
   .video-wrap img,

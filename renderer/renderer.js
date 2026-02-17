@@ -505,19 +505,6 @@ async function openExternalUrl(urlValue) {
   return true;
 }
 
-async function openYoutubePlayerInLauncher(urlValue, gameName = "") {
-  const raw = String(urlValue || "").trim();
-  if (!raw) return false;
-
-  if (typeof window.launcherApi.openYoutubePlayer === "function") {
-    const title = gameName ? `Trailer - ${String(gameName)}` : "WPlay Trailer";
-    const opened = await window.launcherApi.openYoutubePlayer(raw, title);
-    return Boolean(opened);
-  }
-
-  return openExternalUrl(raw);
-}
-
 function updateNotificationBadge() {
   if (!topNotificationsBadge) return;
   topNotificationsBadge.classList.toggle("is-hidden", state.unreadNotifications <= 0);
@@ -1678,20 +1665,6 @@ function toYoutubeWatchUrl(urlValue) {
   return `https://www.youtube.com/watch?${params.toString()}`;
 }
 
-function toYoutubePosterVariants(urlValue) {
-  const source = parseYoutubeSource(urlValue);
-  if (!source?.videoId) return [];
-
-  const base = `https://i.ytimg.com/vi/${source.videoId}`;
-  return [
-    `${base}/maxresdefault.jpg`,
-    `${base}/sddefault.jpg`,
-    `${base}/hqdefault.jpg`,
-    `${base}/mqdefault.jpg`,
-    `${base}/default.jpg`
-  ];
-}
-
 function isDirectVideo(urlValue) {
   const value = String(urlValue || "").trim();
   if (!value) return false;
@@ -2788,15 +2761,12 @@ function renderVideo(game) {
   const youtubeEmbed = toYoutubeEmbed(source);
   if (youtubeEmbed) {
     const youtubeWatchUrl = toYoutubeWatchUrl(source);
-    const posterVariants = toYoutubePosterVariants(source);
-    const posterImage = posterVariants[0] || getBannerImage(game);
-    const posterFallbacks = escapeHtml(JSON.stringify(posterVariants.slice(1)));
+    const watchPlayerUrl = youtubeWatchUrl
+      ? `${youtubeWatchUrl}${youtubeWatchUrl.includes("?") ? "&" : "?"}autoplay=0&hl=pt-BR`
+      : "";
     const videoActions = youtubeWatchUrl
       ? `
           <div class="video-actions-floating">
-            <button class="video-open-youtube-btn is-primary" type="button" data-open-youtube-player-url="${escapeHtml(youtubeWatchUrl)}" data-open-youtube-player-title="${escapeHtml(game.name)}">
-              Assistir no launcher
-            </button>
             <button class="video-open-youtube-btn" type="button" data-open-youtube-url="${escapeHtml(youtubeWatchUrl)}">
               YouTube
             </button>
@@ -2805,42 +2775,26 @@ function renderVideo(game) {
       : "";
 
     setDetailsVideoMarkup(`youtube:${game.id}:${youtubeEmbed}`, `
-      <div class="video-embed-shell">
+      <div class="video-embed-shell video-youtube-shell">
         ${
-          youtubeWatchUrl
+          watchPlayerUrl
             ? `
-              <button
-                class="video-youtube-poster"
-                type="button"
-                data-open-youtube-player-url="${escapeHtml(youtubeWatchUrl)}"
-                data-open-youtube-player-title="${escapeHtml(game.name)}"
-                title="Assistir trailer no launcher"
-              >
-                <img
-                  class="video-youtube-poster-image"
-                  src="${escapeHtml(posterImage)}"
-                  alt="Trailer de ${escapeHtml(game.name)}"
-                  data-youtube-poster-fallbacks="${posterFallbacks}"
-                  loading="lazy"
-                />
-                <span class="video-youtube-play-pill" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="currentColor" role="presentation" focusable="false">
-                    <path d="M8.5 6.5v11l8.5-5.5-8.5-5.5Z"></path>
-                  </svg>
-                  Reproduzir trailer
-                </span>
-              </button>
+              <webview
+                class="video-youtube-webview"
+                src="${escapeHtml(watchPlayerUrl)}"
+                partition="persist:wplay-youtube"
+                allowfullscreen
+              ></webview>
             `
             : `
-              <div class="video-youtube-poster">
-                <img
-                  class="video-youtube-poster-image"
-                  src="${escapeHtml(posterImage)}"
-                  alt="Trailer de ${escapeHtml(game.name)}"
-                  data-youtube-poster-fallbacks="${posterFallbacks}"
-                  loading="lazy"
-                />
-              </div>
+              <iframe
+                src="${escapeHtml(youtubeEmbed)}"
+                title="Trailer de ${escapeHtml(game.name)}"
+                loading="lazy"
+                referrerpolicy="strict-origin-when-cross-origin"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowfullscreen
+              ></iframe>
             `
         }
         ${videoActions}
@@ -3748,62 +3702,7 @@ function installEventBindings() {
   });
 
   if (detailsVideoWrap) {
-    detailsVideoWrap.addEventListener(
-      "error",
-      (event) => {
-        const target = event.target;
-        if (!(target instanceof HTMLImageElement)) return;
-
-        const rawFallbacks = String(target.dataset.youtubePosterFallbacks || "").trim();
-        if (!rawFallbacks) return;
-
-        let fallbacks = [];
-        try {
-          const parsed = JSON.parse(rawFallbacks);
-          if (Array.isArray(parsed)) {
-            fallbacks = parsed
-              .map((item) => String(item || "").trim())
-              .filter(Boolean);
-          }
-        } catch (_error) {
-          fallbacks = [];
-        }
-
-        if (!fallbacks.length) {
-          delete target.dataset.youtubePosterFallbacks;
-          return;
-        }
-
-        const nextImage = fallbacks.shift();
-        target.dataset.youtubePosterFallbacks = JSON.stringify(fallbacks);
-        if (!nextImage) return;
-        if (target.src === nextImage) return;
-        target.src = nextImage;
-      },
-      true
-    );
-
     detailsVideoWrap.addEventListener("click", async (event) => {
-      const openYoutubePlayerButton = event.target.closest("[data-open-youtube-player-url]");
-      if (openYoutubePlayerButton) {
-        event.preventDefault();
-        event.stopPropagation();
-
-        const urlValue = String(openYoutubePlayerButton.dataset.openYoutubePlayerUrl || "").trim();
-        if (!urlValue) return;
-
-        const gameName = String(openYoutubePlayerButton.dataset.openYoutubePlayerTitle || "").trim();
-        try {
-          await openYoutubePlayerInLauncher(urlValue, gameName);
-          setStatus("Abrindo trailer no player interno...");
-        } catch (error) {
-          const message = error?.message || "Nao foi possivel abrir o trailer no launcher.";
-          setStatus(message, true);
-          notify("error", "Video", message);
-        }
-        return;
-      }
-
       const openYoutubeButton = event.target.closest("[data-open-youtube-url]");
       if (!openYoutubeButton) return;
       event.preventDefault();

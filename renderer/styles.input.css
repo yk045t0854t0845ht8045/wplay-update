@@ -1599,6 +1599,16 @@
     @apply relative h-full w-full;
   }
 
+  .video-youtube-shell {
+    background: #000;
+  }
+
+  .video-youtube-webview {
+    @apply block h-full w-full;
+    border: 0;
+    background: #000;
+  }
+
   .video-wrap iframe,
   .video-wrap video,
   .video-wrap img,
