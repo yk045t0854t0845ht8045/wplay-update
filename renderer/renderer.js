@@ -96,9 +96,9 @@ const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = 8 * 1000;
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
 const DETAILS_ACTION_ICON_IMAGE_URLS = {
   // Cole aqui links PNG (https://...) para trocar icones do botao principal.
-  play: "https://imgur.com/CT3XpWU.png",
-  close: "https://imgur.com/CT3XpWU.png",
-  install: "https://imgur.com/vpSXqIW.png"
+  play: "https://imgur.com/tYO0G77.png",
+  close: "https://imgur.com/X2RTiUm.png",
+  install: "https://imgur.com/DgPXszC.png"
 };
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",

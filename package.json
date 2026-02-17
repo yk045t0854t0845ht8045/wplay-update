@@ -79,6 +79,7 @@
     "icon": "build/icon.png",
     "win": {
       "icon": "build/icon.ico",
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",
@@ -87,7 +88,7 @@
           ]
         }
       ],
-      "artifactName": "WPlay-${version}-${arch}.${ext}"
+      "artifactName": "WPlaySetup.${ext}"
     },
     "nsis": {
       "oneClick": false,

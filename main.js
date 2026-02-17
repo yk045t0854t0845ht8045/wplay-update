@@ -4,6 +4,7 @@ const os = require("os");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const crypto = require("crypto");
+const http = require("http");
 const { pipeline } = require("stream/promises");
 const { spawn } = require("child_process");
 const axios = require("axios");
@@ -33,6 +34,8 @@ const AUTH_CALLBACK_URL_DEFAULT = `${AUTH_PROTOCOL_SCHEME}://auth/callback`;
 const AUTH_LOGIN_TIMEOUT_MS = 3 * 60 * 1000;
 const AUTH_EXPIRY_SKEW_SECONDS = 30;
 const AUTH_STEAM_SESSION_TTL_SECONDS = 180 * 24 * 60 * 60;
+const AUTH_STEAM_LOCAL_CALLBACK_HOST = "127.0.0.1";
+const AUTH_STEAM_LOCAL_CALLBACK_PATH = "/auth/callback";
 const DOWNLOAD_STREAM_TIMEOUT_MS = Math.max(
   2 * 60 * 1000,
   Number(process.env.WPLAY_DOWNLOAD_TIMEOUT_MS) || 45 * 60 * 1000
@@ -818,6 +821,130 @@ function createAuthStateToken() {
   return crypto.randomBytes(18).toString("hex");
 }
 
+function isHttpProtocolUrl(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    const protocol = parsed.protocol.toLowerCase();
+    return protocol === "http:" || protocol === "https:";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function buildSteamLocalCallbackHtml(success, message) {
+  const safeMessage = String(message || "").replace(/[<>]/g, "");
+  const title = success ? "Login Steam concluido" : "Falha no login Steam";
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title}</title>
+  <style>
+    body { margin: 0; font-family: Segoe UI, Arial, sans-serif; background: #0b0b0c; color: #f0f0f0; }
+    main { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+    .card { max-width: 520px; background: #151517; border-radius: 14px; padding: 20px 18px; line-height: 1.5; }
+    h1 { margin: 0 0 8px; font-size: 18px; }
+    p { margin: 0; color: #d3d3d8; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1>${title}</h1>
+      <p>${safeMessage}</p>
+    </div>
+  </main>
+  <script>
+    setTimeout(function () { try { window.close(); } catch (_e) {} }, 1200);
+  </script>
+</body>
+</html>`;
+}
+
+async function createSteamLocalCallbackChannel() {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer();
+    let closed = false;
+
+    const close = () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      try {
+        server.close();
+      } catch (_error) {
+        // Ignore close errors.
+      }
+    };
+
+    server.on("request", (req, res) => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const baseUrl = `http://${AUTH_STEAM_LOCAL_CALLBACK_HOST}:${port}`;
+      let parsed;
+      try {
+        parsed = new URL(String(req.url || "/"), baseUrl);
+      } catch (_error) {
+        res.statusCode = 400;
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.end(buildSteamLocalCallbackHtml(false, "Resposta invalida recebida da autenticacao Steam."));
+        return;
+      }
+
+      if (parsed.pathname !== AUTH_STEAM_LOCAL_CALLBACK_PATH) {
+        res.statusCode = 404;
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.end("Not found");
+        return;
+      }
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.end(buildSteamLocalCallbackHtml(true, "Autenticacao recebida. Voce ja pode voltar ao launcher."));
+
+      setTimeout(() => close(), 1000);
+      setTimeout(() => {
+        void handleAuthDeepLink(parsed.toString());
+      }, 0);
+    });
+
+    server.once("error", (error) => {
+      close();
+      reject(
+        new Error(
+          `[AUTH_CALLBACK_SERVER] Nao foi possivel abrir callback local Steam: ${error?.message || "erro desconhecido"}`
+        )
+      );
+    });
+
+    server.listen(0, AUTH_STEAM_LOCAL_CALLBACK_HOST, () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        close();
+        reject(new Error("[AUTH_CALLBACK_SERVER] Porta local invalida para callback Steam."));
+        return;
+      }
+
+      resolve({
+        redirectUrl: `http://${AUTH_STEAM_LOCAL_CALLBACK_HOST}:${address.port}${AUTH_STEAM_LOCAL_CALLBACK_PATH}`,
+        cleanup: close
+      });
+    });
+  });
+}
+
+async function resolveSteamCallbackChannel(authConfig) {
+  if (isHttpProtocolUrl(authConfig?.redirectUrl)) {
+    return {
+      redirectUrl: String(authConfig.redirectUrl),
+      cleanup: null
+    };
+  }
+  return createSteamLocalCallbackChannel();
+}
+
 function normalizeSteamPersonaName(value, fallback = "Steam User") {
   const name = String(value || "").trim();
   return name || fallback;
@@ -876,7 +1003,7 @@ function buildSteamOpenIdAuthorizeUrl(authConfig, stateToken) {
   return url.toString();
 }
 
-function parseSteamAuthCallbackPayload(rawUrl, authConfig) {
+function parseSteamAuthCallbackPayload(rawUrl, authConfig, expectedRedirectUrl = "") {
   let parsedUrl;
   try {
     parsedUrl = new URL(rawUrl);
@@ -886,14 +1013,14 @@ function parseSteamAuthCallbackPayload(rawUrl, authConfig) {
 
   let expectedRedirect;
   try {
-    expectedRedirect = new URL(authConfig.redirectUrl);
+    expectedRedirect = new URL(String(expectedRedirectUrl || authConfig.redirectUrl || ""));
   } catch (_error) {
     return null;
   }
 
   const sameTarget =
     parsedUrl.protocol.toLowerCase() === expectedRedirect.protocol.toLowerCase() &&
-    parsedUrl.hostname.toLowerCase() === expectedRedirect.hostname.toLowerCase() &&
+    parsedUrl.host.toLowerCase() === expectedRedirect.host.toLowerCase() &&
     parsedUrl.pathname === expectedRedirect.pathname;
 
   if (!sameTarget) {
@@ -2095,6 +2222,13 @@ function finishActiveAuthLogin(error, result) {
   if (!activeAuthLoginRequest) return;
   const request = activeAuthLoginRequest;
   activeAuthLoginRequest = null;
+  if (typeof request.cleanup === "function") {
+    try {
+      request.cleanup();
+    } catch (_error) {
+      // Ignore cleanup errors.
+    }
+  }
   if (request.timeoutId) {
     clearTimeout(request.timeoutId);
   }
@@ -2107,12 +2241,10 @@ function finishActiveAuthLogin(error, result) {
 
 async function handleAuthDeepLink(rawUrl) {
   const urlValue = String(rawUrl || "").trim();
-  if (!urlValue.toLowerCase().startsWith(`${AUTH_PROTOCOL_SCHEME}://`)) {
-    return false;
-  }
 
   const authConfig = resolveAuthConfig();
-  const parsedPayload = parseSteamAuthCallbackPayload(urlValue, authConfig);
+  const expectedRedirectUrl = String(activeAuthLoginRequest?.callbackUrl || authConfig.redirectUrl || "");
+  const parsedPayload = parseSteamAuthCallbackPayload(urlValue, authConfig, expectedRedirectUrl);
   if (!parsedPayload) {
     return false;
   }
@@ -2300,15 +2432,15 @@ async function loginWithSteam() {
   const authConfig = resolveAuthConfig();
   assertSteamAuthConfig(authConfig);
 
-  const protocolReady = await registerAuthProtocolClient();
-  if (!protocolReady) {
-    throw new Error(
-      `[AUTH_PROTOCOL] Nao foi possivel registrar '${AUTH_PROTOCOL_SCHEME}://'. Feche e abra o launcher novamente para concluir o registro do protocolo.`
-    );
-  }
-
   const stateToken = createAuthStateToken();
-  const authorizeUrl = buildSteamOpenIdAuthorizeUrl(authConfig, stateToken);
+  const callbackChannel = await resolveSteamCallbackChannel(authConfig);
+  const authorizeUrl = buildSteamOpenIdAuthorizeUrl(
+    {
+      ...authConfig,
+      redirectUrl: callbackChannel.redirectUrl
+    },
+    stateToken
+  );
 
   const loginPromise = new Promise((resolve, reject) => {
     const timeoutId = setTimeout(() => {
@@ -2319,6 +2451,8 @@ async function loginWithSteam() {
       timeoutId,
       provider: "steam",
       state: stateToken,
+      callbackUrl: callbackChannel.redirectUrl,
+      cleanup: callbackChannel.cleanup,
       resolve,
       reject
     };

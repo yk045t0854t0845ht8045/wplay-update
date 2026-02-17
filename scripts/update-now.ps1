@@ -339,11 +339,19 @@ function Get-ExpectedReleaseAssetNames {
   if ($version.StartsWith("v")) {
     $version = $version.Substring(1)
   }
-  $exeName = "WPlay-$version-x64.exe"
+  $exeCandidates = @(
+    "WPlaySetup.exe",
+    "WPlay-$version-x64.exe"
+  ) | Where-Object { $_ } | Select-Object -Unique
+  $blockmapCandidates = @($exeCandidates | ForEach-Object { "$_.blockmap" } | Where-Object { $_ } | Select-Object -Unique)
+  $exeName = if ($exeCandidates.Count -gt 0) { [string]$exeCandidates[0] } else { "WPlaySetup.exe" }
+  $blockmapName = if ($blockmapCandidates.Count -gt 0) { [string]$blockmapCandidates[0] } else { "$exeName.blockmap" }
   return [pscustomobject]@{
-    Manifest = "latest.yml"
-    Exe      = $exeName
-    Blockmap = "$exeName.blockmap"
+    Manifest            = "latest.yml"
+    Exe                 = $exeName
+    Blockmap            = $blockmapName
+    ExeCandidates       = $exeCandidates
+    BlockmapCandidates  = $blockmapCandidates
   }
 }
 
@@ -376,14 +384,36 @@ function Test-ReleaseAssetsReady {
 
   $expected = Get-ExpectedReleaseAssetNames -Tag $Tag
   $assetNames = Get-ReleaseAssetNames -Release $Release
+  $exeCandidates = @($expected.ExeCandidates | Where-Object { $_ } | Select-Object -Unique)
+  if ($exeCandidates.Count -eq 0) {
+    $exeCandidates = @([string]$expected.Exe)
+  }
+  $blockmapCandidates = @($expected.BlockmapCandidates | Where-Object { $_ } | Select-Object -Unique)
+  if ($blockmapCandidates.Count -eq 0) {
+    $blockmapCandidates = @([string]$expected.Blockmap)
+  }
   $hasManifest = $assetNames -contains $expected.Manifest
-  $hasExe = ($assetNames | Where-Object { $_ -ieq $expected.Exe -or $_ -match '\.exe$' } | Select-Object -First 1) -ne $null
-  $hasBlockmap = ($assetNames | Where-Object { $_ -ieq $expected.Blockmap -or $_ -match '\.blockmap$' } | Select-Object -First 1) -ne $null
+  $hasExe = (
+    $assetNames |
+      Where-Object { $_ -match '\.exe$' -or ($exeCandidates -contains $_) } |
+      Select-Object -First 1
+  ) -ne $null
+  if (-not $hasExe) {
+    $hasExe = ($assetNames | Where-Object { $exeCandidates -contains $_ } | Select-Object -First 1) -ne $null
+  }
+  $hasBlockmap = (
+    $assetNames |
+      Where-Object { $_ -match '\.blockmap$' -or ($blockmapCandidates -contains $_) } |
+      Select-Object -First 1
+  ) -ne $null
+  if (-not $hasBlockmap) {
+    $hasBlockmap = ($assetNames | Where-Object { $blockmapCandidates -contains $_ } | Select-Object -First 1) -ne $null
+  }
 
   $baseDownloadUrl = "https://github.com/$Owner/$Repo/releases/download/$Tag"
   $manifestUrl = "$baseDownloadUrl/$($expected.Manifest)"
-  $exeUrl = "$baseDownloadUrl/$($expected.Exe)"
-  $blockmapUrl = "$baseDownloadUrl/$($expected.Blockmap)"
+  $exeUrl = "$baseDownloadUrl/$($exeCandidates[0])"
+  $blockmapUrl = "$baseDownloadUrl/$($blockmapCandidates[0])"
 
   if (-not $hasManifest) {
     $probe = Test-HttpUrlExists -Url $manifestUrl -Headers $WebHeaders
@@ -393,17 +423,27 @@ function Test-ReleaseAssetsReady {
     }
   }
   if (-not $hasExe) {
-    $probe = Test-HttpUrlExists -Url $exeUrl -Headers $WebHeaders
-    if ($probe.Exists) {
-      $hasExe = $true
-      $assetNames = Merge-ReleaseAssetNames -Existing $assetNames -Additional @($expected.Exe)
+    foreach ($candidate in $exeCandidates) {
+      $candidateUrl = "$baseDownloadUrl/$candidate"
+      $probe = Test-HttpUrlExists -Url $candidateUrl -Headers $WebHeaders
+      if ($probe.Exists) {
+        $hasExe = $true
+        $exeUrl = $candidateUrl
+        $assetNames = Merge-ReleaseAssetNames -Existing $assetNames -Additional @($candidate)
+        break
+      }
     }
   }
   if (-not $hasBlockmap) {
-    $probe = Test-HttpUrlExists -Url $blockmapUrl -Headers $WebHeaders
-    if ($probe.Exists) {
-      $hasBlockmap = $true
-      $assetNames = Merge-ReleaseAssetNames -Existing $assetNames -Additional @($expected.Blockmap)
+    foreach ($candidate in $blockmapCandidates) {
+      $candidateUrl = "$baseDownloadUrl/$candidate"
+      $probe = Test-HttpUrlExists -Url $candidateUrl -Headers $WebHeaders
+      if ($probe.Exists) {
+        $hasBlockmap = $true
+        $blockmapUrl = $candidateUrl
+        $assetNames = Merge-ReleaseAssetNames -Existing $assetNames -Additional @($candidate)
+        break
+      }
     }
   }
 
