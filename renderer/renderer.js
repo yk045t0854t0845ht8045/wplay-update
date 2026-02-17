@@ -1540,7 +1540,7 @@ function toYoutubeEmbed(urlValue) {
 
   const idOnlyMatch = rawInput.match(/^[a-zA-Z0-9_-]{11}$/);
   if (idOnlyMatch) {
-    return `https://www.youtube.com/embed/${idOnlyMatch[0]}?rel=0&modestbranding=1`;
+    return `https://www.youtube.com/embed/${idOnlyMatch[0]}?rel=0&playsinline=1&enablejsapi=1&origin=https%3A%2F%2Fwww.youtube.com&widget_referrer=https%3A%2F%2Fwww.youtube.com`;
   }
 
   const candidateUrl = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//i.test(rawInput)
@@ -1574,18 +1574,23 @@ function toYoutubeEmbed(urlValue) {
     }
 
     if (!videoId && (host === "youtube.com" || host === "youtube-nocookie.com")) {
-      if (["shorts", "live", "v", "watch"].includes(pathParts[0]) && pathParts[1]) {
+      if (["shorts", "live", "v"].includes(pathParts[0]) && pathParts[1]) {
         videoId = pathParts[1];
       }
     }
 
-    if (!videoId || !/^[a-zA-Z0-9_-]{6,}$/.test(videoId)) {
+    if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
       return "";
     }
 
     const params = new URLSearchParams();
     params.set("rel", "0");
-    params.set("modestbranding", "1");
+    params.set("playsinline", "1");
+    params.set("enablejsapi", "1");
+    params.set("origin", "https://www.youtube.com");
+    params.set("widget_referrer", "https://www.youtube.com");
+    params.set("iv_load_policy", "3");
+    params.set("fs", "1");
 
     const list = parsed.searchParams.get("list");
     if (list) {
@@ -2703,6 +2708,7 @@ function renderVideo(game) {
         src="${escapeHtml(youtubeEmbed)}"
         title="Trailer de ${escapeHtml(game.name)}"
         loading="lazy"
+        referrerpolicy="strict-origin-when-cross-origin"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
         allowfullscreen
       ></iframe>

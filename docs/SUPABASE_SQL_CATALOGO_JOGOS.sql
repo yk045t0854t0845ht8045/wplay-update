@@ -90,6 +90,7 @@ insert into public.launcher_games (
   download_url,
   download_urls,
   download_sources,
+  google_drive_file_id,
   install_dir_name,
   launch_executable,
   image_url,
@@ -119,16 +120,29 @@ insert into public.launcher_games (
   'rar',
   'online-fix.me',
   'c09b27ed29370ea971e6c1e03bca7dc1ff59f73d391c11dd8f0ff8cbb9fd850e',
-  'https://github.com/yk045t0854t0845ht8045/wplay-assets/releases/download/repo-v0.3.2/REPO.v0.3.2-OFME.rar',
+  'https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0',
   '[]'::jsonb,
   '[
     {
-      "url": "https://github.com/yk045t0854t0845ht8045/wplay-assets/releases/download/repo-v0.3.2/REPO.v0.3.2-OFME.rar",
-      "label": "github-release",
-      "kind": "github",
-      "priority": 10
+      "url": "https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0",
+      "label": "driveusercontent-repo",
+      "kind": "google-drive",
+      "priority": 5
+    },
+    {
+      "url": "https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0&confirm=t",
+      "label": "driveusercontent-confirm",
+      "kind": "google-drive",
+      "priority": 6
+    },
+    {
+      "url": "https://drive.google.com/uc?export=download&id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu",
+      "label": "drive-uc-fallback",
+      "kind": "google-drive",
+      "priority": 8
     }
   ]'::jsonb,
+  '1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu',
   'REPO',
   E'REPO\\REPO.EXE',
   'https://imgur.com/CkC4BWy.png',
@@ -166,6 +180,7 @@ set
   download_url = excluded.download_url,
   download_urls = excluded.download_urls,
   download_sources = excluded.download_sources,
+  google_drive_file_id = excluded.google_drive_file_id,
   install_dir_name = excluded.install_dir_name,
   launch_executable = excluded.launch_executable,
   image_url = excluded.image_url,

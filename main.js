@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, dialog, safeStorage } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, dialog, safeStorage, session } = require("electron");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
@@ -52,10 +52,13 @@ const CATALOG_MIN_POLL_INTERVAL_SECONDS = 5;
 const CATALOG_MAX_POLL_INTERVAL_SECONDS = 300;
 const CATALOG_DEFAULT_SUPABASE_SCHEMA = "public";
 const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
+const YOUTUBE_EMBED_REFERER = "https://www.youtube.com/";
+const YOUTUBE_EMBED_ORIGIN = "https://www.youtube.com";
 
 let mainWindow = null;
 let updateSplashWindow = null;
 let allowUpdateSplashWindowClose = false;
+let youtubeRequestHeaderHookInstalled = false;
 let authDeepLinkUrlBuffer = "";
 let activeAuthLoginRequest = null;
 let authSessionCache = null;
@@ -146,6 +149,62 @@ function resolveRendererEntryPath() {
     // Fall through to explicit error.
   }
   throw new Error("Interface nao encontrada. Rode `npm run next:build` para gerar a pasta `out`.");
+}
+
+function ensureYoutubeEmbedRequestHeaders() {
+  if (youtubeRequestHeaderHookInstalled) {
+    return;
+  }
+
+  const defaultSession = session?.defaultSession;
+  if (!defaultSession) {
+    return;
+  }
+
+  youtubeRequestHeaderHookInstalled = true;
+
+  const youtubeUrlFilters = {
+    urls: [
+      "https://www.youtube.com/*",
+      "https://youtube.com/*",
+      "https://m.youtube.com/*",
+      "https://www.youtube-nocookie.com/*",
+      "https://youtube-nocookie.com/*",
+      "https://*.ytimg.com/*",
+      "https://*.googlevideo.com/*"
+    ]
+  };
+
+  defaultSession.webRequest.onBeforeSendHeaders(youtubeUrlFilters, (details, callback) => {
+    const nextHeaders = { ...(details?.requestHeaders || {}) };
+    const headerKeys = Object.keys(nextHeaders);
+
+    const getExistingHeaderKey = (targetKey) => {
+      const normalizedTarget = String(targetKey || "").toLowerCase();
+      return headerKeys.find((key) => String(key || "").toLowerCase() === normalizedTarget) || "";
+    };
+
+    const refererKey = getExistingHeaderKey("referer");
+    if (!refererKey || !String(nextHeaders[refererKey] || "").trim()) {
+      nextHeaders.Referer = YOUTUBE_EMBED_REFERER;
+    }
+
+    const urlValue = String(details?.url || "").toLowerCase();
+    const looksLikeYoutubePlayerRequest =
+      urlValue.includes("/embed/") ||
+      urlValue.includes("/youtubei/") ||
+      urlValue.includes("/get_video_info") ||
+      urlValue.includes("/api/stats/");
+
+    if (looksLikeYoutubePlayerRequest) {
+      const originKey = getExistingHeaderKey("origin");
+      if (!originKey || !String(nextHeaders[originKey] || "").trim()) {
+        nextHeaders.Origin = YOUTUBE_EMBED_ORIGIN;
+      }
+    }
+
+    callback({ requestHeaders: nextHeaders });
+  });
 }
 
 function resolveUpdateSplashEntryPath() {
@@ -5459,6 +5518,7 @@ if (!hasSingleInstanceLock) {
     await ensurePersistedAuthConfigFile().catch(() => {});
     await ensurePersistedUpdaterConfigFile().catch(() => {});
     registerAuthProtocolClient();
+    ensureYoutubeEmbedRequestHeaders();
     setupAutoUpdater();
 
     const shouldCheckUpdateOnLaunch = Boolean(

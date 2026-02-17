@@ -13,7 +13,7 @@ Esse SQL:
 1. cria tabela `public.launcher_games`
 2. cria trigger de `updated_at`
 3. cria policy de leitura para `anon/authenticated`
-4. insere (ou atualiza) o jogo `repo`
+4. insere (ou atualiza) o jogo `repo` (Drive-only)
 
 ## 2) Confirmar auth do launcher
 
@@ -55,7 +55,7 @@ Exemplo rapido:
 
 ```sql
 insert into public.launcher_games (
-  id, name, section, archive_type, download_url, download_sources,
+  id, name, section, archive_type, download_url, download_sources, google_drive_file_id,
   install_dir_name, launch_executable, enabled, sort_order
 )
 values (
@@ -63,8 +63,12 @@ values (
   'Meu Jogo',
   'Catalogo',
   'zip',
-  'https://github.com/SEU_USUARIO/wplay-assets/releases/download/meu-jogo-v1/meu-jogo.zip',
-  '[{"url":"https://github.com/SEU_USUARIO/wplay-assets/releases/download/meu-jogo-v1/meu-jogo.zip","label":"github-release","kind":"github","priority":10}]'::jsonb,
+  'https://drive.usercontent.google.com/download?id=ID_DO_ARQUIVO&export=download&authuser=0',
+  '[
+    {"url":"https://drive.usercontent.google.com/download?id=ID_DO_ARQUIVO&export=download&authuser=0","label":"driveusercontent","kind":"google-drive","priority":5},
+    {"url":"https://drive.google.com/uc?export=download&id=ID_DO_ARQUIVO","label":"drive-uc-fallback","kind":"google-drive","priority":8}
+  ]'::jsonb,
+  'ID_DO_ARQUIVO',
   'MEU_JOGO',
   E'MEU_JOGO\\JOGO.EXE',
   true,
@@ -75,6 +79,7 @@ set
   name = excluded.name,
   download_url = excluded.download_url,
   download_sources = excluded.download_sources,
+  google_drive_file_id = excluded.google_drive_file_id,
   install_dir_name = excluded.install_dir_name,
   launch_executable = excluded.launch_executable,
   enabled = excluded.enabled,
@@ -83,10 +88,14 @@ set
 
 Em ate ~5 segundos, o jogo aparece no launcher sem atualizar build.
 
-## 6) Teste pronto: REPO 2 (Google Drive)
+## 6) Upsert pronto: REPO oficial (Google Drive)
 
-Para inserir/atualizar um jogo de teste `REPO 2` usando link `drive.usercontent`, execute:
+Para inserir/atualizar o `REPO` oficial usando link `drive.usercontent`, execute:
 
 - `docs/SUPABASE_SQL_REPO2_TESTE.sql`
 
-Esse SQL ja sobe `download_sources` com prioridade para o link direto e fallbacks.
+Esse SQL remove `repo2` antigo (se existir) e sobe o `repo` oficial com `download_sources` priorizando Drive + fallbacks.
+
+## 7) Sem atualizar launcher a cada mudanca
+
+Com `catalog.provider = "supabase"` e `pollIntervalSeconds = 5` no `config/games.json`, qualquer alteracao no banco (nome, descricao, links, preco, ordem etc.) aparece no launcher em segundos, sem gerar novo build do app.

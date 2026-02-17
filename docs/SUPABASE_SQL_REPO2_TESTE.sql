@@ -1,5 +1,8 @@
--- REPO 2 (teste Google Drive usercontent com confirmacao automatica)
+-- REPO oficial (Drive only, com confirmacao automatica)
 -- Execute no SQL Editor do Supabase.
+
+delete from public.launcher_games
+where id = 'repo2';
 
 insert into public.launcher_games (
   id,
@@ -11,6 +14,7 @@ insert into public.launcher_games (
   archive_password,
   checksum_sha256,
   download_url,
+  download_urls,
   download_sources,
   google_drive_file_id,
   install_dir_name,
@@ -34,8 +38,8 @@ insert into public.launcher_games (
   enabled,
   sort_order
 ) values (
-  'repo2',
-  'REPO 2',
+  'repo',
+  'R.E.P.O.',
   'Catalogo',
   'Build de teste do REPO via Google Drive usercontent para validar fluxo de confirmacao automatica de arquivo grande.',
   'Versao de teste para validar download via Google Drive com pagina de aviso de virus e confirmacao automatica no launcher.',
@@ -43,10 +47,11 @@ insert into public.launcher_games (
   'online-fix.me',
   'c09b27ed29370ea971e6c1e03bca7dc1ff59f73d391c11dd8f0ff8cbb9fd850e',
   'https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0',
+  '[]'::jsonb,
   '[
     {
       "url": "https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0",
-      "label": "driveusercontent-repo2",
+      "label": "driveusercontent-repo",
       "kind": "google-drive",
       "priority": 5
     },
@@ -64,7 +69,7 @@ insert into public.launcher_games (
     }
   ]'::jsonb,
   '1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu',
-  'REPO_2',
+  'REPO',
   E'REPO\\REPO.EXE',
   'https://imgur.com/CkC4BWy.png',
   'https://imgur.com/CkC4BWy.png',
@@ -87,7 +92,7 @@ insert into public.launcher_games (
   false,
   false,
   true,
-  11
+  10
 )
 on conflict (id) do update
 set
@@ -99,6 +104,7 @@ set
   archive_password = excluded.archive_password,
   checksum_sha256 = excluded.checksum_sha256,
   download_url = excluded.download_url,
+  download_urls = excluded.download_urls,
   download_sources = excluded.download_sources,
   google_drive_file_id = excluded.google_drive_file_id,
   install_dir_name = excluded.install_dir_name,
