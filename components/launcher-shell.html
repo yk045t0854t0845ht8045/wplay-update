@@ -1,0 +1,443 @@
+
+    <div class="bg-glow glow-left"></div>
+    <div class="bg-glow glow-right"></div>
+    <div class="bg-noise"></div>
+
+    <header class="window-chrome" aria-label="Janela do aplicativo">
+      <div class="window-chrome-drag">
+        <img class="window-chrome-logo" src="./assets/logo.png" alt="" aria-hidden="true" />
+        <span class="window-chrome-title">WPlay</span>
+      </div>
+      <div class="window-controls" aria-label="Controles da janela">
+        <button id="windowMinBtn" class="window-control-btn" type="button" aria-label="Minimizar">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M6 12.5H18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+          </svg>
+        </button>
+        <button id="windowMaxBtn" class="window-control-btn" type="button" aria-label="Maximizar">
+          <svg class="window-icon-max" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="6.8" y="6.8" width="10.4" height="10.4" rx="1.6" stroke="currentColor" stroke-width="1.8"></rect>
+          </svg>
+          <svg class="window-icon-restore" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M9.2 9.2H16.8V16.8H9.2V9.2Z" stroke="currentColor" stroke-width="1.7"></path>
+            <path d="M7 14.8V7.2H14.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path>
+          </svg>
+        </button>
+        <button id="windowCloseBtn" class="window-control-btn is-close" type="button" aria-label="Fechar">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M8 8L16 16M16 8L8 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="app-frame">
+      <section id="authGate" class="auth-gate is-hidden" aria-label="Login do launcher">
+        <div class="auth-gate-card">
+          <div class="auth-gate-brand">
+            <img src="./assets/logo.png" alt="" aria-hidden="true" />
+            <span>WPlay</span>
+          </div>
+          <h2>Entrar com Discord</h2>
+          <p>
+            Para acessar o launcher, faca login com sua conta Discord.
+            O acesso so e liberado apos autenticacao valida.
+          </p>
+          <p id="authGateStatus" class="auth-gate-status">Validando sessao...</p>
+          <button id="authDiscordLoginBtn" class="auth-discord-btn" type="button">Continuar com Discord</button>
+          <button id="authRetryBtn" class="auth-retry-btn is-hidden" type="button">Tentar novamente</button>
+        </div>
+      </section>
+
+      <div class="launcher-shell">
+        <aside class="side-rail">
+          <button id="sideHomeBtn" class="profile-badge" type="button" aria-label="Ir para Store">
+            <img
+              id="sideHomeLogo"
+              class="profile-logo"
+              src="./assets/logo.png"
+              alt="Logo WPlay"
+              loading="lazy"
+            />
+            <span class="profile-fallback">WP</span>
+          </button>
+
+          <section class="rail-list-wrap" aria-label="Selecao rapida de jogos">
+            <div id="railGamesList" class="rail-games"></div>
+          </section>
+
+          <button
+            id="railDownloadsBtn"
+            class="rail-install-btn is-hidden"
+            type="button"
+            aria-label="Downloads e instalacoes"
+            aria-expanded="false"
+            aria-controls="downloadsView"
+          >
+            <span class="rail-install-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M12 4.2V13.7" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+                <path d="M8.7 10.8L12 14.1L15.3 10.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
+                <rect x="5.1" y="15.3" width="13.8" height="4.5" rx="1.6" stroke="currentColor" stroke-width="1.7"></rect>
+              </svg>
+            </span>
+            <span class="visually-hidden">Abrir downloads ativos</span>
+            <span id="railDownloadsCount" class="rail-install-count is-hidden" aria-hidden="true">0</span>
+          </button>
+        </aside>
+
+        <main class="main-stage">
+          <div class="stage-surface">
+            <header class="top-header">
+              <nav class="top-tabs" aria-label="Navegacao principal">
+                <button id="navLibraryBtn" class="top-tab" type="button" data-view="library">Library</button>
+                <button id="navStoreBtn" class="top-tab is-active" type="button" data-view="store">Store</button>
+              </nav>
+
+              <div class="top-actions">
+                <div class="search-wrap search-wrap-top is-collapsed" role="search">
+                  <button id="topSearchToggle" class="search-toggle-btn" type="button" aria-label="Buscar">
+                    <span class="search-icon">
+                      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle cx="11.2" cy="11.2" r="5.8" stroke="currentColor" stroke-width="1.9"></circle>
+                        <path d="M15.4 15.4L19 19" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+                      </svg>
+                    </span>
+                  </button>
+                  <input id="searchInput" type="search" placeholder="Buscar jogo..." autocomplete="off" />
+                </div>
+
+                <button
+                  id="topNotificationsBtn"
+                  class="top-icon-btn"
+                  type="button"
+                  aria-label="Notificacoes"
+                  aria-expanded="false"
+                  aria-controls="notificationsPanel"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M8 17.2H16L15 15.4V11.2C15 9.2 13.7 7.5 11.8 6.9V6.4C11.8 5.7 11.3 5.2 10.6 5.2C9.9 5.2 9.4 5.7 9.4 6.4V6.9C7.5 7.5 6.2 9.2 6.2 11.2V15.4L5.2 17.2H8Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path>
+                    <path d="M9.1 18.2C9.4 19 10 19.5 10.8 19.5C11.6 19.5 12.2 19 12.5 18.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path>
+                  </svg>
+                  <span id="topNotificationsBadge" class="top-badge is-hidden" aria-hidden="true"></span>
+                </button>
+                <button
+                  id="topUpdateBtn"
+                  class="top-icon-btn top-update-btn is-hidden"
+                  type="button"
+                  aria-label="Atualizacao do launcher"
+                  title="Atualizacao do launcher"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M17.2 8.1V4.6M17.2 4.6H13.7M17.2 4.6L12.8 9" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M6.8 15.9V19.4M6.8 19.4H10.3M6.8 19.4L11.2 15" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M7.2 8.6C7.9 7.4 9.3 6.6 10.9 6.6C13 6.6 14.8 8 15.4 10" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"></path>
+                    <path d="M16.8 15.4C16.1 16.6 14.7 17.4 13.1 17.4C11 17.4 9.2 16 8.6 14" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"></path>
+                  </svg>
+                </button>
+                <section
+                  id="notificationsPanel"
+                  class="notifications-panel is-hidden"
+                  role="dialog"
+                  aria-label="Notificacoes recentes"
+                >
+                  <header class="notifications-panel-head">
+                    <strong>Notificacoes</strong>
+                    <button id="notificationsClearBtn" class="notifications-clear-btn" type="button">Limpar</button>
+                  </header>
+                  <p id="notificationsEmpty" class="notifications-empty">Nenhuma notificacao recente.</p>
+                  <div id="notificationsList" class="notifications-list is-hidden"></div>
+                </section>
+
+                <button
+                  id="topAccountBtn"
+                  class="top-user-btn"
+                  type="button"
+                  aria-label="Conta"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  aria-controls="accountMenu"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle cx="12" cy="8.6" r="3.3" stroke="currentColor" stroke-width="1.7"></circle>
+                    <path d="M6.7 18.2C7.5 15.9 9.5 14.8 12 14.8C14.5 14.8 16.5 15.9 17.3 18.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path>
+                  </svg>
+                </button>
+                <section id="accountMenu" class="account-menu is-hidden" role="menu" aria-label="Menu da conta">
+                  <header class="account-menu-head">
+                    <strong id="accountMenuName">Conta</strong>
+                    <span id="accountMenuEmail">Sem login</span>
+                  </header>
+                  <button class="account-menu-item" type="button" role="menuitem" data-account-action="store">LOJA</button>
+                  <button class="account-menu-item" type="button" role="menuitem" data-account-action="library">BIBLIOTECA</button>
+                  <button class="account-menu-item" type="button" role="menuitem" data-account-action="folder">PASTA LOCAL</button>
+                  <button class="account-menu-item is-danger" type="button" role="menuitem" data-account-action="logout">LOGOUT</button>
+                </section>
+              </div>
+            </header>
+
+            <header class="stage-header">
+              <div class="stage-title">
+                <p class="kicker">WPLAY GAME HUB</p>
+                <h1 id="viewTitle">Store</h1>
+              </div>
+
+              <div class="stage-tools">
+                <div id="storeFilterRow" class="filter-row" role="tablist" aria-label="Filtros de jogos">
+                  <button class="filter-pill is-active" type="button" data-filter="popular">All Games</button>
+                  <button class="filter-pill" type="button" data-filter="downloaded">Most Downloaded</button>
+                  <button class="filter-pill" type="button" data-filter="top">Top Rated</button>
+                </div>
+              </div>
+            </header>
+
+            <p id="statusMessage" class="status-line">Carregando jogos...</p>
+
+            <section id="storeView" class="view is-active" aria-label="Catalogo de jogos">
+              <div id="storeGrid" class="store-grid"></div>
+            </section>
+
+            <section id="detailsView" class="view" aria-label="Detalhes do jogo">
+              <article class="hero-panel">
+                <div id="detailsHeroBackdrop" class="hero-backdrop"></div>
+                <div class="hero-shade"></div>
+
+                <div class="hero-top">
+                  <button id="detailsBackBtn" class="back-btn" type="button" aria-label="Voltar">&larr;</button>
+                  <span id="detailsBreadcrumb" class="hero-breadcrumb">Jogo</span>
+                </div>
+
+                <div class="hero-body">
+                  <div class="hero-stats" aria-label="Estatisticas do jogo">
+                    <article class="stat-card">
+                      <div class="stat-value-row">
+                        <strong id="detailsStatPlayTime">--</strong>
+                        <span class="stat-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="12" r="8.3" stroke="currentColor" stroke-width="1.8"></circle>
+                            <path d="M12 7.6V12.1L15.2 14.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                          </svg>
+                        </span>
+                      </div>
+                      <span class="stat-label">AVG. PLAY TIME</span>
+                    </article>
+                    <article class="stat-card">
+                      <div class="stat-value-row">
+                        <strong id="detailsStatAchievement">--</strong>
+                        <span class="stat-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="12" r="8.3" stroke="currentColor" stroke-width="1.8"></circle>
+                            <path d="M9 15L15 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                            <circle cx="9" cy="9" r="1.1" fill="currentColor"></circle>
+                            <circle cx="15" cy="15" r="1.1" fill="currentColor"></circle>
+                          </svg>
+                        </span>
+                      </div>
+                      <span class="stat-label">AVG. ACHIEV.</span>
+                    </article>
+                  </div>
+
+                  <div class="hero-info">
+                    <img id="detailsLogo" class="details-logo is-hidden" src="" alt="Logo do jogo" />
+                    <h2 id="detailsTitle">Jogo</h2>
+                    <p id="detailsDescription">Descricao</p>
+
+                    <div class="hero-actions">
+                      <button id="detailsAddLibraryBtn" class="hero-action-btn hero-action-btn-dark" type="button">
+                        <span class="hero-action-label" data-btn-label>Add to Library</span>
+                        <span class="hero-action-icon-box" aria-hidden="true">
+                          <svg class="hero-action-icon icon-plus" viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8"></circle>
+                            <path d="M12 8V16M8 12H16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                          </svg>
+                          <svg class="hero-action-icon icon-check" viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8"></circle>
+                            <path d="M8.6 12.5L10.9 14.8L15.5 9.9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
+                          </svg>
+                        </span>
+                      </button>
+                      <button id="detailsActionBtn" class="hero-action-btn hero-action-btn-light" type="button" data-action="install">
+                        <span class="hero-action-label" data-btn-label>Download Game</span>
+                        <span class="hero-action-icon-box" aria-hidden="true">
+                          <svg class="hero-action-icon icon-download" viewBox="0 0 24 24" fill="none">
+                            <path d="M12 4V13.8" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                            <path d="M8.8 10.8L12 14L15.2 10.8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+                            <rect x="5" y="15.5" width="14" height="4.5" rx="1.6" stroke="currentColor" stroke-width="1.8"></rect>
+                          </svg>
+                          <svg class="hero-action-icon icon-play" viewBox="0 0 24 24" fill="none">
+                            <path d="M9 7.6V16.4L16 12L9 7.6Z" fill="currentColor"></path>
+                            <rect x="4.7" y="4.7" width="14.6" height="14.6" rx="3.2" stroke="currentColor" stroke-width="1.5"></rect>
+                          </svg>
+                          <svg class="hero-action-icon icon-busy" viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2" opacity="0.28"></circle>
+                            <path d="M20 12A8 8 0 0 0 12 4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"></path>
+                          </svg>
+                        </span>
+                      </button>
+                    </div>
+
+                    <div id="detailsProgress" class="hero-progress is-hidden">
+                      <div class="progress-bar">
+                        <div id="detailsProgressFill" class="progress-fill"></div>
+                      </div>
+                      <p id="detailsProgressText" class="progress-text"></p>
+                    </div>
+                  </div>
+                </div>
+              </article>
+
+              <section class="details-bottom">
+                <div class="details-main-col">
+                  <article class="media-card">
+                    <div id="detailsVideoWrap" class="video-wrap"></div>
+                    <div id="detailsGallery" class="gallery-strip"></div>
+                  </article>
+
+                  <article class="text-card">
+                    <h3>Sobre o jogo</h3>
+                    <p id="detailsLongDescription"></p>
+                  </article>
+                </div>
+
+                <aside class="details-side-col">
+                  <article class="meta-card">
+                    <div class="meta-row">
+                      <span>Developed by</span>
+                      <strong id="detailsDevelopedBy">Nao informado</strong>
+                    </div>
+                    <div class="meta-row">
+                      <span>Published by</span>
+                      <strong id="detailsPublishedBy">Nao informado</strong>
+                    </div>
+                    <div class="meta-row">
+                      <span>Release date</span>
+                      <strong id="detailsReleaseDate">Nao informado</strong>
+                    </div>
+                  </article>
+
+                  <article class="meta-card">
+                    <h4>Genres</h4>
+                    <div id="detailsGenres" class="genre-tags"></div>
+                  </article>
+
+                  <article class="meta-card">
+                    <h4>Status</h4>
+                    <p id="detailsStatus" class="status-chip">Nao instalado</p>
+                    <button id="detailsPlayBtn" class="meta-btn is-hidden" type="button">Play Game</button>
+                    <button id="detailsUninstallBtn" class="meta-btn meta-btn-danger is-hidden" type="button">Uninstall</button>
+                  </article>
+                </aside>
+              </section>
+            </section>
+
+            <section id="libraryView" class="view" aria-label="Biblioteca">
+              <header class="library-header">
+                <h2>Sua biblioteca</h2>
+                <p>Jogos adicionados ou baixados aparecem aqui.</p>
+              </header>
+              <div id="libraryGrid" class="library-grid"></div>
+            </section>
+
+            <section id="downloadsView" class="view" aria-label="Downloads e instalacoes">
+              <div class="downloads-page">
+                <header class="downloads-toolbar">
+                  <button id="downloadsInstallOptionsBtn" class="downloads-options-btn" type="button">
+                    <span class="downloads-options-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none">
+                        <circle cx="12" cy="12" r="3.1" stroke="currentColor" stroke-width="1.7"></circle>
+                        <path d="M12 4.8V2.9M12 21.1V19.2M18.1 5.9L16.8 7.2M7.2 16.8L5.9 18.1M21.1 12H19.2M4.8 12H2.9M18.1 18.1L16.8 16.8M7.2 7.2L5.9 5.9" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"></path>
+                      </svg>
+                    </span>
+                    Opcoes de instalacao
+                  </button>
+                </header>
+
+                <section id="downloadsActiveSection" class="downloads-group is-hidden" aria-label="Downloads ativos">
+                  <header class="downloads-group-head">
+                    <div class="downloads-group-title-wrap">
+                      <button id="downloadsActiveCollapseBtn" class="downloads-group-collapse" type="button" aria-label="Downloads ativos">
+                        <svg viewBox="0 0 24 24" fill="none">
+                          <path d="M7.8 13.6L12 9.4L16.2 13.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
+                        </svg>
+                      </button>
+                      <h2 class="downloads-group-title">Ativo (<span id="downloadsActiveCount">0</span>)</h2>
+                    </div>
+
+                    <div class="downloads-group-actions">
+                      <button id="downloadsResumeAllBtn" class="downloads-bulk-btn" type="button" disabled>
+                        <span class="downloads-bulk-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none">
+                            <path d="M7.8 6.8V17.2L16.7 12L7.8 6.8Z" fill="currentColor"></path>
+                          </svg>
+                        </span>
+                        Retomar todos
+                      </button>
+                      <button id="downloadsPauseAllBtn" class="downloads-bulk-btn is-outline" type="button" disabled>
+                        <span class="downloads-bulk-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24" fill="none">
+                            <path d="M8.7 6.8V17.2M15.3 6.8V17.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                          </svg>
+                        </span>
+                        Pausar todos
+                      </button>
+                    </div>
+                  </header>
+
+                  <div id="downloadsActiveList" class="downloads-list"></div>
+                </section>
+
+                <section id="downloadsEmptyState" class="downloads-empty-state">
+                  <span class="downloads-empty-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none">
+                      <path d="M12 4.2V13.7" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
+                      <path d="M8.7 10.8L12 14.1L15.3 10.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
+                      <rect x="5.1" y="15.3" width="13.8" height="4.5" rx="1.6" stroke="currentColor" stroke-width="1.7"></rect>
+                    </svg>
+                  </span>
+                  <h3>Nenhum download ativo</h3>
+                  <p>Quando voce iniciar um download, ele aparecera aqui com progresso em tempo real.</p>
+                </section>
+              </div>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <div id="installPathModal" class="modal-overlay is-hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-close-install-path="true"></div>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="installPathTitle">
+        <h3 id="installPathTitle">Escolha onde instalar</h3>
+        <p class="modal-text">
+          O jogo sera instalado no caminho abaixo. Se quiser, voce pode escolher outro local antes de iniciar.
+        </p>
+
+        <div class="modal-path-box">
+          <span class="modal-path-label">Caminho atual</span>
+          <code id="installPathCurrent">C:\\wyzer_games</code>
+        </div>
+
+        <div class="modal-actions">
+          <button id="installPathKeepBtn" class="modal-btn modal-btn-primary" type="button">Instalar aqui</button>
+          <button id="installPathChangeBtn" class="modal-btn" type="button">Escolher outro local</button>
+          <button id="installPathCancelBtn" class="modal-btn modal-btn-ghost" type="button">Cancelar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="updateRestartModal" class="modal-overlay is-hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-close-update-restart="true"></div>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="updateRestartTitle">
+        <h3 id="updateRestartTitle">Atualizacao pronta</h3>
+        <p id="updateRestartText" class="modal-text">
+          Uma nova versao do launcher foi baixada. Deseja reiniciar agora para aplicar?
+        </p>
+
+        <div class="modal-actions">
+          <button id="updateRestartNowBtn" class="modal-btn modal-btn-primary" type="button">Reiniciar e atualizar</button>
+          <button id="updateRestartLaterBtn" class="modal-btn modal-btn-ghost" type="button">Depois</button>
+        </div>
+      </div>
+    </div>
+
+    

@@ -1,0 +1,8 @@
+node_modules
+dist
+build
+*.log
+config/auth.json
+config/updater.json
+.env
+.env.*

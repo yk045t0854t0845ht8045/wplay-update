@@ -1,0 +1,91 @@
+{
+  "name": "wplay",
+  "version": "1.0.0",
+  "description": "Launcher de jogos em Electron com download, instalacao e execucao.",
+  "author": "WPlay",
+  "main": "main.js",
+  "scripts": {
+    "tw:build": "tailwindcss -c tailwind.config.js -i ./renderer/styles.input.css -o ./renderer/styles.css",
+    "tw:watch": "tailwindcss -c tailwind.config.js -i ./renderer/styles.input.css -o ./renderer/styles.css --watch",
+    "next:dev": "next dev -p 3470",
+    "next:build": "next build",
+    "dev": "npm run tw:build && npm run next:build && electron .",
+    "gh:publish-game": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/publish-game-to-github.ps1",
+    "build": "npm run tw:build && npm run next:build && electron-builder --win --x64",
+    "build:portable": "npm run tw:build && npm run next:build && electron-builder --win portable --x64 -c.win.artifactName=WPlay-Portable-${version}-${arch}.${ext}",
+    "release:github": "npm run tw:build && npm run next:build && electron-builder --win --x64 --publish always -c.publish.provider=github"
+  },
+  "dependencies": {
+    "7zip-bin": "^5.2.0",
+    "axios": "^1.7.9",
+    "canvas-confetti": "^1.9.4",
+    "electron-updater": "^6.6.2",
+    "gh": "^2.8.9",
+    "motion": "^12.34.0",
+    "next": "^16.1.6",
+    "notyf": "^3.10.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17"
+  },
+  "build": {
+    "appId": "com.wplay.app",
+    "productName": "WPlay",
+    "protocols": [
+      {
+        "name": "WPlay Auth",
+        "schemes": [
+          "wplay"
+        ]
+      }
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "out/**/*",
+      "renderer/**/*",
+      "config/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/7zip-bin/**",
+      "node_modules/7zip-bin/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/7zip-bin",
+        "to": "bin/7zip-bin"
+      },
+      {
+        "from": "jogos",
+        "to": "jogos"
+      }
+    ],
+    "icon": "build/icon.png",
+    "win": {
+      "signAndEditExecutable": false,
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "WPlay-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "WPlay"
+    }
+  }
+}
