@@ -336,7 +336,7 @@
 
             <section id="libraryView" class="view" aria-label="Biblioteca">
               <header class="library-header">
-                <h2>Sua biblioteca</h2>
+                <h2>Sua biblioteca [34]</h2>
                 <p>Jogos adicionados ou baixados aparecem aqui.</p>
               </header>
               <div id="libraryGrid" class="library-grid"></div>
@@ -445,7 +445,7 @@
     </div>
 
     
-0:{"buildId":"ZZlRmxS2trZGLBZ-wa0z0","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
+0:{"buildId":"7Rv3JrsxLCczD2bGxo0wk","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
 3:["$","$L6",null,{}]
 4:["$","script","script-0",{"src":"./_next/static/chunks/0dd513ecbb29f5fe.js","async":true}]
 5:["$","$L7",null,{"children":["$","$8",null,{"name":"Next.MetadataOutlet","children":"$@9"}]}]
