@@ -16,6 +16,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate build assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $requiredFiles = @(
+            "build/icon.ico",
+            "build/icon.png"
+          )
+          foreach ($relativePath in $requiredFiles) {
+            if (-not (Test-Path $relativePath)) {
+              throw "Arquivo obrigatorio ausente no repositorio: $relativePath"
+            }
+          }
+
+          if (-not (Test-Path "jogos")) {
+            New-Item -ItemType Directory -Path "jogos" -Force | Out-Null
+            Write-Host "Pasta opcional 'jogos' criada vazia para evitar aviso no build."
+          }
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

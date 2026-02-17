@@ -99,6 +99,45 @@ function Get-VersionFromPackageJson {
   return $version
 }
 
+function Test-GitTrackedFile {
+  param([Parameter(Mandatory = $true)][string]$RelativePath)
+  try {
+    & git ls-files --error-unmatch -- "$RelativePath" *> $null
+    return ($LASTEXITCODE -eq 0)
+  } catch {
+    return $false
+  }
+}
+
+function Assert-ReleaseBuildAssetsReady {
+  $requiredFiles = @(
+    "build/icon.ico",
+    "build/icon.png"
+  )
+
+  foreach ($relativePath in $requiredFiles) {
+    if (-not (Test-Path $relativePath)) {
+      throw "Arquivo obrigatorio ausente para release: $relativePath. Adicione o icone e tente novamente."
+    }
+
+    if (-not (Test-GitTrackedFile -RelativePath $relativePath)) {
+      & git add -- "$relativePath" *> $null
+      if (-not (Test-GitTrackedFile -RelativePath $relativePath)) {
+        throw (
+          "Arquivo $relativePath existe localmente, mas nao foi possivel adicionar ao Git automaticamente. " +
+          "Rode: git add $relativePath e commit antes de publicar."
+        )
+      }
+      Write-Host "Arquivo $relativePath adicionado ao Git automaticamente." -ForegroundColor DarkGray
+    }
+  }
+
+  if (-not (Test-Path "jogos")) {
+    New-Item -ItemType Directory -Path "jogos" -Force | Out-Null
+    Write-Host "Pasta opcional 'jogos' nao encontrada. Criada vazia para evitar aviso no build." -ForegroundColor DarkGray
+  }
+}
+
 function Get-HttpStatusCodeFromError {
   param([Parameter(Mandatory = $true)]$ErrorRecord)
   try {
@@ -463,6 +502,7 @@ function Wait-ReleaseByTag {
 try {
   $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
   Set-Location $repoRoot
+  Assert-ReleaseBuildAssetsReady
 
   if ($GitHubToken) {
     $env:GH_TOKEN = $GitHubToken
