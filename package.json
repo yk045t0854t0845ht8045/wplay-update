@@ -64,13 +64,20 @@
         "to": "bin/7zip-bin"
       },
       {
+        "from": "build/icon.ico",
+        "to": "build/icon.ico"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "build/icon.png"
+      },
+      {
         "from": "jogos",
         "to": "jogos"
       }
     ],
     "icon": "build/icon.png",
     "win": {
-      "signAndEditExecutable": false,
       "icon": "build/icon.ico",
       "target": [
         {
@@ -86,6 +93,9 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
       "shortcutName": "WPlay"
     },
     "publish": {

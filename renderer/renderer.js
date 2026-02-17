@@ -1631,6 +1631,9 @@ function toYoutubeEmbed(urlValue) {
   const params = new URLSearchParams();
   params.set("rel", "0");
   params.set("playsinline", "1");
+  params.set("enablejsapi", "1");
+  params.set("origin", "https://www.youtube.com");
+  params.set("widget_referrer", "https://www.youtube.com");
   params.set("iv_load_policy", "3");
   params.set("fs", "1");
 
@@ -1642,7 +1645,7 @@ function toYoutubeEmbed(urlValue) {
     params.set("start", String(source.startSeconds));
   }
 
-  return `https://www.youtube-nocookie.com/embed/${source.videoId}?${params.toString()}`;
+  return `https://www.youtube.com/embed/${source.videoId}?${params.toString()}`;
 }
 
 function toYoutubeWatchUrl(urlValue) {

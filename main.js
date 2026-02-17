@@ -52,8 +52,17 @@ const CATALOG_MIN_POLL_INTERVAL_SECONDS = 5;
 const CATALOG_MAX_POLL_INTERVAL_SECONDS = 300;
 const CATALOG_DEFAULT_SUPABASE_SCHEMA = "public";
 const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
+const WINDOWS_APP_USER_MODEL_ID = "com.wplay.app";
 const YOUTUBE_EMBED_REFERER = "https://www.youtube.com/";
 const YOUTUBE_EMBED_ORIGIN = "https://www.youtube.com";
+
+if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
+  try {
+    app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
+  } catch (_error) {
+    // Ignore AppUserModelID assignment failures.
+  }
+}
 
 let mainWindow = null;
 let updateSplashWindow = null;
@@ -110,20 +119,30 @@ const runningProcessCache = {
 };
 
 function resolveWindowIconPath() {
-  const candidates = [
-    path.join(__dirname, "build", "icon.png"),
-    path.join(__dirname, "renderer", "assets", "logo.png")
-  ];
+  const isWindows = process.platform === "win32";
+  const buildIconNames = isWindows ? ["icon.ico", "icon.png"] : ["icon.png", "icon.ico"];
+  const candidates = [];
+
+  const pushBuildIconCandidates = (baseDir) => {
+    for (const iconName of buildIconNames) {
+      candidates.push(path.join(baseDir, "build", iconName));
+    }
+  };
+
+  pushBuildIconCandidates(__dirname);
+  candidates.push(path.join(__dirname, "renderer", "assets", "logo.png"));
 
   if (app.isPackaged && process.resourcesPath) {
-    candidates.unshift(
-      path.join(process.resourcesPath, "build", "icon.png"),
-      path.join(process.resourcesPath, "app.asar.unpacked", "build", "icon.png")
-    );
+    pushBuildIconCandidates(process.resourcesPath);
+    pushBuildIconCandidates(path.join(process.resourcesPath, "app.asar.unpacked"));
     candidates.push(
       path.join(process.resourcesPath, "renderer", "assets", "logo.png"),
       path.join(process.resourcesPath, "app.asar.unpacked", "renderer", "assets", "logo.png")
     );
+
+    if (isWindows) {
+      candidates.push(process.execPath);
+    }
   }
 
   for (const candidate of candidates) {
@@ -190,13 +209,13 @@ function ensureYoutubeEmbedRequestHeaders() {
     }
 
     const urlValue = String(details?.url || "").toLowerCase();
-    const looksLikeYoutubePlayerRequest =
-      urlValue.includes("/embed/") ||
+    const looksLikeYoutubePlayerApiRequest =
       urlValue.includes("/youtubei/") ||
       urlValue.includes("/get_video_info") ||
-      urlValue.includes("/api/stats/");
+      urlValue.includes("/api/stats/") ||
+      urlValue.includes("videoplayback");
 
-    if (looksLikeYoutubePlayerRequest) {
+    if (looksLikeYoutubePlayerApiRequest) {
       const originKey = getExistingHeaderKey("origin");
       if (!originKey || !String(nextHeaders[originKey] || "").trim()) {
         nextHeaders.Origin = YOUTUBE_EMBED_ORIGIN;
