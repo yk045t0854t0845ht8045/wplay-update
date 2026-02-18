@@ -97,6 +97,7 @@ const UPDATER_CONFIG_FILE_NAME = "updater.json";
 const UPDATER_CONFIG_EXAMPLE_FILE_NAME = "updater.example.json";
 const INSTALL_PROGRESS_CHANNEL = "launcher:install-progress";
 const AUTO_UPDATE_STATE_CHANNEL = "launcher:auto-update-state";
+const CATALOG_CHANGED_CHANNEL = "launcher:catalog-changed";
 const MAX_SCAN_DEPTH = 6;
 const MAX_SCAN_FILES = 7000;
 const INSTALL_SIZE_CACHE_TTL_MS = 60 * 60 * 1000;
@@ -114,17 +115,26 @@ const DOWNLOAD_STREAM_TIMEOUT_MS = Math.max(
 const GOOGLE_DRIVE_MAX_CONFIRM_HOPS = 6;
 const DEFENDER_SCAN_TIMEOUT_MS = 20 * 60 * 1000;
 const ARCHIVE_TOOL_TIMEOUT_MS = 25 * 60 * 1000;
-const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 3 * 60 * 1000;
-const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 60 * 1000;
+const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 2 * 60 * 1000;
 const AUTO_UPDATE_CHECK_COOLDOWN_MS = 45 * 1000;
 const AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS = 15 * 1000;
 const AUTO_UPDATE_WINDOW_READY_CHECK_DELAY_MS = 3500;
 const AUTO_UPDATE_SPLASH_MAX_WAIT_MS = 90 * 1000;
 const AUTO_UPDATE_SPLASH_POLL_INTERVAL_MS = 250;
 const RUNNING_PROCESS_CACHE_TTL_MS = 10 * 1000;
-const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 15;
-const CATALOG_MIN_POLL_INTERVAL_SECONDS = 10;
-const CATALOG_MAX_POLL_INTERVAL_SECONDS = 300;
+const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 6;
+const CATALOG_MIN_POLL_INTERVAL_SECONDS = 2;
+const CATALOG_MAX_POLL_INTERVAL_SECONDS = 120;
+const CATALOG_MONITOR_INTERVAL_MS = 4500;
+const CATALOG_MONITOR_INTERVAL_LOW_SPEC_MS = 9000;
+const CATALOG_SIZE_SYNC_STARTUP_DELAY_MS = 2500;
+const CATALOG_SIZE_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+const CATALOG_SIZE_SYNC_INTERVAL_LOW_SPEC_MS = 15 * 60 * 1000;
+const CATALOG_SIZE_SYNC_MAX_PROBES_PER_CYCLE = 4;
+const CATALOG_SIZE_SYNC_MAX_PROBES_PER_CYCLE_LOW_SPEC = 2;
+const CATALOG_SIZE_SYNC_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
+const CATALOG_SIZE_SYNC_PROBE_TIMEOUT_MS = 20 * 1000;
 const CATALOG_DEFAULT_SUPABASE_SCHEMA = "public";
 const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
 const NOTIFICATIONS_DEFAULT_SUPABASE_SCHEMA = "public";
@@ -204,7 +214,8 @@ const remoteCatalogCache = {
   loadedAt: 0,
   source: "local-json",
   error: "",
-  lastSyncAt: 0
+  lastSyncAt: 0,
+  remoteSignature: ""
 };
 const catalogSizeSyncInFlightByGameId = new Map();
 const activeInstalls = new Map();
@@ -287,6 +298,16 @@ let socialActivityBackgroundPollTimer = null;
 let socialActivityBackgroundPollInFlight = null;
 let socialActivityBackgroundCursorIso = "";
 let socialActivityBackgroundCurrentUserId = "";
+let catalogRealtimeMonitorTimer = null;
+let catalogRealtimeMonitorInFlight = null;
+let catalogRealtimeSignature = "";
+let catalogMonitorSourceConfigCache = {
+  loadedAt: 0,
+  sourceConfig: null
+};
+let catalogSizeSyncTimer = null;
+let catalogSizeSyncInFlight = null;
+const catalogSizeSyncStateByGameId = new Map();
 
 function isElectronBinaryPath(executablePath = process.execPath) {
   const execName = path.basename(String(executablePath || "")).trim().toLowerCase();
@@ -1635,6 +1656,7 @@ function createWindow() {
     if (!runtimeStartupHealthState.safeMode) {
       void checkForLauncherUpdate("focus");
     }
+    void pollCatalogChangesInBackground(true);
   });
   mainWindow.on("blur", () => {
     void pollBackgroundFriendGameActivities(true);
@@ -4514,6 +4536,64 @@ function sortCatalogEntries(entries = []) {
   });
 }
 
+function readHeaderValue(headers, key) {
+  if (!headers || typeof headers !== "object") {
+    return "";
+  }
+  const target = String(key || "").toLowerCase().trim();
+  if (!target) {
+    return "";
+  }
+  for (const [headerKey, headerValue] of Object.entries(headers)) {
+    if (String(headerKey || "").toLowerCase() === target) {
+      return String(headerValue || "").trim();
+    }
+  }
+  return "";
+}
+
+function parseSupabaseContentRangeTotal(headers) {
+  const contentRange = readHeaderValue(headers, "content-range");
+  if (!contentRange) {
+    return 0;
+  }
+  const match = contentRange.match(/\/(\d+)\s*$/);
+  if (!match?.[1]) {
+    return 0;
+  }
+  return parsePositiveInteger(match[1]);
+}
+
+function buildCatalogRemoteSignature(rows = [], headers = {}) {
+  const firstRow = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+  const topId = String(firstRow?.id || "").trim();
+  const topUpdatedAt = String(firstRow?.updated_at || firstRow?.updatedAt || "").trim();
+  const topEnabled = firstRow && typeof firstRow === "object" ? String(firstRow.enabled) : "";
+  const totalCount = parseSupabaseContentRangeTotal(headers);
+  return `${topUpdatedAt}|${topId}|${topEnabled}|${totalCount}`;
+}
+
+function emitCatalogChangedHint(payload = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  try {
+    mainWindow.webContents.send(CATALOG_CHANGED_CHANNEL, {
+      changedAt: new Date().toISOString(),
+      ...payload
+    });
+  } catch (_error) {
+    // Ignore send failures for windows being destroyed.
+  }
+}
+
+function invalidateRemoteCatalogCache(reason = "") {
+  remoteCatalogCache.loadedAt = 0;
+  if (reason) {
+    remoteCatalogCache.error = "";
+  }
+}
+
 function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
   const source = row && typeof row === "object" ? row : {};
   const payloadRaw = source.game_data && typeof source.game_data === "object"
@@ -5697,6 +5777,11 @@ async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {})
 
   const fallbackGoogleApiKey = String(localSettings.googleApiKey || "").trim();
   const rows = Array.isArray(response.data) ? response.data : [];
+  const fetchedSignature = buildCatalogRemoteSignature(rows, response.headers);
+  if (fetchedSignature) {
+    catalogRealtimeSignature = fetchedSignature;
+    remoteCatalogCache.remoteSignature = fetchedSignature;
+  }
   const mappedEntries = rows
     .map((row) => mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey))
     .filter((entry) => {
@@ -5788,6 +5873,306 @@ async function syncCatalogGameSizeBytesToSupabase(gameId, sizeBytes, sourceConfi
 
   catalogSizeSyncInFlightByGameId.set(normalizedGameId, task);
   return task;
+}
+
+async function fetchCatalogRemoteSignature(sourceConfig) {
+  const authConfig = resolveAuthConfig();
+  if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
+    throw new Error("[CATALOG_SUPABASE_AUTH] Supabase nao configurado para catalogo remoto.");
+  }
+
+  const tableName = normalizeCatalogIdentifier(sourceConfig.table, CATALOG_DEFAULT_SUPABASE_TABLE);
+  const schemaName = normalizeCatalogIdentifier(sourceConfig.schema, CATALOG_DEFAULT_SUPABASE_SCHEMA);
+  const endpoint = `${authConfig.supabaseUrl}/rest/v1/${tableName}`;
+  const response = await axios.get(endpoint, {
+    headers: {
+      ...buildCatalogSupabaseHeaders(authConfig, schemaName),
+      Prefer: "count=exact"
+    },
+    params: {
+      select: "id,updated_at,enabled",
+      order: "updated_at.desc",
+      limit: 1
+    },
+    timeout: 15_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(`[CATALOG_SUPABASE_TABLE_NOT_FOUND] Tabela ${schemaName}.${tableName} nao encontrada no Supabase.`);
+  }
+  if (response.status >= 400) {
+    throw new Error(`[CATALOG_SUPABASE_HTTP_${response.status}] Falha ao consultar versao do catalogo remoto.`);
+  }
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return buildCatalogRemoteSignature(rows, response.headers);
+}
+
+function getCatalogMonitorIntervalMs() {
+  return resolveHostLowSpecProfile() ? CATALOG_MONITOR_INTERVAL_LOW_SPEC_MS : CATALOG_MONITOR_INTERVAL_MS;
+}
+
+async function getCatalogSourceConfigForMonitor() {
+  const now = Date.now();
+  if (
+    catalogMonitorSourceConfigCache.sourceConfig &&
+    now - Number(catalogMonitorSourceConfigCache.loadedAt || 0) < 20 * 1000
+  ) {
+    return catalogMonitorSourceConfigCache.sourceConfig;
+  }
+
+  const { settings } = await parseLocalCatalogFile();
+  const sourceConfig = resolveCatalogSourceConfig(settings);
+  catalogMonitorSourceConfigCache = {
+    loadedAt: now,
+    sourceConfig
+  };
+  return sourceConfig;
+}
+
+async function pollCatalogChangesInBackground(silent = true) {
+  if (catalogRealtimeMonitorInFlight) {
+    return catalogRealtimeMonitorInFlight;
+  }
+
+  catalogRealtimeMonitorInFlight = (async () => {
+    const sourceConfig = await getCatalogSourceConfigForMonitor();
+    if (!sourceConfig.useRemote) {
+      catalogRealtimeSignature = "";
+      remoteCatalogCache.remoteSignature = "";
+      return false;
+    }
+
+    const signature = await fetchCatalogRemoteSignature(sourceConfig);
+    if (!signature) {
+      return false;
+    }
+
+    if (!catalogRealtimeSignature) {
+      catalogRealtimeSignature = signature;
+      remoteCatalogCache.remoteSignature = signature;
+      return false;
+    }
+
+    if (signature === catalogRealtimeSignature) {
+      return false;
+    }
+
+    catalogRealtimeSignature = signature;
+    remoteCatalogCache.remoteSignature = signature;
+    invalidateRemoteCatalogCache("catalog-change");
+    emitCatalogChangedHint({ reason: "supabase-change", signature });
+    appendStartupLog("[CATALOG_RT] alteracao detectada no Supabase; solicitando refresh no renderer.");
+    void syncMissingCatalogSizeBytesInBackground(true);
+    return true;
+  })()
+    .catch((error) => {
+      if (!silent) {
+        appendStartupLog(`[CATALOG_RT_ERROR] ${formatStartupErrorForLog(error)}`);
+      }
+      return false;
+    })
+    .finally(() => {
+      catalogRealtimeMonitorInFlight = null;
+    });
+
+  return catalogRealtimeMonitorInFlight;
+}
+
+function ensureCatalogRealtimeMonitorStarted() {
+  if (catalogRealtimeMonitorTimer) {
+    return;
+  }
+  const intervalMs = getCatalogMonitorIntervalMs();
+  catalogRealtimeMonitorTimer = setInterval(() => {
+    void pollCatalogChangesInBackground(true);
+  }, intervalMs);
+  void pollCatalogChangesInBackground(true);
+}
+
+function stopCatalogRealtimeMonitor() {
+  if (!catalogRealtimeMonitorTimer) {
+    return;
+  }
+  clearInterval(catalogRealtimeMonitorTimer);
+  catalogRealtimeMonitorTimer = null;
+}
+
+function getCatalogSizeSyncIntervalMs() {
+  return resolveHostLowSpecProfile() ? CATALOG_SIZE_SYNC_INTERVAL_LOW_SPEC_MS : CATALOG_SIZE_SYNC_INTERVAL_MS;
+}
+
+function getCatalogSizeSyncMaxProbesPerCycle() {
+  return resolveHostLowSpecProfile()
+    ? CATALOG_SIZE_SYNC_MAX_PROBES_PER_CYCLE_LOW_SPEC
+    : CATALOG_SIZE_SYNC_MAX_PROBES_PER_CYCLE;
+}
+
+function getCatalogSizeSyncState(gameId) {
+  const key = String(gameId || "").trim();
+  if (!key) {
+    return null;
+  }
+  const value = catalogSizeSyncStateByGameId.get(key);
+  if (!value || typeof value !== "object") {
+    return {
+      gameId: key,
+      lastAttemptAt: 0,
+      lastSuccessAt: 0,
+      lastSizeBytes: 0
+    };
+  }
+  return value;
+}
+
+function setCatalogSizeSyncState(gameId, patch = {}) {
+  const key = String(gameId || "").trim();
+  if (!key) return;
+  const previous = getCatalogSizeSyncState(key) || {
+    gameId: key,
+    lastAttemptAt: 0,
+    lastSuccessAt: 0,
+    lastSizeBytes: 0
+  };
+  catalogSizeSyncStateByGameId.set(key, {
+    ...previous,
+    ...patch,
+    gameId: key
+  });
+}
+
+async function resolveCatalogGameSizeBytesByProbe(game) {
+  if (!game || typeof game !== "object") {
+    return 0;
+  }
+  const labelParsedBytes = parseSizeBytes(game.size);
+  if (labelParsedBytes > 0) {
+    return labelParsedBytes;
+  }
+
+  let responseStream = null;
+  try {
+    const payload = await createDownloadStream(game, {
+      timeoutMs: CATALOG_SIZE_SYNC_PROBE_TIMEOUT_MS,
+      probeMetadata: true
+    });
+    responseStream = payload?.response?.data || null;
+    const sizeBytes = extractTotalBytesFromHeaders(payload?.response?.headers);
+    if (sizeBytes > 0) {
+      return sizeBytes;
+    }
+    return 0;
+  } catch (_error) {
+    return 0;
+  } finally {
+    try {
+      if (responseStream && typeof responseStream.destroy === "function") {
+        responseStream.destroy();
+      }
+    } catch (_error) {
+      // Ignore stream destroy failures.
+    }
+  }
+}
+
+async function syncMissingCatalogSizeBytesInBackground(force = false) {
+  if (catalogSizeSyncInFlight) {
+    return catalogSizeSyncInFlight;
+  }
+
+  catalogSizeSyncInFlight = (async () => {
+    const { games, settings } = await readCatalogBundle();
+    const sourceConfig = resolveCatalogSourceConfig(settings);
+    if (!sourceConfig.useRemote) {
+      return { updatedCount: 0, checkedCount: 0 };
+    }
+
+    const maxProbes = Math.max(1, getCatalogSizeSyncMaxProbesPerCycle());
+    const now = Date.now();
+    let updatedCount = 0;
+    let checkedCount = 0;
+
+    for (const game of Array.isArray(games) ? games : []) {
+      if (checkedCount >= maxProbes) {
+        break;
+      }
+      if (!game || !game.hasDownloadSource) {
+        continue;
+      }
+      if (parseSizeBytes(game.sizeBytes) > 0) {
+        continue;
+      }
+
+      const state = getCatalogSizeSyncState(game.id);
+      if (!force && state && now - Number(state.lastAttemptAt || 0) < CATALOG_SIZE_SYNC_RETRY_COOLDOWN_MS) {
+        continue;
+      }
+
+      checkedCount += 1;
+      setCatalogSizeSyncState(game.id, { lastAttemptAt: now });
+
+      const resolvedBytes = await resolveCatalogGameSizeBytesByProbe(game);
+      if (resolvedBytes <= 0) {
+        continue;
+      }
+
+      const synced = await syncCatalogGameSizeBytesToSupabase(game.id, resolvedBytes, sourceConfig);
+      if (!synced) {
+        continue;
+      }
+
+      setCatalogSizeSyncState(game.id, {
+        lastAttemptAt: now,
+        lastSuccessAt: now,
+        lastSizeBytes: resolvedBytes
+      });
+      updatedCount += 1;
+    }
+
+    if (updatedCount > 0) {
+      invalidateRemoteCatalogCache("catalog-size-sync");
+      emitCatalogChangedHint({
+        reason: "size-bytes-sync",
+        updatedCount
+      });
+      appendStartupLog(`[CATALOG_SIZE_SYNC] size_bytes atualizado para ${updatedCount} jogo(s).`);
+    }
+
+    return { updatedCount, checkedCount };
+  })()
+    .catch((error) => {
+      appendStartupLog(`[CATALOG_SIZE_SYNC_ERROR] ${formatStartupErrorForLog(error)}`);
+      return { updatedCount: 0, checkedCount: 0 };
+    })
+    .finally(() => {
+      catalogSizeSyncInFlight = null;
+    });
+
+  return catalogSizeSyncInFlight;
+}
+
+function ensureCatalogSizeSyncMonitorStarted() {
+  if (catalogSizeSyncTimer) {
+    return;
+  }
+
+  const intervalMs = getCatalogSizeSyncIntervalMs();
+  catalogSizeSyncTimer = setInterval(() => {
+    void syncMissingCatalogSizeBytesInBackground(false);
+  }, intervalMs);
+
+  setTimeout(() => {
+    void syncMissingCatalogSizeBytesInBackground(true);
+  }, CATALOG_SIZE_SYNC_STARTUP_DELAY_MS);
+}
+
+function stopCatalogSizeSyncMonitor() {
+  if (!catalogSizeSyncTimer) {
+    return;
+  }
+  clearInterval(catalogSizeSyncTimer);
+  catalogSizeSyncTimer = null;
 }
 
 async function resolveCatalogEntries(settings = {}, localEntries = []) {
@@ -6796,6 +7181,8 @@ function isGoogleDriveCandidate(candidate) {
 async function createDownloadStream(game, options = {}) {
   const skipSourceUrls = Array.isArray(options.skipSourceUrls) ? options.skipSourceUrls : [];
   const skipped = new Set(skipSourceUrls.map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean));
+  const metadataProbe = options.probeMetadata === true;
+  const requestTimeoutMs = Math.max(3_000, Number(options.timeoutMs) || DOWNLOAD_STREAM_TIMEOUT_MS);
   const candidates = normalizeDownloadCandidates(game).filter((candidate) => !skipped.has(String(candidate.url).toLowerCase()));
   if (!candidates.length) {
     throw new Error("Nenhuma fonte de download disponivel para tentativa.");
@@ -6820,13 +7207,14 @@ async function createDownloadStream(game, options = {}) {
         url: candidate.url,
         responseType: "stream",
         maxRedirects: 8,
-        timeout: DOWNLOAD_STREAM_TIMEOUT_MS,
+        timeout: requestTimeoutMs,
         maxBodyLength: Infinity,
         maxContentLength: Infinity,
         validateStatus: () => true,
         headers: {
           "User-Agent": "WPlay/2.0",
-          "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8"
+          "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+          ...(metadataProbe ? { Range: "bytes=0-0" } : {})
         }
       });
 
@@ -6908,13 +7296,14 @@ async function createDownloadStream(game, options = {}) {
             url: confirmUrl,
             responseType: "stream",
             maxRedirects: 8,
-            timeout: DOWNLOAD_STREAM_TIMEOUT_MS,
+            timeout: requestTimeoutMs,
             maxBodyLength: Infinity,
             maxContentLength: Infinity,
             validateStatus: () => true,
             headers: {
               "User-Agent": "WPlay/2.0",
               "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+              ...(metadataProbe ? { Range: "bytes=0-0" } : {}),
               ...(cookieHeader ? { Cookie: cookieHeader } : {})
             }
           });
@@ -9094,6 +9483,8 @@ if (!hasSingleInstanceLock) {
     await ensurePersistedAuthConfigFile().catch(() => {});
     await ensurePersistedUpdaterConfigFile().catch(() => {});
     ensureSocialActivityBackgroundMonitorStarted();
+    ensureCatalogRealtimeMonitorStarted();
+    ensureCatalogSizeSyncMonitorStarted();
     await recoverInterruptedInstallSessionsOnStartup().catch((error) => {
       appendStartupLog(`[INSTALL_RECOVERY_FATAL] ${formatStartupErrorForLog(error)}`);
     });
@@ -9224,6 +9615,8 @@ if (!hasSingleInstanceLock) {
     clearStartupBootWatchdog();
     clearAutoUpdaterInterval();
     stopSocialActivityBackgroundMonitor();
+    stopCatalogRealtimeMonitor();
+    stopCatalogSizeSyncMonitor();
     flushActiveInstallSessionsSync();
     destroyUpdateSplashWindow();
     destroyTray();

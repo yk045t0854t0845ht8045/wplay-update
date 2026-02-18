@@ -98,15 +98,16 @@ const deviceMemoryGb = Number(window?.navigator?.deviceMemory || 0);
 const LOW_SPEC_DEVICE =
   (Number.isFinite(hardwareConcurrency) && hardwareConcurrency > 0 && hardwareConcurrency <= 4) ||
   (Number.isFinite(deviceMemoryGb) && deviceMemoryGb > 0 && deviceMemoryGb <= 8);
-const REALTIME_SYNC_INTERVAL_MS = LOW_SPEC_DEVICE ? 12 * 1000 : 7 * 1000;
+const REALTIME_SYNC_INTERVAL_MS = LOW_SPEC_DEVICE ? 10 * 1000 : 5 * 1000;
 const RECENT_COMPLETED_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
 const NOTIFICATION_HISTORY_LIMIT = 15;
 const NOTYF_STACK_VISIBLE = 5;
 const NOTYF_STACK_OFFSET_Y = 18;
 const PROGRESS_RENDER_MIN_INTERVAL_MS = 120;
-const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 60 * 1000 : 30 * 1000;
-const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = LOW_SPEC_DEVICE ? 5 * 60 * 1000 : 3 * 60 * 1000;
-const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = 8 * 1000;
+const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 35 * 1000 : 15 * 1000;
+const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = LOW_SPEC_DEVICE ? 2 * 60 * 1000 : 75 * 1000;
+const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = LOW_SPEC_DEVICE ? 7 * 1000 : 3 * 1000;
+const CATALOG_CHANGED_REFRESH_DEBOUNCE_MS = LOW_SPEC_DEVICE ? 1500 : 800;
 const FRIEND_ACTIVITY_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 10 * 1000 : 6 * 1000;
 const FRIEND_ACTIVITY_CURSOR_BACKTRACK_MS = 18 * 1000;
 const FRIEND_ACTIVITY_MAX_EVENT_AGE_MS = 30 * 60 * 1000;
@@ -239,6 +240,7 @@ let friendActivitySeenIds = new Set();
 let friendActivityCurrentUserId = "";
 let friendActivityLifecycleBindingsReady = false;
 let uninstallConfirmModalResolver = null;
+let catalogChangedRefreshTimer = null;
 
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
@@ -1645,6 +1647,8 @@ function startAutoUpdateRealtimeSync() {
       scheduleAutoUpdateBackgroundCheckSoon();
     }
   });
+
+  scheduleAutoUpdateBackgroundCheckSoon(1500);
 }
 
 async function checkForAutoUpdateManually() {
@@ -3736,6 +3740,27 @@ async function refreshInstallRoot() {
   }
 }
 
+function scheduleCatalogChangedRefresh(reason = "supabase-change") {
+  if (catalogChangedRefreshTimer) {
+    clearTimeout(catalogChangedRefreshTimer);
+    catalogChangedRefreshTimer = null;
+  }
+
+  catalogChangedRefreshTimer = window.setTimeout(() => {
+    catalogChangedRefreshTimer = null;
+    void (async () => {
+      try {
+        await refreshGames({
+          lightweight: false,
+          includeRunningState: true
+        });
+      } catch (_error) {
+        // Silent refresh failures for background catalog hints.
+      }
+    })();
+  }, CATALOG_CHANGED_REFRESH_DEBOUNCE_MS);
+}
+
 function applyActiveInstallSnapshot(entries = []) {
   const snapshotEntries = Array.isArray(entries) ? entries : [];
   const activeGameIds = new Set();
@@ -4710,6 +4735,12 @@ function installEventBindings() {
       }, 1200);
     }
   });
+
+  if (typeof window.launcherApi.onCatalogChanged === "function") {
+    window.launcherApi.onCatalogChanged((_payload) => {
+      scheduleCatalogChangedRefresh("catalog-hint");
+    });
+  }
 
   if (typeof window.launcherApi.onWindowMaximized === "function") {
     window.launcherApi.onWindowMaximized((isMaximized) => {

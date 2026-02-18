@@ -47,5 +47,10 @@ contextBridge.exposeInMainWorld("launcherApi", {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("launcher:auto-update-state", listener);
     return () => ipcRenderer.removeListener("launcher:auto-update-state", listener);
+  },
+  onCatalogChanged: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("launcher:catalog-changed", listener);
+    return () => ipcRenderer.removeListener("launcher:catalog-changed", listener);
   }
 });
