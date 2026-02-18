@@ -89,6 +89,7 @@ try {
 const INSTALL_ROOT_NAME = "wyzer_games";
 const TEMP_DIR_NAME = "_wyzer_temp";
 const MANIFEST_FILE_NAME = ".wyzer_manifest.json";
+const INSTALL_SESSION_STATE_FILE_NAME = "launcher.active-installs.json";
 const RUNTIME_CONFIG_FILE_NAME = "launcher.runtime.json";
 const AUTH_CONFIG_FILE_NAME = "auth.json";
 const AUTH_CONFIG_EXAMPLE_FILE_NAME = "auth.example.json";
@@ -134,6 +135,12 @@ const NOTIFICATIONS_HISTORY_LIMIT = 15;
 const SOCIAL_ACTIVITY_FETCH_LIMIT = 60;
 const SOCIAL_ACTIVITY_EVENT_TTL_HOURS = 24;
 const SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS = 75 * 1000;
+const SOCIAL_ACTIVITY_BACKGROUND_POLL_INTERVAL_MS = 4200;
+const SOCIAL_ACTIVITY_BACKGROUND_POLL_INTERVAL_LOW_SPEC_MS = 6500;
+const SOCIAL_ACTIVITY_BACKGROUND_CURSOR_BACKTRACK_MS = 9000;
+const SOCIAL_ACTIVITY_BACKGROUND_MAX_EVENT_AGE_MS = 30 * 60 * 1000;
+const SOCIAL_ACTIVITY_BACKGROUND_SEEN_LIMIT = 420;
+const SOCIAL_ACTIVITY_BACKGROUND_LIMIT = 80;
 const WINDOWS_APP_USER_MODEL_ID = "com.wplay.app";
 const WINDOWS_APP_USER_MODEL_ID_DEV = "com.wplay.app.dev";
 const DEV_RUNTIME_APP_NAME = "WPlay Dev";
@@ -157,6 +164,7 @@ const GAME_START_TOAST_STACK_GAP = 2;
 const GAME_START_TOAST_LIFETIME_MS = 4300;
 const GAME_START_TOAST_EXIT_MS = 260;
 const GAME_START_TOAST_MAX_WINDOWS = 4;
+const GAME_START_TOAST_DEDUPE_WINDOW_MS = 12 * 1000;
 const GAME_START_TOAST_BG_COLOR = "#09090A";
 const GAME_START_TOAST_ACCENT_COLOR = "#008CFF";
 const LIGHTWEIGHT_GAMES_REFRESH_INTERVAL_MS = 12 * 1000;
@@ -168,6 +176,7 @@ const STARTUP_FAILURES_BEFORE_SAFE_MODE = 2;
 const MAIN_WINDOW_MAX_LOAD_RETRIES = 2;
 const MAIN_WINDOW_LOAD_RETRY_DELAY_MS = 1200;
 const TRAY_TOOLTIP_TEXT = "WPlay Games Launcher";
+const ACTIVE_INSTALL_PHASES = new Set(["preparing", "downloading", "extracting"]);
 
 let mainWindow = null;
 let updateSplashWindow = null;
@@ -197,9 +206,13 @@ const remoteCatalogCache = {
   error: "",
   lastSyncAt: 0
 };
+const catalogSizeSyncInFlightByGameId = new Map();
 const activeInstalls = new Map();
+const activeInstallProgressByGameId = new Map();
+const activeInstallSessionsByGameId = new Map();
 const activeUninstalls = new Set();
 const installSizeCache = new Map();
+let installSessionPersistQueue = Promise.resolve();
 const sevenZipExecutableCache = {
   path: ""
 };
@@ -249,6 +262,7 @@ const steamUserDataCache = {
   achievementsInFlight: new Map()
 };
 const socialActivityEmitCache = new Map();
+const socialActivityBackgroundSeenIds = new Set();
 const windowIconAssetCache = {
   resolved: false,
   path: "",
@@ -259,6 +273,7 @@ const toastBrandDataUrlCache = {
   value: ""
 };
 const gameStartToastWindows = [];
+const gameStartToastDedupeCache = new Map();
 const hostPerformanceProfileCache = {
   resolved: false,
   lowSpec: false
@@ -268,6 +283,10 @@ const runtimeStartupHealthState = {
   failureCount: 0,
   reason: ""
 };
+let socialActivityBackgroundPollTimer = null;
+let socialActivityBackgroundPollInFlight = null;
+let socialActivityBackgroundCursorIso = "";
+let socialActivityBackgroundCurrentUserId = "";
 
 function isElectronBinaryPath(executablePath = process.execPath) {
   const execName = path.basename(String(executablePath || "")).trim().toLowerCase();
@@ -464,6 +483,269 @@ function markStartupLaunchHealthy(source = "renderer-ready") {
     safeModeReason: ""
   });
   appendStartupLog(`[STARTUP_HEALTH] launch healthy at source=${source}.`);
+}
+
+function getInstallSessionStateFilePath() {
+  const baseDir = resolveRuntimeStateDirectory();
+  if (!baseDir) {
+    return "";
+  }
+  return path.join(baseDir, INSTALL_SESSION_STATE_FILE_NAME);
+}
+
+function normalizePathForComparison(value) {
+  const absolute = normalizeAbsolutePath(value);
+  if (!absolute) return "";
+  if (process.platform === "win32") {
+    return absolute.toLowerCase();
+  }
+  return absolute;
+}
+
+function arePathsEquivalent(left, right) {
+  const a = normalizePathForComparison(left);
+  const b = normalizePathForComparison(right);
+  return Boolean(a && b && a === b);
+}
+
+function isPathInsideDirectory(baseDir, targetPath) {
+  const base = normalizePathForComparison(baseDir);
+  const target = normalizePathForComparison(targetPath);
+  if (!base || !target) return false;
+  if (target === base) return true;
+  const baseWithSeparator = base.endsWith(path.sep) ? base : `${base}${path.sep}`;
+  return target.startsWith(baseWithSeparator);
+}
+
+function isManagedInstallRootPath(installRoot) {
+  const normalized = normalizeAbsolutePath(installRoot);
+  if (!normalized) return false;
+  return path.basename(normalized).toLowerCase() === INSTALL_ROOT_NAME.toLowerCase();
+}
+
+function normalizeActiveInstallSessionRecord(rawRecord) {
+  if (!rawRecord || typeof rawRecord !== "object") {
+    return null;
+  }
+  const gameId = String(rawRecord.gameId || "").trim();
+  if (!gameId) {
+    return null;
+  }
+
+  const phaseRaw = String(rawRecord.phase || "").trim().toLowerCase();
+  const phase = ACTIVE_INSTALL_PHASES.has(phaseRaw) ? phaseRaw : "preparing";
+  const installRoot = normalizeAbsolutePath(rawRecord.installRoot || "");
+  const installDir = normalizeAbsolutePath(rawRecord.installDir || "");
+  const tempArchivePath = normalizeAbsolutePath(rawRecord.tempArchivePath || "");
+  const nowIso = new Date().toISOString();
+
+  return {
+    gameId,
+    gameName: String(rawRecord.gameName || "").trim(),
+    installRoot,
+    installDir,
+    tempArchivePath,
+    phase,
+    startedAt: String(rawRecord.startedAt || "").trim() || nowIso,
+    updatedAt: String(rawRecord.updatedAt || "").trim() || nowIso
+  };
+}
+
+async function readInstallSessionRecordsFromDisk() {
+  const filePath = getInstallSessionStateFilePath();
+  if (!filePath) {
+    return [];
+  }
+
+  try {
+    const raw = await fsp.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const records = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.sessions) ? parsed.sessions : [];
+    return records
+      .map((record) => normalizeActiveInstallSessionRecord(record))
+      .filter(Boolean);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return [];
+    }
+    appendStartupLog(`[INSTALL_RECOVERY_READ_ERROR] ${formatStartupErrorForLog(error)}`);
+    return [];
+  }
+}
+
+async function writeInstallSessionRecordsToDisk(records) {
+  const filePath = getInstallSessionStateFilePath();
+  if (!filePath) {
+    return;
+  }
+
+  const normalizedRecords = Array.isArray(records)
+    ? records
+        .map((record) => normalizeActiveInstallSessionRecord(record))
+        .filter(Boolean)
+    : [];
+
+  if (normalizedRecords.length === 0) {
+    await fsp.rm(filePath, { force: true }).catch(() => {});
+    return;
+  }
+
+  try {
+    await fsp.mkdir(path.dirname(filePath), { recursive: true });
+    const payload = {
+      updatedAt: new Date().toISOString(),
+      sessions: normalizedRecords
+    };
+    await fsp.writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
+  } catch (error) {
+    appendStartupLog(`[INSTALL_RECOVERY_WRITE_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function flushActiveInstallSessionsSync() {
+  const filePath = getInstallSessionStateFilePath();
+  if (!filePath) {
+    return;
+  }
+
+  const records = [...activeInstallSessionsByGameId.values()]
+    .map((record) => normalizeActiveInstallSessionRecord(record))
+    .filter(Boolean);
+
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    if (records.length === 0) {
+      fs.rmSync(filePath, { force: true });
+      return;
+    }
+    const payload = {
+      updatedAt: new Date().toISOString(),
+      sessions: records
+    };
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf8");
+  } catch (error) {
+    appendStartupLog(`[INSTALL_RECOVERY_FLUSH_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function queuePersistActiveInstallSessions() {
+  installSessionPersistQueue = installSessionPersistQueue
+    .catch(() => {})
+    .then(async () => {
+      await writeInstallSessionRecordsToDisk([...activeInstallSessionsByGameId.values()]);
+    });
+  return installSessionPersistQueue;
+}
+
+async function registerActiveInstallSession(sessionRecord) {
+  const normalized = normalizeActiveInstallSessionRecord(sessionRecord);
+  if (!normalized) {
+    return;
+  }
+  activeInstallSessionsByGameId.set(normalized.gameId, normalized);
+  await queuePersistActiveInstallSessions();
+}
+
+async function updateActiveInstallSessionPhase(gameId, phase) {
+  const id = String(gameId || "").trim();
+  if (!id) {
+    return;
+  }
+  const current = activeInstallSessionsByGameId.get(id);
+  if (!current) {
+    return;
+  }
+  const nextPhase = String(phase || "").trim().toLowerCase();
+  if (!ACTIVE_INSTALL_PHASES.has(nextPhase) || current.phase === nextPhase) {
+    return;
+  }
+  activeInstallSessionsByGameId.set(id, {
+    ...current,
+    phase: nextPhase,
+    updatedAt: new Date().toISOString()
+  });
+  await queuePersistActiveInstallSessions();
+}
+
+async function clearActiveInstallSession(gameId) {
+  const id = String(gameId || "").trim();
+  if (!id) {
+    return;
+  }
+  if (!activeInstallSessionsByGameId.has(id)) {
+    return;
+  }
+  activeInstallSessionsByGameId.delete(id);
+  await queuePersistActiveInstallSessions();
+}
+
+async function recoverInterruptedInstallSessionsOnStartup() {
+  const records = await readInstallSessionRecordsFromDisk();
+  if (!Array.isArray(records) || records.length === 0) {
+    return;
+  }
+
+  let removedInstallDirs = 0;
+  let removedTempArchives = 0;
+  let skippedSessions = 0;
+
+  for (const record of records) {
+    const installRoot = normalizeAbsolutePath(record.installRoot || "");
+    const installDir = normalizeAbsolutePath(record.installDir || "");
+    const tempArchivePath = normalizeAbsolutePath(record.tempArchivePath || "");
+    const tempRoot = installRoot ? path.join(installRoot, TEMP_DIR_NAME) : "";
+    let handled = false;
+
+    if (
+      installRoot &&
+      installDir &&
+      isManagedInstallRootPath(installRoot) &&
+      isPathInsideDirectory(installRoot, installDir) &&
+      !arePathsEquivalent(installRoot, installDir)
+    ) {
+      await fsp.rm(installDir, { recursive: true, force: true }).catch(() => {});
+      const cacheKey = getInstallSizeCacheKey(installDir);
+      if (cacheKey) {
+        installSizeCache.delete(cacheKey);
+      }
+      removedInstallDirs += 1;
+      handled = true;
+    }
+
+    if (
+      installRoot &&
+      tempArchivePath &&
+      isManagedInstallRootPath(installRoot) &&
+      tempRoot &&
+      isPathInsideDirectory(tempRoot, tempArchivePath)
+    ) {
+      await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
+      removedTempArchives += 1;
+      handled = true;
+    }
+
+    if (!handled) {
+      skippedSessions += 1;
+      appendStartupLog(
+        `[INSTALL_RECOVERY_SKIP] gameId=${record.gameId || "unknown"} installRoot=${installRoot || "n/a"} installDir=${installDir || "n/a"}`
+      );
+    }
+  }
+
+  activeInstallSessionsByGameId.clear();
+  activeInstallProgressByGameId.clear();
+  await writeInstallSessionRecordsToDisk([]);
+
+  appendStartupLog(
+    `[INSTALL_RECOVERY] sessoes=${records.length} instalacoes-removidas=${removedInstallDirs} arquivos-temp-removidos=${removedTempArchives} ignoradas=${skippedSessions}`
+  );
+}
+
+function getActiveInstallProgressSnapshot() {
+  return {
+    generatedAt: new Date().toISOString(),
+    entries: [...activeInstallProgressByGameId.values()].map((entry) => ({ ...entry }))
+  };
 }
 
 function clearStartupBootWatchdog() {
@@ -1354,6 +1636,17 @@ function createWindow() {
       void checkForLauncherUpdate("focus");
     }
   });
+  mainWindow.on("blur", () => {
+    void pollBackgroundFriendGameActivities(true);
+  });
+  mainWindow.on("minimize", () => {
+    setTimeout(() => {
+      void pollBackgroundFriendGameActivities(true);
+    }, 120);
+  });
+  mainWindow.on("hide", () => {
+    void pollBackgroundFriendGameActivities(true);
+  });
   mainWindow.webContents.on("did-attach-webview", (_event, guestWebContents) => {
     if (!guestWebContents) return;
 
@@ -1409,6 +1702,15 @@ function createWindow() {
     destroyUpdateSplashWindow();
     sendMaximizedState();
     broadcastAutoUpdateState();
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        return;
+      }
+      const activeInstallSnapshot = getActiveInstallProgressSnapshot();
+      for (const entry of activeInstallSnapshot.entries) {
+        mainWindow.webContents.send(INSTALL_PROGRESS_CHANNEL, entry);
+      }
+    }, 420);
     if (autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured && !runtimeStartupHealthState.safeMode) {
       setTimeout(() => {
         void checkForLauncherUpdate("window-ready");
@@ -1462,6 +1764,34 @@ function computeToastInitials(name) {
     .map((part) => part[0]?.toUpperCase() || "")
     .join("");
   return parts || "JG";
+}
+
+function buildGameStartToastDedupeKey(payload = {}) {
+  const explicitKey = String(payload.activityId || payload.eventId || payload.dedupeKey || "")
+    .trim()
+    .toLowerCase();
+  return explicitKey;
+}
+
+function shouldSuppressDuplicatedGameStartToast(payload = {}) {
+  const dedupeKey = buildGameStartToastDedupeKey(payload);
+  if (!dedupeKey) {
+    return false;
+  }
+
+  const now = Date.now();
+  for (const [key, seenAt] of gameStartToastDedupeCache.entries()) {
+    if (now - Number(seenAt || 0) > GAME_START_TOAST_DEDUPE_WINDOW_MS * 4) {
+      gameStartToastDedupeCache.delete(key);
+    }
+  }
+
+  const lastSeenAt = Number(gameStartToastDedupeCache.get(dedupeKey) || 0);
+  gameStartToastDedupeCache.set(dedupeKey, now);
+  if (lastSeenAt > 0 && now - lastSeenAt < GAME_START_TOAST_DEDUPE_WINDOW_MS) {
+    return true;
+  }
+  return false;
 }
 
 function buildGameStartToastHtml(payload = {}) {
@@ -1692,7 +2022,12 @@ function reflowGameStartToastWindows() {
 }
 
 async function showGameStartedDesktopToast(payload = {}) {
-  const html = buildGameStartToastHtml(payload);
+  const safePayload = payload && typeof payload === "object" ? { ...payload } : {};
+  if (shouldSuppressDuplicatedGameStartToast(safePayload)) {
+    return { ok: true, deduped: true };
+  }
+
+  const html = buildGameStartToastHtml(safePayload);
   const toastWindow = new BrowserWindow({
     width: GAME_START_TOAST_WIDTH,
     height: GAME_START_TOAST_HEIGHT,
@@ -3535,6 +3870,7 @@ async function persistAuthSession(storedSession) {
 
 async function clearPersistedAuthSession() {
   authSessionCache = null;
+  resetSocialActivityBackgroundTrackingState();
   await writeRuntimeConfig({
     authSessionEncrypted: "",
     authSessionUpdatedAt: ""
@@ -3685,6 +4021,13 @@ async function handleAuthDeepLink(rawUrl) {
     steamUserDataCache.steamId = steamId;
     steamUserDataCache.profile = player;
     steamUserDataCache.profileFetchedAt = Date.now();
+    resetSocialActivityBackgroundTrackingState();
+    socialActivityBackgroundCurrentUserId = steamId;
+    socialActivityBackgroundCursorIso = new Date(Date.now() - 3000).toISOString();
+    ensureSocialActivityBackgroundMonitorStarted();
+    setTimeout(() => {
+      void pollBackgroundFriendGameActivities(true);
+    }, 180);
     finishActiveAuthLogin(null, {
       authenticated: true,
       configured: true,
@@ -3862,6 +4205,7 @@ async function loginWithSteam() {
 async function logoutAuthSession() {
   await clearPersistedAuthSession();
   clearSteamUserDataCache();
+  resetSocialActivityBackgroundTrackingState();
   return { ok: true };
 }
 
@@ -3907,9 +4251,84 @@ function formatBytesShort(bytes) {
   return `${cursor.toFixed(decimals)} ${units[unitIndex]}`;
 }
 
-function parseSizeBytes(value) {
-  const parsed = Number(value);
+function parseSizeNumberToken(rawValue) {
+  const value = String(rawValue || "")
+    .trim()
+    .replace(/\s+/g, "");
+  if (!value) {
+    return 0;
+  }
+
+  const dotCount = (value.match(/\./g) || []).length;
+  const commaCount = (value.match(/,/g) || []).length;
+  const hasDot = dotCount > 0;
+  const hasComma = commaCount > 0;
+  let normalized = value;
+
+  if (hasDot && hasComma) {
+    const lastDot = value.lastIndexOf(".");
+    const lastComma = value.lastIndexOf(",");
+    const decimalSeparator = lastDot > lastComma ? "." : ",";
+    const thousandsSeparator = decimalSeparator === "." ? "," : ".";
+    normalized = value.split(thousandsSeparator).join("").replace(decimalSeparator, ".");
+  } else if (hasComma && !hasDot) {
+    if (commaCount > 1) {
+      normalized = value.split(",").join("");
+    } else {
+      normalized = /,\d{1,3}$/.test(value) ? value.replace(",", ".") : value.split(",").join("");
+    }
+  } else if (hasDot && !hasComma) {
+    if (dotCount > 1) {
+      normalized = value.split(".").join("");
+    } else {
+      normalized = /\.\d{1,3}$/.test(value) ? value : value.split(".").join("");
+    }
+  }
+
+  const parsed = Number(normalized);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function parseSizeBytes(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
+  }
+
+  const text = String(value || "").trim();
+  if (!text) {
+    return 0;
+  }
+
+  const directParsed = Number(text);
+  if (Number.isFinite(directParsed) && directParsed > 0) {
+    return Math.round(directParsed);
+  }
+
+  const sizeMatch = text.match(/^([\d.,\s]+)\s*(b|bytes?|kb|kib|mb|mib|gb|gib|tb|tib)$/i);
+  if (sizeMatch) {
+    const amount = parseSizeNumberToken(sizeMatch[1]);
+    if (amount > 0) {
+      const normalizedUnit = String(sizeMatch[2] || "")
+        .trim()
+        .toLowerCase();
+      let multiplier = 1;
+      if (normalizedUnit === "kb" || normalizedUnit === "kib") multiplier = 1024;
+      else if (normalizedUnit === "mb" || normalizedUnit === "mib") multiplier = 1024 ** 2;
+      else if (normalizedUnit === "gb" || normalizedUnit === "gib") multiplier = 1024 ** 3;
+      else if (normalizedUnit === "tb" || normalizedUnit === "tib") multiplier = 1024 ** 4;
+      const resolved = amount * multiplier;
+      if (Number.isFinite(resolved) && resolved > 0) {
+        return Math.round(resolved);
+      }
+    }
+  }
+
+  const digitsOnly = text.replace(/[^\d]/g, "");
+  if (!digitsOnly) {
+    return 0;
+  }
+  const parsedDigits = Number(digitsOnly);
+  return Number.isFinite(parsedDigits) && parsedDigits > 0 ? parsedDigits : 0;
 }
 
 function extractTotalBytesFromHeaders(headers = {}) {
@@ -3993,6 +4412,28 @@ function pickFirstDefinedValue(source, keys = []) {
     if (source[key] !== undefined && source[key] !== null) {
       return source[key];
     }
+  }
+  return undefined;
+}
+
+function pickFirstMeaningfulValue(source, keys = []) {
+  if (!source || typeof source !== "object") {
+    return undefined;
+  }
+  for (const key of keys) {
+    if (!key) continue;
+    const value = source[key];
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        continue;
+      }
+      return trimmed;
+    }
+    return value;
   }
   return undefined;
 }
@@ -4147,8 +4588,22 @@ function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
     discountPercent: pickFirstDefinedValue(merged, ["discountPercent", "discount_percent"]),
     free: pickFirstDefinedValue(merged, ["free", "is_free"]),
     exclusive: pickFirstDefinedValue(merged, ["exclusive", "is_exclusive"]),
-    sizeBytes: pickFirstDefinedValue(merged, ["sizeBytes", "size_bytes"]),
-    size: pickFirstDefinedValue(merged, ["size", "size_label"]),
+    sizeBytes: pickFirstDefinedValue(merged, [
+      "size_bytes",
+      "sizeBytes",
+      "archive_bytes",
+      "archiveBytes",
+      "file_size_bytes",
+      "fileSizeBytes"
+    ]),
+    size: pickFirstMeaningfulValue(merged, [
+      "size_label",
+      "size",
+      "archive_size",
+      "archiveSize",
+      "file_size",
+      "fileSize"
+    ]),
     enabled: pickFirstDefinedValue(merged, ["enabled", "is_enabled"]),
     sortOrder: pickFirstDefinedValue(merged, ["sortOrder", "sort_order"]),
     updatedAt: pickFirstDefinedValue(merged, ["updatedAt", "updated_at"])
@@ -4787,6 +5242,208 @@ function toSocialActivityCreatedAtMs(entry) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function getSocialActivityBackgroundPollIntervalMs() {
+  return resolveHostLowSpecProfile()
+    ? SOCIAL_ACTIVITY_BACKGROUND_POLL_INTERVAL_LOW_SPEC_MS
+    : SOCIAL_ACTIVITY_BACKGROUND_POLL_INTERVAL_MS;
+}
+
+function resetSocialActivityBackgroundTrackingState() {
+  socialActivityBackgroundPollInFlight = null;
+  socialActivityBackgroundCursorIso = "";
+  socialActivityBackgroundCurrentUserId = "";
+  socialActivityBackgroundSeenIds.clear();
+}
+
+function stopSocialActivityBackgroundMonitor() {
+  if (socialActivityBackgroundPollTimer) {
+    clearInterval(socialActivityBackgroundPollTimer);
+    socialActivityBackgroundPollTimer = null;
+  }
+  resetSocialActivityBackgroundTrackingState();
+}
+
+function rememberSeenBackgroundSocialActivityId(activityId) {
+  const normalized = String(activityId || "").trim();
+  if (!normalized) return;
+  socialActivityBackgroundSeenIds.add(normalized);
+  if (socialActivityBackgroundSeenIds.size > SOCIAL_ACTIVITY_BACKGROUND_SEEN_LIMIT) {
+    const overflow = socialActivityBackgroundSeenIds.size - SOCIAL_ACTIVITY_BACKGROUND_SEEN_LIMIT;
+    if (overflow <= 0) return;
+    const iterator = socialActivityBackgroundSeenIds.values();
+    for (let index = 0; index < overflow; index += 1) {
+      const next = iterator.next();
+      if (next.done) break;
+      socialActivityBackgroundSeenIds.delete(next.value);
+    }
+  }
+}
+
+function setSocialActivityBackgroundCursorFromTimestamp(timestampMs) {
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return;
+  const currentMs = Date.parse(socialActivityBackgroundCursorIso || "");
+  if (Number.isFinite(currentMs) && currentMs >= timestampMs) {
+    return;
+  }
+  socialActivityBackgroundCursorIso = new Date(timestampMs).toISOString();
+}
+
+function getSocialActivityBackgroundSinceIso() {
+  if (!socialActivityBackgroundCursorIso) {
+    return "";
+  }
+  const cursorMs = Date.parse(socialActivityBackgroundCursorIso);
+  if (!Number.isFinite(cursorMs)) {
+    return "";
+  }
+  return new Date(Math.max(0, cursorMs - SOCIAL_ACTIVITY_BACKGROUND_CURSOR_BACKTRACK_MS)).toISOString();
+}
+
+function isLauncherBackgroundStateForFriendToast() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return true;
+  }
+
+  if (!mainWindow.isVisible() || mainWindow.isMinimized()) {
+    return true;
+  }
+
+  return !mainWindow.isFocused();
+}
+
+function normalizeBackgroundSocialActivityEntry(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const id = String(entry.id || "").trim();
+  const actorSteamId = normalizeSteamId(entry.actorSteamId);
+  const actorDisplayName = sanitizeNotificationText(entry.actorDisplayName, 80) || "Jogador";
+  const actorAvatarUrl = sanitizeHttpUrlForToast(entry.actorAvatarUrl);
+  const gameId = sanitizeNotificationText(entry.gameId, 120);
+  const gameName = sanitizeNotificationText(entry.gameName, 140) || "Jogo";
+  const createdAtRaw = String(entry.createdAt || "").trim();
+  const createdAtMs = Date.parse(createdAtRaw);
+  const createdAt = Number.isFinite(createdAtMs) ? new Date(createdAtMs).toISOString() : new Date().toISOString();
+
+  if (!actorSteamId) {
+    return null;
+  }
+
+  return {
+    id,
+    actorSteamId,
+    actorDisplayName,
+    actorAvatarUrl,
+    gameId,
+    gameName,
+    createdAt,
+    createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : Date.now()
+  };
+}
+
+async function pollBackgroundFriendGameActivities(silent = true) {
+  if (appQuitRequested) {
+    return;
+  }
+  if (socialActivityBackgroundPollInFlight) {
+    return socialActivityBackgroundPollInFlight;
+  }
+
+  socialActivityBackgroundPollInFlight = (async () => {
+    const authConfig = resolveAuthConfig();
+    if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
+      resetSocialActivityBackgroundTrackingState();
+      return;
+    }
+    const steamWebApiKey = normalizeSteamWebApiKey(authConfig.steamWebApiKey);
+    if (!steamWebApiKey) {
+      resetSocialActivityBackgroundTrackingState();
+      return;
+    }
+
+    const steamSession = getSteamSessionSnapshot();
+    const currentUserId = normalizeSteamId(steamSession?.steamId || steamSession?.user?.id);
+    if (!currentUserId) {
+      resetSocialActivityBackgroundTrackingState();
+      return;
+    }
+
+    if (socialActivityBackgroundCurrentUserId && socialActivityBackgroundCurrentUserId !== currentUserId) {
+      resetSocialActivityBackgroundTrackingState();
+    }
+    socialActivityBackgroundCurrentUserId = currentUserId;
+
+    if (!socialActivityBackgroundCursorIso) {
+      socialActivityBackgroundCursorIso = new Date(Date.now() - 3000).toISOString();
+    }
+
+    const payload = await listFriendGameActivitiesForCurrentUser({
+      since: getSocialActivityBackgroundSinceIso(),
+      limit: SOCIAL_ACTIVITY_BACKGROUND_LIMIT
+    });
+    const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+    if (!entries.length) {
+      return;
+    }
+
+    const now = Date.now();
+    const normalizedEntries = entries
+      .map((entry) => normalizeBackgroundSocialActivityEntry(entry))
+      .filter(Boolean)
+      .sort((left, right) => left.createdAtMs - right.createdAtMs);
+
+    for (const entry of normalizedEntries) {
+      if (entry.id && socialActivityBackgroundSeenIds.has(entry.id)) {
+        continue;
+      }
+      if (entry.id) {
+        rememberSeenBackgroundSocialActivityId(entry.id);
+      }
+      setSocialActivityBackgroundCursorFromTimestamp(entry.createdAtMs);
+
+      if (entry.actorSteamId === currentUserId) {
+        continue;
+      }
+      if (now - entry.createdAtMs > SOCIAL_ACTIVITY_BACKGROUND_MAX_EVENT_AGE_MS) {
+        continue;
+      }
+      if (!isLauncherBackgroundStateForFriendToast()) {
+        continue;
+      }
+
+      await showGameStartedDesktopToast({
+        activityId: entry.id,
+        actorSteamId: entry.actorSteamId,
+        gameId: entry.gameId,
+        createdAt: entry.createdAt,
+        nickname: entry.actorDisplayName,
+        avatarUrl: entry.actorAvatarUrl,
+        gameName: entry.gameName
+      }).catch(() => {});
+    }
+  })()
+    .catch((error) => {
+      if (!silent) {
+        appendStartupLog(`[SOCIAL_BG_POLL_ERROR] ${formatStartupErrorForLog(error)}`);
+      }
+    })
+    .finally(() => {
+      socialActivityBackgroundPollInFlight = null;
+    });
+
+  return socialActivityBackgroundPollInFlight;
+}
+
+function ensureSocialActivityBackgroundMonitorStarted() {
+  if (socialActivityBackgroundPollTimer) {
+    return;
+  }
+
+  const intervalMs = getSocialActivityBackgroundPollIntervalMs();
+  socialActivityBackgroundPollTimer = setInterval(() => {
+    void pollBackgroundFriendGameActivities(true);
+  }, intervalMs);
+  void pollBackgroundFriendGameActivities(true);
+}
+
 async function fetchSteamFriendSteamIds(steamId, steamWebApiKey) {
   const normalizedSteamId = normalizeSteamId(steamId);
   const apiKey = normalizeSteamWebApiKey(steamWebApiKey);
@@ -5051,6 +5708,88 @@ async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {})
   return sortCatalogEntries(mappedEntries);
 }
 
+async function syncCatalogGameSizeBytesToSupabase(gameId, sizeBytes, sourceConfig) {
+  const normalizedGameId = String(gameId || "").trim();
+  const normalizedSizeBytes = parseSizeBytes(sizeBytes);
+  if (!normalizedGameId || normalizedSizeBytes <= 0) {
+    return false;
+  }
+  if (!sourceConfig || sourceConfig.useRemote !== true) {
+    return false;
+  }
+
+  const existingInFlight = catalogSizeSyncInFlightByGameId.get(normalizedGameId);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
+
+  const task = (async () => {
+    try {
+      const authConfig = resolveAuthConfig();
+      if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
+        return false;
+      }
+
+      const tableName = normalizeCatalogIdentifier(sourceConfig.table, CATALOG_DEFAULT_SUPABASE_TABLE);
+      const schemaName = normalizeCatalogIdentifier(sourceConfig.schema, CATALOG_DEFAULT_SUPABASE_SCHEMA);
+      const endpoint = `${authConfig.supabaseUrl}/rest/v1/${tableName}`;
+      const response = await axios.patch(
+        endpoint,
+        {
+          size_bytes: normalizedSizeBytes
+        },
+        {
+          headers: {
+            ...buildCatalogSupabaseHeaders(authConfig, schemaName),
+            Prefer: "return=minimal"
+          },
+          params: {
+            id: `eq.${normalizedGameId}`
+          },
+          timeout: 15_000,
+          validateStatus: (status) => status >= 200 && status < 500
+        }
+      );
+
+      if (response.status === 404) {
+        appendStartupLog(`[CATALOG_SIZE_SYNC] tabela nao encontrada para ${schemaName}.${tableName}.`);
+        return false;
+      }
+      if (response.status >= 400) {
+        appendStartupLog(
+          `[CATALOG_SIZE_SYNC] falha HTTP ${response.status} ao atualizar size_bytes de ${normalizedGameId}.`
+        );
+        return false;
+      }
+
+      if (Array.isArray(remoteCatalogCache.entries)) {
+        for (const entry of remoteCatalogCache.entries) {
+          if (!entry || String(entry.id || "").trim() !== normalizedGameId) {
+            continue;
+          }
+          entry.sizeBytes = normalizedSizeBytes;
+          const currentSizeLabel = String(entry.size || "").trim();
+          if (!currentSizeLabel || currentSizeLabel.toLowerCase() === "tamanho nao informado") {
+            entry.size = formatBytesShort(normalizedSizeBytes);
+          }
+        }
+      }
+
+      return true;
+    } catch (error) {
+      appendStartupLog(
+        `[CATALOG_SIZE_SYNC] erro ao atualizar size_bytes de ${normalizedGameId}: ${formatStartupErrorForLog(error)}`
+      );
+      return false;
+    }
+  })().finally(() => {
+    catalogSizeSyncInFlightByGameId.delete(normalizedGameId);
+  });
+
+  catalogSizeSyncInFlightByGameId.set(normalizedGameId, task);
+  return task;
+}
+
 async function resolveCatalogEntries(settings = {}, localEntries = []) {
   const sourceConfig = resolveCatalogSourceConfig(settings);
   const fallbackEntries = Array.isArray(localEntries) ? localEntries : [];
@@ -5175,8 +5914,9 @@ async function readCatalogBundle() {
       const launchExecutable = String(entry.launchExecutable || defaultExecutable).trim() || "game.exe";
       const installDirName = String(entry.installDirName || name).trim() || name;
       const section = String(entry.section || "Jogos gratis").trim() || "Jogos gratis";
-      const sizeBytes = parseSizeBytes(entry.sizeBytes);
-      const size = entry.size ? String(entry.size) : sizeBytes > 0 ? formatBytesShort(sizeBytes) : "Tamanho nao informado";
+      const sizeLabel = String(entry.size || "").trim();
+      const sizeBytes = parseSizeBytes(entry.sizeBytes) || parseSizeBytes(sizeLabel);
+      const size = sizeLabel || (sizeBytes > 0 ? formatBytesShort(sizeBytes) : "Tamanho nao informado");
       const comingSoon = entry.comingSoon === true || !hasDownloadSource;
       const description = String(entry.description || "Sem descricao.");
       const longDescription = String(entry.longDescription || entry.fullDescription || description || "Sem descricao.");
@@ -7080,8 +7820,28 @@ function normalizeInstallFailureMessage(error) {
 }
 
 function emitInstallProgress(payload) {
+  const safePayload = payload && typeof payload === "object" ? { ...payload } : null;
+  if (!safePayload) {
+    return;
+  }
+
+  const gameId = String(safePayload.gameId || "").trim();
+  if (!gameId) {
+    return;
+  }
+
+  const phase = String(safePayload.phase || "").trim().toLowerCase();
+  safePayload.gameId = gameId;
+  safePayload.phase = phase || "preparing";
+
+  if (ACTIVE_INSTALL_PHASES.has(safePayload.phase)) {
+    activeInstallProgressByGameId.set(gameId, safePayload);
+  } else {
+    activeInstallProgressByGameId.delete(gameId);
+  }
+
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(INSTALL_PROGRESS_CHANNEL, payload);
+    mainWindow.webContents.send(INSTALL_PROGRESS_CHANNEL, safePayload);
   }
 }
 
@@ -7112,8 +7872,19 @@ async function installGame(gameId) {
     const safeTempId = slugifyId(game.id, "game");
     const tempArchivePath = path.join(tempDir, `${safeTempId}-${Date.now()}${getArchiveExt(game)}`);
     const localArchivePath = await resolveConfiguredLocalArchivePath(game);
+    const installSessionTimestamp = new Date().toISOString();
 
     await fsp.mkdir(tempDir, { recursive: true });
+    await registerActiveInstallSession({
+      gameId: game.id,
+      gameName: game.name,
+      installRoot,
+      installDir,
+      tempArchivePath,
+      phase: "preparing",
+      startedAt: installSessionTimestamp,
+      updatedAt: installSessionTimestamp
+    }).catch(() => {});
 
     try {
       await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
@@ -7130,6 +7901,7 @@ async function installGame(gameId) {
       const usingLocalArchive = Boolean(localArchivePath);
       let transferResult = null;
 
+      await updateActiveInstallSessionPhase(gameId, "downloading").catch(() => {});
       emitInstallProgress({
         gameId,
         phase: "downloading",
@@ -7198,6 +7970,7 @@ async function installGame(gameId) {
         });
       }
 
+      await updateActiveInstallSessionPhase(gameId, "preparing").catch(() => {});
       emitInstallProgress({
         gameId,
         phase: "preparing",
@@ -7236,6 +8009,7 @@ async function installGame(gameId) {
         await fsp.mkdir(path.dirname(executableTarget), { recursive: true });
         await fsp.copyFile(tempArchivePath, executableTarget);
       } else {
+        await updateActiveInstallSessionPhase(gameId, "extracting").catch(() => {});
         await testArchiveIntegrity(tempArchivePath, game);
         let extractionPercent = 96;
         emitInstallProgress({
@@ -7274,10 +8048,16 @@ async function installGame(gameId) {
         parseSizeBytes(transferResult?.totalBytes) ||
         parseSizeBytes(transferResult?.downloadedBytes) ||
         parseSizeBytes(transferResult?.copiedBytes);
+      const catalogSizeBytes = archiveBytes || installedSizeBytes;
       const sizeMeasuredAt = Date.now();
       const sizeCacheKey = getInstallSizeCacheKey(installDir);
       if (sizeCacheKey && installedSizeBytes > 0) {
         installSizeCache.set(sizeCacheKey, { sizeBytes: installedSizeBytes, measuredAt: sizeMeasuredAt });
+      }
+
+      if (catalogSizeBytes > 0 && parseSizeBytes(game.sizeBytes) <= 0) {
+        const sourceConfig = resolveCatalogSourceConfig(settings);
+        void syncCatalogGameSizeBytesToSupabase(game.id, catalogSizeBytes, sourceConfig);
       }
 
       await writeInstallManifest(installDir, {
@@ -7290,6 +8070,7 @@ async function installGame(gameId) {
         sizeMeasuredAt
       }).catch(() => {});
 
+      await clearActiveInstallSession(gameId).catch(() => {});
       emitInstallProgress({
         gameId,
         phase: "completed",
@@ -7308,6 +8089,7 @@ async function installGame(gameId) {
       if (cacheKey) {
         installSizeCache.delete(cacheKey);
       }
+      await clearActiveInstallSession(gameId).catch(() => {});
       const normalizedErrorMessage = normalizeInstallFailureMessage(error);
       emitInstallProgress({
         gameId,
@@ -7326,6 +8108,8 @@ async function installGame(gameId) {
     return await task;
   } finally {
     activeInstalls.delete(gameId);
+    activeInstallProgressByGameId.delete(String(gameId || "").trim());
+    await clearActiveInstallSession(gameId).catch(() => {});
   }
 }
 
@@ -8309,6 +9093,10 @@ if (!hasSingleInstanceLock) {
     appendStartupLog("[APP] whenReady iniciado.");
     await ensurePersistedAuthConfigFile().catch(() => {});
     await ensurePersistedUpdaterConfigFile().catch(() => {});
+    ensureSocialActivityBackgroundMonitorStarted();
+    await recoverInterruptedInstallSessionsOnStartup().catch((error) => {
+      appendStartupLog(`[INSTALL_RECOVERY_FATAL] ${formatStartupErrorForLog(error)}`);
+    });
     registerAuthProtocolClient();
     ensureYoutubeEmbedRequestHeaders();
     setupAutoUpdater();
@@ -8362,6 +9150,7 @@ if (!hasSingleInstanceLock) {
     }
 
     ipcMain.handle("launcher:get-games", (_event, options) => getGamesWithStatus(options));
+    ipcMain.handle("launcher:get-active-installs", () => getActiveInstallProgressSnapshot());
     ipcMain.handle("launcher:get-install-root", () => getInstallRootPath());
     ipcMain.handle("launcher:choose-install-base-directory", () => chooseInstallBaseDirectory());
     ipcMain.handle("launcher:install-game", (_event, gameId) => installGame(gameId));
@@ -8434,6 +9223,8 @@ if (!hasSingleInstanceLock) {
     appQuitRequested = true;
     clearStartupBootWatchdog();
     clearAutoUpdaterInterval();
+    stopSocialActivityBackgroundMonitor();
+    flushActiveInstallSessionsSync();
     destroyUpdateSplashWindow();
     destroyTray();
     appendStartupLog("[APP] encerrando launcher.");

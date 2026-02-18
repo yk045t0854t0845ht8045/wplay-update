@@ -66,6 +66,7 @@ const detailsGenres = document.getElementById("detailsGenres");
 const detailsStatus = document.getElementById("detailsStatus");
 const detailsPlayBtn = document.getElementById("detailsPlayBtn");
 const detailsUninstallBtn = document.getElementById("detailsUninstallBtn");
+const detailsHeroUninstallBtn = document.getElementById("detailsHeroUninstallBtn");
 
 const installPathModal = document.getElementById("installPathModal");
 const installPathCurrent = document.getElementById("installPathCurrent");
@@ -76,6 +77,10 @@ const updateRestartModal = document.getElementById("updateRestartModal");
 const updateRestartText = document.getElementById("updateRestartText");
 const updateRestartNowBtn = document.getElementById("updateRestartNowBtn");
 const updateRestartLaterBtn = document.getElementById("updateRestartLaterBtn");
+const uninstallConfirmModal = document.getElementById("uninstallConfirmModal");
+const uninstallConfirmText = document.getElementById("uninstallConfirmText");
+const uninstallConfirmNowBtn = document.getElementById("uninstallConfirmNowBtn");
+const uninstallConfirmCancelBtn = document.getElementById("uninstallConfirmCancelBtn");
 const steamRequiredModal = document.getElementById("steamRequiredModal");
 const steamRequiredText = document.getElementById("steamRequiredText");
 const steamRequiredOpenBtn = document.getElementById("steamRequiredOpenBtn");
@@ -102,10 +107,11 @@ const PROGRESS_RENDER_MIN_INTERVAL_MS = 120;
 const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 60 * 1000 : 30 * 1000;
 const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = LOW_SPEC_DEVICE ? 5 * 60 * 1000 : 3 * 60 * 1000;
 const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = 8 * 1000;
-const FRIEND_ACTIVITY_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 20 * 1000 : 12 * 1000;
+const FRIEND_ACTIVITY_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 10 * 1000 : 6 * 1000;
 const FRIEND_ACTIVITY_CURSOR_BACKTRACK_MS = 18 * 1000;
 const FRIEND_ACTIVITY_MAX_EVENT_AGE_MS = 30 * 60 * 1000;
 const FRIEND_ACTIVITY_SEEN_LIMIT = 320;
+const ACTIVE_INSTALL_PHASES = new Set(["preparing", "downloading", "extracting"]);
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
@@ -201,6 +207,7 @@ const state = {
     preferLatestFullInstaller: true
   },
   updateRestartModalOpen: false,
+  uninstallConfirmModalOpen: false,
   steamRequiredModalOpen: false,
   lastAutoUpdateNotifiedVersion: "",
   startupSafeModeNoticeShown: false,
@@ -231,6 +238,7 @@ let friendActivityCursorIso = "";
 let friendActivitySeenIds = new Set();
 let friendActivityCurrentUserId = "";
 let friendActivityLifecycleBindingsReady = false;
+let uninstallConfirmModalResolver = null;
 
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
@@ -349,6 +357,7 @@ function handleFriendActivityNotification(activity) {
   const safeGame = String(activity.gameName || "").trim() || "Jogo";
   notify("success", `${safeName} iniciou`, safeGame, 4600);
   void showDesktopGameStartedToastPayload({
+    activityId: String(activity.id || "").trim(),
     nickname: safeName,
     avatarUrl: String(activity.actorAvatarUrl || "").trim(),
     gameName: safeGame
@@ -438,7 +447,7 @@ function startFriendActivityRealtimeSync() {
       window.clearInterval(friendActivityPollTimer);
     }
     friendActivityPollTimer = window.setInterval(() => {
-      if (document.hidden) {
+      if (document.hidden || !document.hasFocus()) {
         return;
       }
       void pollFriendGameActivities(true);
@@ -549,13 +558,14 @@ function setAuthButtonsState(loading) {
 
 async function bootstrapLauncherDataIfNeeded() {
   if (state.appBootstrapped) {
+    await syncActiveInstallProgressSnapshot();
     await refreshGames();
     return;
   }
   state.appBootstrapped = true;
 
   state.libraryGameIds = loadLibraryFromStorage();
-  await Promise.all([refreshInstallRoot(), refreshGames()]);
+  await Promise.all([refreshInstallRoot(), refreshGames(), syncActiveInstallProgressSnapshot()]);
   syncSearchVisibility();
   updateNotificationBadge();
   renderNotificationHistory();
@@ -1349,6 +1359,55 @@ function setUpdateRestartModalOpen(open) {
     : "Uma nova versao do launcher foi baixada. Deseja reiniciar agora para aplicar sem reinstalar jogos?";
 }
 
+function closeUninstallConfirmModal(confirmed) {
+  if (uninstallConfirmModalResolver) {
+    uninstallConfirmModalResolver(Boolean(confirmed));
+    uninstallConfirmModalResolver = null;
+  }
+  state.uninstallConfirmModalOpen = false;
+  if (!uninstallConfirmModal) return;
+  uninstallConfirmModal.classList.add("is-hidden");
+  uninstallConfirmModal.setAttribute("aria-hidden", "true");
+}
+
+function setUninstallConfirmModalOpen(open, gameName = "") {
+  if (!uninstallConfirmModal) return;
+  const nextOpen = Boolean(open);
+  state.uninstallConfirmModalOpen = nextOpen;
+  uninstallConfirmModal.classList.toggle("is-hidden", !nextOpen);
+  uninstallConfirmModal.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+
+  if (!nextOpen || !uninstallConfirmText) {
+    return;
+  }
+
+  const safeName = String(gameName || "").trim();
+  uninstallConfirmText.textContent = safeName
+    ? `Tem certeza que deseja desinstalar ${safeName}?\n\nIsso remove os arquivos do jogo do computador.`
+    : "Tem certeza que deseja desinstalar este jogo?\n\nIsso remove os arquivos do jogo do computador.";
+}
+
+async function askUninstallConfirmation(game) {
+  const safeName = String(game?.name || "").trim();
+  if (!uninstallConfirmModal || !uninstallConfirmNowBtn || !uninstallConfirmCancelBtn) {
+    return window.confirm(
+      safeName
+        ? `Desinstalar ${safeName}?\n\nIsso remove os arquivos do computador.`
+        : "Desinstalar este jogo?\n\nIsso remove os arquivos do computador."
+    );
+  }
+
+  if (uninstallConfirmModalResolver) {
+    uninstallConfirmModalResolver(false);
+    uninstallConfirmModalResolver = null;
+  }
+
+  setUninstallConfirmModalOpen(true, safeName);
+  return new Promise((resolve) => {
+    uninstallConfirmModalResolver = resolve;
+  });
+}
+
 function parseLauncherError(message) {
   const raw = String(message || "").trim();
   if (!raw) return { code: "", message: "" };
@@ -1870,7 +1929,29 @@ function isGameBusy(gameId) {
   if (isGameUninstalling(gameId)) return true;
   const progress = getInstallProgress(gameId);
   if (!progress) return false;
-  return !["completed", "failed"].includes(progress.phase);
+  return ACTIVE_INSTALL_PHASES.has(String(progress.phase || "").toLowerCase());
+}
+
+function normalizeInstallProgressPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const gameId = String(payload.gameId || "").trim();
+  if (!gameId) {
+    return null;
+  }
+
+  const phase = String(payload.phase || "").trim().toLowerCase() || "preparing";
+  const percentRaw = Number(payload.percent);
+  const percent = Number.isFinite(percentRaw) ? Math.max(0, Math.min(100, percentRaw)) : 0;
+
+  return {
+    ...payload,
+    gameId,
+    phase,
+    percent
+  };
 }
 
 function getProgressText(progress) {
@@ -3486,6 +3567,14 @@ function renderDetailsActions(game) {
   setButtonLabel(detailsAddLibraryBtn, inLibrary ? "Remove from Library" : "Add to Library");
   detailsAddLibraryBtn.disabled = !shouldShowLibraryToggle || !canToggleLibrary;
 
+  if (detailsHeroUninstallBtn) {
+    const showHeroUninstall = game.installed || isGameUninstalling(game.id);
+    detailsHeroUninstallBtn.classList.toggle("is-hidden", !showHeroUninstall);
+    detailsHeroUninstallBtn.dataset.gameId = showHeroUninstall ? game.id : "";
+    detailsHeroUninstallBtn.disabled = isGameBusy(game.id) || isGameUninstalling(game.id);
+    setButtonLabel(detailsHeroUninstallBtn, isGameUninstalling(game.id) ? "Removendo..." : "Desinstalar");
+  }
+
   const showPlay = game.installed && !isGameBusy(game.id) && !isGameUninstalling(game.id);
   const playAction = showPlay ? (game.running ? "close" : "play") : "";
   detailsPlayBtn.classList.toggle("is-hidden", !showPlay);
@@ -3647,6 +3736,68 @@ async function refreshInstallRoot() {
   }
 }
 
+function applyActiveInstallSnapshot(entries = []) {
+  const snapshotEntries = Array.isArray(entries) ? entries : [];
+  const activeGameIds = new Set();
+
+  for (const entry of snapshotEntries) {
+    const normalized = normalizeInstallProgressPayload(entry);
+    if (!normalized) continue;
+    if (!ACTIVE_INSTALL_PHASES.has(normalized.phase)) continue;
+
+    state.installProgressByGameId.set(normalized.gameId, normalized);
+    activeGameIds.add(normalized.gameId);
+
+    if (normalized.phase === "downloading") {
+      const speedBps = Number(normalized.speedBps);
+      if (Number.isFinite(speedBps) && speedBps >= 0) {
+        state.downloadSpeedByGameId.set(normalized.gameId, {
+          lastBytes: Number(normalized.downloadedBytes) || 0,
+          lastAt: Date.now(),
+          bps: speedBps
+        });
+      }
+    }
+  }
+
+  let removedStaleEntries = false;
+  for (const [gameId, progress] of state.installProgressByGameId.entries()) {
+    const phase = String(progress?.phase || "").toLowerCase();
+    if (!ACTIVE_INSTALL_PHASES.has(phase)) {
+      continue;
+    }
+    if (activeGameIds.has(gameId)) {
+      continue;
+    }
+    state.installProgressByGameId.delete(gameId);
+    state.downloadSpeedByGameId.delete(gameId);
+    removedStaleEntries = true;
+  }
+
+  if (activeGameIds.size > 0) {
+    scheduleProgressRenderAll();
+    return;
+  }
+
+  if (removedStaleEntries) {
+    renderAll();
+  }
+}
+
+async function syncActiveInstallProgressSnapshot() {
+  if (typeof window.launcherApi?.getActiveInstalls !== "function") {
+    return;
+  }
+
+  try {
+    const payload = await window.launcherApi.getActiveInstalls();
+    const entries = Array.isArray(payload?.entries) ? payload.entries : Array.isArray(payload) ? payload : [];
+    applyActiveInstallSnapshot(entries);
+  } catch (_error) {
+    // Ignore snapshot sync failures and rely on realtime install events.
+  }
+}
+
 function fireConfettiFromElement(element, strong = false) {
   if (!confettiFx || !element) return;
   const rect = element.getBoundingClientRect();
@@ -3774,7 +3925,7 @@ async function handleGameAction(gameId, action) {
     }
 
     if (action === "uninstall") {
-      const confirmed = window.confirm(`Desinstalar ${game.name}?\n\nIsso remove os arquivos do computador.`);
+      const confirmed = await askUninstallConfirmation(game);
       if (!confirmed) return;
 
       state.uninstallingGameIds.add(gameId);
@@ -4324,6 +4475,14 @@ function installEventBindings() {
     await handleGameAction(gameId, action);
   });
 
+  if (detailsHeroUninstallBtn) {
+    detailsHeroUninstallBtn.addEventListener("click", async () => {
+      const gameId = detailsHeroUninstallBtn.dataset.gameId || "";
+      if (!gameId) return;
+      await handleGameAction(gameId, "uninstall");
+    });
+  }
+
   detailsPlayBtn.addEventListener("click", async () => {
     const gameId = detailsPlayBtn.dataset.gameId || "";
     const action = detailsPlayBtn.dataset.action || "play";
@@ -4362,6 +4521,27 @@ function installEventBindings() {
       if (closeTarget) {
         setUpdateRestartModalOpen(false);
       }
+    });
+  }
+
+  if (uninstallConfirmModal) {
+    uninstallConfirmModal.addEventListener("click", (event) => {
+      const closeTarget = event.target.closest("[data-close-uninstall-confirm='true']");
+      if (closeTarget) {
+        closeUninstallConfirmModal(false);
+      }
+    });
+  }
+
+  if (uninstallConfirmCancelBtn) {
+    uninstallConfirmCancelBtn.addEventListener("click", () => {
+      closeUninstallConfirmModal(false);
+    });
+  }
+
+  if (uninstallConfirmNowBtn) {
+    uninstallConfirmNowBtn.addEventListener("click", () => {
+      closeUninstallConfirmModal(true);
     });
   }
 
@@ -4405,6 +4585,11 @@ function installEventBindings() {
       return;
     }
 
+    if (event.key === "Escape" && state.uninstallConfirmModalOpen) {
+      closeUninstallConfirmModal(false);
+      return;
+    }
+
     if (event.key === "Escape" && state.updateRestartModalOpen) {
       setUpdateRestartModalOpen(false);
       return;
@@ -4436,9 +4621,14 @@ function installEventBindings() {
   });
 
   window.launcherApi.onInstallProgress(async (payload) => {
+    const normalizedPayload = normalizeInstallProgressPayload(payload);
+    if (!normalizedPayload) {
+      return;
+    }
+    payload = normalizedPayload;
     state.installProgressByGameId.set(payload.gameId, payload);
 
-    if (["preparing", "downloading", "extracting"].includes(payload.phase)) {
+    if (ACTIVE_INSTALL_PHASES.has(payload.phase)) {
       clearRecentCompletedDownload(payload.gameId);
     }
 
@@ -4478,14 +4668,14 @@ function installEventBindings() {
       state.downloadSpeedByGameId.delete(payload.gameId);
     }
 
-    const streamingPhase = ["preparing", "downloading", "extracting"].includes(payload.phase);
+    const streamingPhase = ACTIVE_INSTALL_PHASES.has(payload.phase);
     if (streamingPhase) {
       scheduleProgressRenderAll();
     } else {
       renderAll();
     }
 
-    if (["preparing", "downloading", "extracting"].includes(payload.phase)) {
+    if (ACTIVE_INSTALL_PHASES.has(payload.phase)) {
       setStatus(payload.message || "Processando download...");
     }
 

@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("launcherApi", {
   getGames: (options = {}) => ipcRenderer.invoke("launcher:get-games", options),
+  getActiveInstalls: () => ipcRenderer.invoke("launcher:get-active-installs"),
   getInstallRoot: () => ipcRenderer.invoke("launcher:get-install-root"),
   chooseInstallBaseDirectory: () => ipcRenderer.invoke("launcher:choose-install-base-directory"),
   installGame: (gameId) => ipcRenderer.invoke("launcher:install-game", gameId),

@@ -3024,6 +3024,23 @@ body.auth-locked .auth-gate {
   display: block;
 }
 
+.hero-action-btn-danger {
+  border-color: rgba(238, 125, 125, 0.36);
+  color: #ffd9d9;
+  background: linear-gradient(170deg, rgba(40, 18, 22, 0.95), rgba(28, 12, 16, 0.95));
+  box-shadow: inset 0 0 0 1px rgba(239, 130, 130, 0.12);
+}
+
+.hero-action-btn-danger:hover:not(:disabled) {
+  border-color: rgba(255, 166, 166, 0.52);
+  background: linear-gradient(170deg, rgba(48, 20, 26, 0.97), rgba(33, 13, 19, 0.97));
+  transform: translateY(-1px);
+}
+
+.hero-action-btn-danger .hero-action-icon.icon-trash {
+  display: block;
+}
+
 #detailsActionBtn[data-action="install"] .hero-action-icon.icon-download {
   display: block;
 }
@@ -3904,6 +3921,18 @@ body.auth-locked .auth-gate {
   background: transparent;
 }
 
+.modal-btn-danger {
+  border-color: rgba(255, 183, 183, 0.36);
+  color: #ffe7e7;
+  background: linear-gradient(170deg, rgba(128, 35, 43, 0.96), rgba(103, 27, 35, 0.96));
+}
+
+.modal-btn-danger:hover:not(:disabled) {
+  border-color: rgba(255, 198, 198, 0.58);
+  background: linear-gradient(170deg, rgba(144, 39, 49, 0.97), rgba(114, 31, 39, 0.97));
+  transform: translateY(-1px);
+}
+
 #installPathModal .modal-panel {
   border-color: rgba(255, 255, 255, 0.08);
   background: #09090a;
@@ -3982,6 +4011,24 @@ body.auth-locked .auth-gate {
 
 #updateRestartText {
   white-space: pre-line;
+}
+
+#uninstallConfirmModal .modal-panel {
+  max-width: 500px;
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #0c0c0e;
+  box-shadow:
+      0 26px 64px rgba(0, 0, 0, 0.56),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+#uninstallConfirmModal .modal-text {
+  color: rgba(232, 234, 239, 0.78);
+  white-space: pre-line;
+}
+
+#uninstallConfirmModal #uninstallConfirmNowBtn {
+  min-width: 170px;
 }
 
 #steamRequiredModal .modal-panel {

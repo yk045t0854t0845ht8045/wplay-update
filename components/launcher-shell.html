@@ -256,6 +256,17 @@
                           </svg>
                         </span>
                       </button>
+                      <button id="detailsHeroUninstallBtn" class="hero-action-btn hero-action-btn-dark hero-action-btn-danger is-hidden" type="button">
+                        <span class="hero-action-label" data-btn-label>Desinstalar</span>
+                        <span class="hero-action-icon-box" aria-hidden="true">
+                          <svg class="hero-action-icon icon-trash" viewBox="0 0 24 24" fill="none">
+                            <path d="M8.8 8.6V17M12 8.6V17M15.2 8.6V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                            <path d="M5.9 6.8H18.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                            <path d="M9.2 6.8L9.7 5.4C9.9 4.9 10.4 4.6 10.9 4.6H13.1C13.6 4.6 14.1 4.9 14.3 5.4L14.8 6.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                            <rect x="6.8" y="6.8" width="10.4" height="12.7" rx="1.8" stroke="currentColor" stroke-width="1.8"></rect>
+                          </svg>
+                        </span>
+                      </button>
                       <button id="detailsActionBtn" class="hero-action-btn hero-action-btn-light" type="button" data-action="install">
                         <span class="hero-action-label" data-btn-label>Download Game</span>
                         <span class="hero-action-icon-box" aria-hidden="true">
@@ -438,6 +449,21 @@
         <div class="modal-actions">
           <button id="updateRestartNowBtn" class="modal-btn modal-btn-primary" type="button">Reiniciar e atualizar</button>
           <button id="updateRestartLaterBtn" class="modal-btn modal-btn-ghost" type="button">Depois</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="uninstallConfirmModal" class="modal-overlay is-hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-close-uninstall-confirm="true"></div>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="uninstallConfirmTitle">
+        <h3 id="uninstallConfirmTitle">Confirmar desinstalacao</h3>
+        <p id="uninstallConfirmText" class="modal-text">
+          Tem certeza que deseja desinstalar este jogo?
+        </p>
+
+        <div class="modal-actions">
+          <button id="uninstallConfirmNowBtn" class="modal-btn modal-btn-danger" type="button">Desinstalar</button>
+          <button id="uninstallConfirmCancelBtn" class="modal-btn modal-btn-ghost" type="button">Cancelar</button>
         </div>
       </div>
     </div>
