@@ -61,8 +61,18 @@ Se aparecer erro `403` por rate limit durante a espera da release, rode com toke
 
 ```powershell
 $env:GH_TOKEN="SEU_TOKEN"
+$env:GITHUB_TOKEN=$env:GH_TOKEN
 npm run update-now
 ```
+
+```cmd
+set GH_TOKEN=SEU_TOKEN
+set GITHUB_TOKEN=%GH_TOKEN%
+npm.cmd run update-now
+```
+
+Importante: comando com `$env:` e `Invoke-RestMethod` e so para PowerShell.  
+No CMD use `set ...` e `npm.cmd ...`.
 
 ## 3) Modo local (opcional)
 

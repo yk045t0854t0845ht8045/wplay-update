@@ -56,6 +56,9 @@ const CATALOG_MIN_POLL_INTERVAL_SECONDS = 5;
 const CATALOG_MAX_POLL_INTERVAL_SECONDS = 300;
 const CATALOG_DEFAULT_SUPABASE_SCHEMA = "public";
 const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
+const NOTIFICATIONS_DEFAULT_SUPABASE_SCHEMA = "public";
+const NOTIFICATIONS_DEFAULT_SUPABASE_TABLE = "launcher_notifications";
+const NOTIFICATIONS_HISTORY_LIMIT = 15;
 const WINDOWS_APP_USER_MODEL_ID = "com.wplay.app";
 const YOUTUBE_EMBED_REFERER = "https://www.youtube.com/";
 const YOUTUBE_EMBED_ORIGIN = "https://www.youtube.com";
@@ -64,6 +67,8 @@ const STEAM_API_BASE_URL = "https://api.steampowered.com";
 const STEAM_PROFILE_CACHE_TTL_MS = 5 * 60 * 1000;
 const STEAM_OWNED_GAMES_CACHE_TTL_MS = 5 * 60 * 1000;
 const STEAM_ACHIEVEMENTS_CACHE_TTL_MS = 15 * 60 * 1000;
+const STEAM_EMPTY_CACHE_RETRY_MS = 45 * 1000;
+const STEAM_CLIENT_PROCESS_NAMES = new Set(["steam.exe", "steam"]);
 
 if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
   try {
@@ -149,20 +154,21 @@ function resolveWindowIconPath() {
     }
   };
 
-  pushBuildIconCandidates(__dirname);
-  candidates.push(path.join(__dirname, "renderer", "assets", "logo.png"));
-
   if (app.isPackaged && process.resourcesPath) {
+    // Em producao no Windows, prioriza .ico de resources para evitar fallback do Electron.
     pushBuildIconCandidates(process.resourcesPath);
     pushBuildIconCandidates(path.join(process.resourcesPath, "app.asar.unpacked"));
-    candidates.push(
-      path.join(process.resourcesPath, "renderer", "assets", "logo.png"),
-      path.join(process.resourcesPath, "app.asar.unpacked", "renderer", "assets", "logo.png")
-    );
-
-    if (isWindows) {
-      candidates.push(process.execPath);
+    if (!isWindows) {
+      candidates.push(
+        path.join(process.resourcesPath, "renderer", "assets", "logo.png"),
+        path.join(process.resourcesPath, "app.asar.unpacked", "renderer", "assets", "logo.png")
+      );
     }
+  }
+
+  pushBuildIconCandidates(__dirname);
+  if (!isWindows) {
+    candidates.push(path.join(__dirname, "renderer", "assets", "logo.png"));
   }
 
   for (const candidate of candidates) {
@@ -2739,7 +2745,20 @@ function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
     publishedBy: pickFirstDefinedValue(merged, ["publishedBy", "published_by"]),
     releaseDate: pickFirstDefinedValue(merged, ["releaseDate", "release_date"]),
     trailerUrl: pickFirstDefinedValue(merged, ["trailerUrl", "trailer_url", "video_url"]),
-    steamAppId: pickFirstDefinedValue(merged, ["steamAppId", "steam_app_id", "steamGameId", "steam_game_id"]),
+    steamAppId: pickFirstDefinedValue(merged, [
+      "steamAppId",
+      "steam_app_id",
+      "steam_appid",
+      "steamGameId",
+      "steam_game_id"
+    ]),
+    steamStoreUrl: pickFirstDefinedValue(merged, ["steamStoreUrl", "steam_store_url", "storeUrl", "store_url"]),
+    requireSteamClient: pickFirstDefinedValue(merged, [
+      "requireSteamClient",
+      "require_steam_client",
+      "steamRequired",
+      "steam_required"
+    ]),
     gallery,
     genres,
     averagePlayTime: pickFirstDefinedValue(merged, ["averagePlayTime", "average_play_time"]),
@@ -3016,6 +3035,281 @@ function buildCatalogSupabaseHeaders(authConfig, schema) {
   };
 }
 
+function normalizeNotificationType(value) {
+  const type = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (type === "error") return "error";
+  if (type === "success") return "success";
+  return "info";
+}
+
+function sanitizeNotificationText(value, maxLength = 480) {
+  const normalized = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
+}
+
+function mapSupabaseNotificationRow(row) {
+  if (!row || typeof row !== "object") return null;
+  const id = String(row.id || "").trim();
+  if (!id) return null;
+  return {
+    id,
+    type: normalizeNotificationType(row.type),
+    title: sanitizeNotificationText(row.title, 120) || "Notificacao",
+    message: sanitizeNotificationText(row.message, 800),
+    createdAt: String(row.created_at || row.createdAt || new Date().toISOString())
+  };
+}
+
+function resolveNotificationsStorageConfig() {
+  const runtimeConfig = readRuntimeConfigSync();
+  const runtimeNotifications =
+    runtimeConfig?.notifications && typeof runtimeConfig.notifications === "object"
+      ? runtimeConfig.notifications
+      : {};
+
+  return {
+    schema: normalizeCatalogIdentifier(
+      process.env.WPLAY_NOTIFICATIONS_SUPABASE_SCHEMA ||
+        runtimeNotifications.supabaseSchema ||
+        runtimeNotifications.schema,
+      NOTIFICATIONS_DEFAULT_SUPABASE_SCHEMA
+    ),
+    table: normalizeCatalogIdentifier(
+      process.env.WPLAY_NOTIFICATIONS_SUPABASE_TABLE ||
+        runtimeNotifications.supabaseTable ||
+        runtimeNotifications.table,
+      NOTIFICATIONS_DEFAULT_SUPABASE_TABLE
+    )
+  };
+}
+
+function resolveSupabaseNotificationsContext() {
+  const authConfig = resolveAuthConfig();
+  if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
+    throw new Error("[NOTIFICATIONS_SUPABASE_AUTH] Supabase nao configurado para notificacoes.");
+  }
+
+  const steamSession = getSteamSessionSnapshot();
+  const userId = String(steamSession?.steamId || steamSession?.user?.id || "").trim();
+  if (!userId) {
+    throw new Error("[NOTIFICATIONS_AUTH_REQUIRED] Faca login para acessar notificacoes.");
+  }
+
+  const storageConfig = resolveNotificationsStorageConfig();
+  return {
+    authConfig,
+    schema: storageConfig.schema,
+    table: storageConfig.table,
+    userId
+  };
+}
+
+function getNotificationsSupabaseEndpoint(context) {
+  return `${context.authConfig.supabaseUrl}/rest/v1/${context.table}`;
+}
+
+async function fetchNotificationHistoryFromSupabase(context, limit = NOTIFICATIONS_HISTORY_LIMIT) {
+  const endpoint = getNotificationsSupabaseEndpoint(context);
+  const response = await axios.get(endpoint, {
+    headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+    params: {
+      select: "id,type,title,message,created_at",
+      user_id: `eq.${context.userId}`,
+      order: "created_at.desc",
+      limit: Math.max(1, Math.min(200, Number(limit) || NOTIFICATIONS_HISTORY_LIMIT))
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(
+      `[NOTIFICATIONS_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`
+    );
+  }
+  if (response.status >= 400) {
+    throw new Error(
+      `[NOTIFICATIONS_HTTP_${response.status}] Falha ao carregar notificacoes de ${context.schema}.${context.table}.`
+    );
+  }
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return rows
+    .map((row) => mapSupabaseNotificationRow(row))
+    .filter(Boolean)
+    .slice(0, NOTIFICATIONS_HISTORY_LIMIT);
+}
+
+async function pruneNotificationHistoryInSupabase(context) {
+  const endpoint = getNotificationsSupabaseEndpoint(context);
+  const response = await axios.get(endpoint, {
+    headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+    params: {
+      select: "id",
+      user_id: `eq.${context.userId}`,
+      order: "created_at.desc",
+      limit: 300
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(
+      `[NOTIFICATIONS_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`
+    );
+  }
+  if (response.status >= 400) {
+    throw new Error(
+      `[NOTIFICATIONS_HTTP_${response.status}] Falha ao aplicar limite de notificacoes em ${context.schema}.${context.table}.`
+    );
+  }
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  const overflowRows = rows.slice(NOTIFICATIONS_HISTORY_LIMIT);
+  if (!overflowRows.length) {
+    return;
+  }
+
+  await Promise.all(
+    overflowRows.map(async (row) => {
+      const id = String(row?.id || "").trim();
+      if (!id) return;
+      const deleteResponse = await axios.delete(endpoint, {
+        headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+        params: {
+          user_id: `eq.${context.userId}`,
+          id: `eq.${id}`
+        },
+        timeout: 20_000,
+        validateStatus: (status) => status >= 200 && status < 500
+      });
+      if (deleteResponse.status >= 400) {
+        throw new Error(
+          `[NOTIFICATIONS_PRUNE_HTTP_${deleteResponse.status}] Falha ao remover notificacoes antigas no Supabase.`
+        );
+      }
+    })
+  );
+}
+
+async function listNotificationsForCurrentUser() {
+  const context = resolveSupabaseNotificationsContext();
+  const entries = await fetchNotificationHistoryFromSupabase(context, NOTIFICATIONS_HISTORY_LIMIT);
+  return { entries };
+}
+
+async function createNotificationForCurrentUser(payload = {}) {
+  const context = resolveSupabaseNotificationsContext();
+  const endpoint = getNotificationsSupabaseEndpoint(context);
+  const type = normalizeNotificationType(payload.type);
+  const title = sanitizeNotificationText(payload.title, 120) || "Notificacao";
+  const message = sanitizeNotificationText(payload.message, 800);
+
+  const response = await axios.post(
+    endpoint,
+    {
+      user_id: context.userId,
+      type,
+      title,
+      message
+    },
+    {
+      headers: {
+        ...buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+        Prefer: "return=representation"
+      },
+      timeout: 20_000,
+      validateStatus: (status) => status >= 200 && status < 500
+    }
+  );
+
+  if (response.status === 404) {
+    throw new Error(
+      `[NOTIFICATIONS_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`
+    );
+  }
+  if (response.status >= 400) {
+    throw new Error(
+      `[NOTIFICATIONS_HTTP_${response.status}] Falha ao salvar notificacao em ${context.schema}.${context.table}.`
+    );
+  }
+
+  await pruneNotificationHistoryInSupabase(context);
+  const entries = await fetchNotificationHistoryFromSupabase(context, NOTIFICATIONS_HISTORY_LIMIT);
+  const createdRow = Array.isArray(response.data) ? response.data[0] : null;
+  return {
+    entry: mapSupabaseNotificationRow(createdRow),
+    entries
+  };
+}
+
+async function deleteNotificationForCurrentUser(notificationId) {
+  const context = resolveSupabaseNotificationsContext();
+  const normalizedId = String(notificationId || "").trim();
+  if (!normalizedId) {
+    const entries = await fetchNotificationHistoryFromSupabase(context, NOTIFICATIONS_HISTORY_LIMIT);
+    return { entries };
+  }
+
+  const endpoint = getNotificationsSupabaseEndpoint(context);
+  const response = await axios.delete(endpoint, {
+    headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+    params: {
+      user_id: `eq.${context.userId}`,
+      id: `eq.${normalizedId}`
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(
+      `[NOTIFICATIONS_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`
+    );
+  }
+  if (response.status >= 400) {
+    throw new Error(
+      `[NOTIFICATIONS_HTTP_${response.status}] Falha ao remover notificacao em ${context.schema}.${context.table}.`
+    );
+  }
+
+  const entries = await fetchNotificationHistoryFromSupabase(context, NOTIFICATIONS_HISTORY_LIMIT);
+  return { entries };
+}
+
+async function clearNotificationsForCurrentUser() {
+  const context = resolveSupabaseNotificationsContext();
+  const endpoint = getNotificationsSupabaseEndpoint(context);
+  const response = await axios.delete(endpoint, {
+    headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+    params: {
+      user_id: `eq.${context.userId}`
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(
+      `[NOTIFICATIONS_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`
+    );
+  }
+  if (response.status >= 400) {
+    throw new Error(
+      `[NOTIFICATIONS_HTTP_${response.status}] Falha ao limpar notificacoes em ${context.schema}.${context.table}.`
+    );
+  }
+
+  return { entries: [] };
+}
+
 async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {}) {
   const authConfig = resolveAuthConfig();
   if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
@@ -3192,7 +3486,21 @@ async function readCatalogBundle() {
       const trailerUrl = normalizeOptionalString(
         entry.trailerUrl || entry.videoUrl || entry.youtubeUrl || entry.youtube || entry.trailer
       );
-      const steamAppId = parsePositiveInteger(entry.steamAppId ?? entry.steam_app_id ?? entry.steamGameId);
+      const steamStoreUrl = normalizeOptionalString(
+        entry.steamStoreUrl || entry.steam_store_url || entry.storeUrl || entry.store_url
+      );
+      const steamAppId = parseSteamAppId(
+        entry.steamAppId ??
+          entry.steam_app_id ??
+          entry.steam_appid ??
+          entry.steamGameId ??
+          entry.steam_game_id ??
+          steamStoreUrl
+      );
+      const requireSteamClient = parseBoolean(
+        entry.requireSteamClient ?? entry.require_steam_client ?? entry.steamRequired ?? entry.steam_required,
+        steamAppId > 0
+      );
       const gallery = normalizeStringArray(entry.gallery || entry.screenshots || entry.images);
       const genres = normalizeStringArray(entry.genres || entry.tags || entry.genre);
       const averagePlayTime = normalizeStatValue(
@@ -3258,6 +3566,8 @@ async function readCatalogBundle() {
         trailerUrl,
         videoUrl: trailerUrl,
         steamAppId: steamAppId > 0 ? steamAppId : 0,
+        steamStoreUrl,
+        requireSteamClient,
         gallery,
         genres,
         averagePlayTime,
@@ -5633,8 +5943,82 @@ function ensureSteamUserCacheScope(steamId) {
 }
 
 function parseSteamAppId(value) {
-  const parsed = parsePositiveInteger(value);
-  return parsed > 0 ? parsed : 0;
+  const direct = parsePositiveInteger(value);
+  if (direct > 0) {
+    return direct;
+  }
+
+  const text = String(value || "").trim();
+  if (!text) {
+    return 0;
+  }
+
+  try {
+    const parsedUrl = new URL(text);
+    const fromQuery = parsePositiveInteger(parsedUrl.searchParams.get("appid"));
+    if (fromQuery > 0) {
+      return fromQuery;
+    }
+
+    const pathname = String(parsedUrl.pathname || "");
+    const appPathMatch = pathname.match(/\/app\/(\d+)/i);
+    if (appPathMatch?.[1]) {
+      const fromPath = parsePositiveInteger(appPathMatch[1]);
+      if (fromPath > 0) {
+        return fromPath;
+      }
+    }
+  } catch (_error) {
+    // Not a URL, fallback to regex extraction below.
+  }
+
+  const genericMatch = text.match(/(?:^|[^\d])(\d{3,10})(?:[^\d]|$)/);
+  if (genericMatch?.[1]) {
+    const extracted = parsePositiveInteger(genericMatch[1]);
+    if (extracted > 0) {
+      return extracted;
+    }
+  }
+
+  return 0;
+}
+
+function resolveSteamAppIdForGame(game) {
+  if (!game || typeof game !== "object") {
+    return 0;
+  }
+
+  const candidates = [
+    game.steamAppId,
+    game.steam_app_id,
+    game.steamGameId,
+    game.steam_game_id,
+    game.steamStoreUrl,
+    game.steam_store_url,
+    game.storeUrl,
+    game.store_url,
+    game.website,
+    game.url
+  ];
+
+  for (const candidate of candidates) {
+    const appId = parseSteamAppId(candidate);
+    if (appId > 0) {
+      return appId;
+    }
+  }
+
+  return 0;
+}
+
+async function isSteamClientRunning() {
+  const runningProcessNamesLower = await getRunningProcessNamesLower();
+  for (const candidate of STEAM_CLIENT_PROCESS_NAMES) {
+    if (runningProcessNamesLower.has(candidate)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function fetchSteamOwnedGamesByAppId(steamId, steamWebApiKey) {
@@ -5668,15 +6052,15 @@ async function fetchSteamOwnedGamesByAppId(steamId, steamWebApiKey) {
 
 async function getSteamOwnedGamesByAppIdCached(steamId, steamWebApiKey) {
   ensureSteamUserCacheScope(steamId);
+  const ownedGamesMap =
+    steamUserDataCache.ownedGamesByAppId instanceof Map ? steamUserDataCache.ownedGamesByAppId : new Map();
+  const hasOwnedGames = ownedGamesMap.size > 0;
+  const effectiveTtlMs = hasOwnedGames ? STEAM_OWNED_GAMES_CACHE_TTL_MS : STEAM_EMPTY_CACHE_RETRY_MS;
   const cacheAge = Date.now() - Number(steamUserDataCache.ownedGamesFetchedAt || 0);
-  const hasFreshCache =
-    steamUserDataCache.ownedGamesByAppId instanceof Map &&
-    steamUserDataCache.ownedGamesByAppId.size >= 0 &&
-    cacheAge >= 0 &&
-    cacheAge < STEAM_OWNED_GAMES_CACHE_TTL_MS;
+  const hasFreshCache = cacheAge >= 0 && cacheAge < effectiveTtlMs;
 
   if (hasFreshCache) {
-    return steamUserDataCache.ownedGamesByAppId;
+    return ownedGamesMap;
   }
 
   if (steamUserDataCache.ownedGamesInFlight) {
@@ -5750,7 +6134,9 @@ async function getSteamAchievementPercentCached(steamId, appId, steamWebApiKey) 
 
   const current = steamUserDataCache.achievementsByAppId.get(safeAppId);
   const currentAge = Date.now() - Number(current?.fetchedAt || 0);
-  if (current && currentAge >= 0 && currentAge < STEAM_ACHIEVEMENTS_CACHE_TTL_MS) {
+  const hasCurrentValue = Number.isFinite(current?.percent);
+  const effectiveTtlMs = hasCurrentValue ? STEAM_ACHIEVEMENTS_CACHE_TTL_MS : STEAM_EMPTY_CACHE_RETRY_MS;
+  if (current && currentAge >= 0 && currentAge < effectiveTtlMs) {
     return Number.isFinite(current.percent) ? current.percent : null;
   }
 
@@ -5800,7 +6186,7 @@ async function applySteamStatsToCatalogGames(games = []) {
 
   ensureSteamUserCacheScope(steamSession.steamId);
 
-  const appIds = [...new Set(games.map((game) => parseSteamAppId(game?.steamAppId)).filter((value) => value > 0))];
+  const appIds = [...new Set(games.map((game) => resolveSteamAppIdForGame(game)).filter((value) => value > 0))];
   if (appIds.length === 0) {
     return games;
   }
@@ -5824,7 +6210,7 @@ async function applySteamStatsToCatalogGames(games = []) {
   );
 
   return games.map((game) => {
-    const appId = parseSteamAppId(game?.steamAppId);
+    const appId = resolveSteamAppIdForGame(game);
     if (!appId) {
       return game;
     }
@@ -5944,6 +6330,15 @@ async function openExternalUrl(rawUrl) {
 
   await shell.openExternal(parsed.toString());
   return true;
+}
+
+async function openSteamClient() {
+  try {
+    await shell.openExternal("steam://open/main");
+    return { ok: true };
+  } catch (_error) {
+    throw new Error("[STEAM_OPEN_FAILED] Nao foi possivel abrir a Steam automaticamente.");
+  }
 }
 
 function isYoutubeHost(hostname) {
@@ -6072,6 +6467,17 @@ async function playGame(gameId) {
     }
   }
 
+  const resolvedSteamAppId = resolveSteamAppIdForGame(game);
+  const requiresSteamClient = parseBoolean(game.requireSteamClient, resolvedSteamAppId > 0);
+  if (requiresSteamClient) {
+    const steamRunning = await isSteamClientRunning().catch(() => false);
+    if (!steamRunning) {
+      throw new Error(
+        `[STEAM_NOT_RUNNING] A Steam nao esta aberta. Abra o cliente Steam e tente iniciar ${game.name} novamente.`
+      );
+    }
+  }
+
   const launchResult = await shell.openPath(executable.absolutePath);
   if (launchResult) {
     throw new Error(launchResult);
@@ -6192,10 +6598,17 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:open-downloads-folder", () => openInstallFolder());
     ipcMain.handle("launcher:open-game-install-folder", (_event, gameId) => openGameInstallFolder(gameId));
     ipcMain.handle("launcher:open-external-url", (_event, rawUrl) => openExternalUrl(rawUrl));
+    ipcMain.handle("launcher:open-steam-client", () => openSteamClient());
     ipcMain.handle("launcher:auth-get-session", () => getAuthSessionState());
     ipcMain.handle("launcher:auth-login-steam", () => loginWithSteam());
     ipcMain.handle("launcher:auth-login-discord", () => loginWithSteam());
     ipcMain.handle("launcher:auth-logout", () => logoutAuthSession());
+    ipcMain.handle("launcher:notifications-list", () => listNotificationsForCurrentUser());
+    ipcMain.handle("launcher:notifications-create", (_event, payload) => createNotificationForCurrentUser(payload));
+    ipcMain.handle("launcher:notifications-delete", (_event, notificationId) =>
+      deleteNotificationForCurrentUser(notificationId)
+    );
+    ipcMain.handle("launcher:notifications-clear", () => clearNotificationsForCurrentUser());
     ipcMain.handle("launcher:auto-update-get-state", () => getPublicAutoUpdateState());
     ipcMain.handle("launcher:auto-update-check", () => checkForLauncherUpdate("manual"));
     ipcMain.handle("launcher:auto-update-check-background", () => checkForLauncherUpdate("renderer-poll"));

@@ -15,6 +15,7 @@ const notificationsPanel = document.getElementById("notificationsPanel");
 const notificationsList = document.getElementById("notificationsList");
 const notificationsEmpty = document.getElementById("notificationsEmpty");
 const notificationsClearBtn = document.getElementById("notificationsClearBtn");
+const gameStartFeed = document.getElementById("gameStartFeed");
 const windowMinBtn = document.getElementById("windowMinBtn");
 const windowMaxBtn = document.getElementById("windowMaxBtn");
 const windowCloseBtn = document.getElementById("windowCloseBtn");
@@ -76,6 +77,10 @@ const updateRestartModal = document.getElementById("updateRestartModal");
 const updateRestartText = document.getElementById("updateRestartText");
 const updateRestartNowBtn = document.getElementById("updateRestartNowBtn");
 const updateRestartLaterBtn = document.getElementById("updateRestartLaterBtn");
+const steamRequiredModal = document.getElementById("steamRequiredModal");
+const steamRequiredText = document.getElementById("steamRequiredText");
+const steamRequiredOpenBtn = document.getElementById("steamRequiredOpenBtn");
+const steamRequiredCancelBtn = document.getElementById("steamRequiredCancelBtn");
 const authGate = document.getElementById("authGate");
 const authGateStatus = document.getElementById("authGateStatus");
 const authSteamLoginBtn = document.getElementById("authSteamLoginBtn");
@@ -86,7 +91,7 @@ const FALLBACK_BANNER_IMAGE = "https://placehold.co/1280x720/0f0f0f/f2f2f2?text=
 const LIBRARY_STORAGE_KEY = "wyzer.launcher.library.v1";
 const REALTIME_SYNC_INTERVAL_MS = 5000;
 const RECENT_COMPLETED_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
-const NOTIFICATION_HISTORY_LIMIT = 36;
+const NOTIFICATION_HISTORY_LIMIT = 15;
 const NOTYF_STACK_VISIBLE = 5;
 const NOTYF_STACK_OFFSET_Y = 18;
 const PROGRESS_RENDER_MIN_INTERVAL_MS = 120;
@@ -94,6 +99,8 @@ const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = 15 * 1000;
 const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = 60 * 1000;
 const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = 8 * 1000;
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
+const GAME_START_TOAST_DURATION_MS = 4300;
+const GAME_START_TOAST_MAX_ITEMS = 4;
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
   minute: "2-digit"
@@ -176,6 +183,7 @@ const state = {
     error: ""
   },
   updateRestartModalOpen: false,
+  steamRequiredModalOpen: false,
   lastAutoUpdateNotifiedVersion: "",
   appBootstrapped: false,
   view: "store",
@@ -196,6 +204,7 @@ let lastProgressRenderAt = 0;
 let previousStoreGridSignature = "";
 let previousLibraryGridSignature = "";
 let autoUpdateBackgroundCheckTimer = null;
+let notificationRemoteQueue = Promise.resolve();
 
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
@@ -215,6 +224,90 @@ function getAuthEmail(session) {
 function getAuthAvatarUrl(session) {
   if (!session || typeof session !== "object") return "";
   return String(session?.user?.avatarUrl || "").trim();
+}
+
+function getAuthInitials(session) {
+  const displayName = getAuthDisplayName(session) || "Jogador";
+  return (
+    displayName
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() || "")
+      .join("") || "JG"
+  );
+}
+
+function trimToastNodes(limit = GAME_START_TOAST_MAX_ITEMS) {
+  if (!gameStartFeed) return;
+  while (gameStartFeed.children.length > limit) {
+    const lastChild = gameStartFeed.lastElementChild;
+    if (!lastChild) break;
+    lastChild.remove();
+  }
+}
+
+function showGameStartedFloatingToast(gameName) {
+  if (!gameStartFeed) return;
+  const safeGameName = String(gameName || "").trim() || "Jogo";
+  const session = state.authSession;
+  const nickname = getAuthDisplayName(session) || "Jogador";
+  const avatarUrl = getAuthAvatarUrl(session);
+
+  const toast = document.createElement("article");
+  toast.className = "game-start-toast";
+
+  const avatarWrap = document.createElement("span");
+  avatarWrap.className = "game-start-avatar";
+  if (avatarUrl) {
+    const avatarImage = document.createElement("img");
+    avatarImage.src = avatarUrl;
+    avatarImage.alt = "";
+    avatarImage.loading = "lazy";
+    avatarWrap.appendChild(avatarImage);
+  } else {
+    const fallbackInitials = document.createElement("span");
+    fallbackInitials.className = "game-start-avatar-fallback";
+    fallbackInitials.textContent = getAuthInitials(session);
+    avatarWrap.appendChild(fallbackInitials);
+  }
+
+  const body = document.createElement("div");
+  body.className = "game-start-body";
+
+  const title = document.createElement("strong");
+  title.className = "game-start-title";
+  title.textContent = nickname;
+
+  const subtitle = document.createElement("span");
+  subtitle.className = "game-start-subtitle";
+  subtitle.textContent = "iniciou";
+
+  const game = document.createElement("span");
+  game.className = "game-start-game";
+  game.textContent = safeGameName;
+
+  body.appendChild(title);
+  body.appendChild(subtitle);
+  body.appendChild(game);
+
+  toast.appendChild(avatarWrap);
+  toast.appendChild(body);
+  gameStartFeed.prepend(toast);
+  trimToastNodes();
+
+  window.requestAnimationFrame(() => {
+    toast.classList.add("is-visible");
+  });
+
+  const closeToast = () => {
+    toast.classList.add("is-leaving");
+    window.setTimeout(() => {
+      toast.remove();
+    }, 260);
+  };
+
+  window.setTimeout(closeToast, GAME_START_TOAST_DURATION_MS);
 }
 
 function setAuthGateVisible(visible) {
@@ -341,6 +434,7 @@ async function ensureAuthenticated() {
     renderTopAccountButton();
 
     if (!state.authConfigured) {
+      resetNotificationState();
       setAuthGateVisible(true);
       setAuthGateStatus(
         "Steam nao configurado. Preencha steamWebApiKey em config/auth.json antes de entrar.",
@@ -354,6 +448,7 @@ async function ensureAuthenticated() {
     }
 
     if (!authenticated) {
+      resetNotificationState();
       setAuthGateVisible(true);
       setAuthGateStatus("Entre com Steam para continuar.");
       if (authRetryBtn) {
@@ -364,9 +459,11 @@ async function ensureAuthenticated() {
     }
 
     setAuthGateVisible(false);
+    await syncNotificationHistoryFromSupabase();
     await bootstrapLauncherDataIfNeeded();
   } catch (error) {
     state.authSession = null;
+    resetNotificationState();
     renderTopAccountButton();
     setAuthGateVisible(true);
     setAuthGateStatus(error?.message || "Falha ao verificar login com Steam.", true);
@@ -401,10 +498,12 @@ async function startSteamLogin() {
     state.authSession = result.session;
     renderTopAccountButton();
     setAuthGateVisible(false);
+    await syncNotificationHistoryFromSupabase();
     notify("success", "Login concluido", `Bem-vindo, ${getAuthDisplayName(result.session) || "jogador"}!`);
     await bootstrapLauncherDataIfNeeded();
   } catch (error) {
     state.authSession = null;
+    resetNotificationState();
     renderTopAccountButton();
     setAuthGateVisible(true);
     setAuthGateStatus(error?.message || "Falha ao autenticar com Steam.", true);
@@ -430,6 +529,7 @@ async function logoutSteamSession() {
       await window.launcherApi.authLogout();
     }
     state.authSession = null;
+    resetNotificationState();
     renderTopAccountButton();
     setAuthGateVisible(true);
     setAuthGateStatus("Sessao encerrada. Entre com Steam para continuar.");
@@ -513,6 +613,12 @@ function updateNotificationBadge() {
 function markNotificationsAsRead() {
   state.unreadNotifications = 0;
   updateNotificationBadge();
+}
+
+function resetNotificationState() {
+  state.notificationHistory = [];
+  markNotificationsAsRead();
+  renderNotificationHistory();
 }
 
 function scheduleProgressRenderAll() {
@@ -733,6 +839,69 @@ function formatNotificationTimestamp(value) {
   return `${notificationDateFormatter.format(date)} ${notificationTimeFormatter.format(date)}`;
 }
 
+function getNotificationEntryTimeMs(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const parsed = new Date(value).getTime();
+  if (Number.isFinite(parsed)) return parsed;
+  return Date.now();
+}
+
+function normalizeNotificationHistoryEntry(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const title = String(entry.title || "").trim() || "Notificacao";
+  const message = String(entry.message || "").trim();
+  const createdAtRaw = entry.createdAt || entry.created_at || Date.now();
+  const createdAtMs = getNotificationEntryTimeMs(createdAtRaw);
+  const createdAtIso = new Date(createdAtMs).toISOString();
+  const id = String(entry.id || "").trim() || `local-${createdAtMs}-${Math.floor(Math.random() * 1_000_000)}`;
+  return {
+    id,
+    type: getNotificationType(entry.type),
+    title,
+    message,
+    createdAt: createdAtIso
+  };
+}
+
+function replaceNotificationHistory(entries) {
+  const normalized = Array.isArray(entries)
+    ? entries
+        .map((entry) => normalizeNotificationHistoryEntry(entry))
+        .filter(Boolean)
+        .sort((left, right) => getNotificationEntryTimeMs(right.createdAt) - getNotificationEntryTimeMs(left.createdAt))
+    : [];
+
+  state.notificationHistory = normalized.slice(0, NOTIFICATION_HISTORY_LIMIT);
+  renderNotificationHistory();
+}
+
+function enqueueNotificationRemoteTask(task) {
+  const runTask = async () => task();
+  const queued = notificationRemoteQueue.then(runTask, runTask);
+  notificationRemoteQueue = queued.catch(() => {});
+  return queued;
+}
+
+async function syncNotificationHistoryFromSupabase() {
+  if (!state.authSession?.user?.id) {
+    resetNotificationState();
+    return;
+  }
+
+  if (typeof window.launcherApi?.notificationsList !== "function") {
+    return;
+  }
+
+  try {
+    const payload = await enqueueNotificationRemoteTask(() => window.launcherApi.notificationsList());
+    if (Array.isArray(payload?.entries)) {
+      replaceNotificationHistory(payload.entries);
+    }
+  } catch (_error) {
+    // Keep current history when remote sync fails.
+  }
+}
+
 function renderNotificationHistory() {
   if (!notificationsList || !notificationsEmpty) return;
 
@@ -784,12 +953,103 @@ function renderNotificationHistory() {
     .join("");
 }
 
+function pushNotificationHistoryLocal(type, title, message, createdAt = Date.now(), entryId = "") {
+  const safeType = getNotificationType(type);
+  const safeTitle = String(title || "").trim() || "Notificacao";
+  const safeMessage = String(message || "").trim();
+  const normalized = normalizeNotificationHistoryEntry({
+    id: entryId,
+    type: safeType,
+    title: safeTitle,
+    message: safeMessage,
+    createdAt
+  });
+  if (!normalized) return null;
+
+  const current = Array.isArray(state.notificationHistory) ? state.notificationHistory : [];
+  replaceNotificationHistory([normalized, ...current]);
+  return normalized;
+}
+
+function pushNotificationHistory(type, title, message) {
+  const localEntry = pushNotificationHistoryLocal(type, title, message);
+  if (!localEntry) return;
+
+  if (!state.authSession?.user?.id) {
+    return;
+  }
+
+  if (typeof window.launcherApi?.notificationsCreate !== "function") {
+    return;
+  }
+
+  void enqueueNotificationRemoteTask(async () => {
+    try {
+      const payload = await window.launcherApi.notificationsCreate({
+        type: localEntry.type,
+        title: localEntry.title,
+        message: localEntry.message
+      });
+      if (Array.isArray(payload?.entries)) {
+        replaceNotificationHistory(payload.entries);
+      }
+    } catch (_error) {
+      // Keep optimistic local entry if remote write fails.
+    }
+  });
+}
+
 function removeNotificationHistoryEntry(notificationId) {
   const normalizedId = String(notificationId || "").trim();
   if (!normalizedId) return;
+
   state.notificationHistory = (state.notificationHistory || []).filter((entry) => entry.id !== normalizedId);
   renderNotificationHistory();
   updateNotificationBadge();
+
+  if (!state.authSession?.user?.id) {
+    return;
+  }
+
+  if (typeof window.launcherApi?.notificationsDelete !== "function") {
+    return;
+  }
+
+  void enqueueNotificationRemoteTask(async () => {
+    try {
+      const payload = await window.launcherApi.notificationsDelete(normalizedId);
+      if (Array.isArray(payload?.entries)) {
+        replaceNotificationHistory(payload.entries);
+      }
+    } catch (_error) {
+      // Keep local remove even if remote delete fails.
+    }
+  });
+}
+
+function clearNotificationHistory() {
+  resetNotificationState();
+
+  if (!state.authSession?.user?.id) {
+    return;
+  }
+
+  if (typeof window.launcherApi?.notificationsClear !== "function") {
+    return;
+  }
+
+  void enqueueNotificationRemoteTask(async () => {
+    try {
+      const payload = await window.launcherApi.notificationsClear();
+      if (Array.isArray(payload?.entries)) {
+        replaceNotificationHistory(payload.entries);
+      } else {
+        resetNotificationState();
+      }
+    } catch (_error) {
+      // Keep local clear even if remote clear fails.
+    }
+  });
 }
 
 function setNotificationsPanelOpen(open) {
@@ -806,27 +1066,8 @@ function setNotificationsPanelOpen(open) {
   if (state.notificationsOpen) {
     markNotificationsAsRead();
     renderNotificationHistory();
+    void syncNotificationHistoryFromSupabase();
   }
-}
-
-function pushNotificationHistory(type, title, message) {
-  const safeType = getNotificationType(type);
-  const safeTitle = String(title || "").trim() || "Notificacao";
-  const safeMessage = String(message || "").trim();
-
-  state.notificationHistory.unshift({
-    id: `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`,
-    type: safeType,
-    title: safeTitle,
-    message: safeMessage,
-    createdAt: Date.now()
-  });
-
-  if (state.notificationHistory.length > NOTIFICATION_HISTORY_LIMIT) {
-    state.notificationHistory.length = NOTIFICATION_HISTORY_LIMIT;
-  }
-
-  renderNotificationHistory();
 }
 
 function showToast(type, title, message, timeoutMs = 3600) {
@@ -944,13 +1185,66 @@ function setUpdateRestartModalOpen(open) {
     : "Uma nova versao do launcher foi baixada. Deseja reiniciar agora para aplicar sem reinstalar jogos?";
 }
 
+function parseLauncherError(message) {
+  const raw = String(message || "").trim();
+  if (!raw) return { code: "", message: "" };
+  const match = raw.match(/^\[([A-Z0-9_:-]+)\]\s*(.*)$/i);
+  if (!match) {
+    return { code: "", message: raw };
+  }
+  return {
+    code: String(match[1] || "").toUpperCase(),
+    message: String(match[2] || "").trim() || raw
+  };
+}
+
+function setSteamRequiredModalOpen(open, gameName = "") {
+  if (!steamRequiredModal) return;
+  const nextOpen = Boolean(open);
+  state.steamRequiredModalOpen = nextOpen;
+  steamRequiredModal.classList.toggle("is-hidden", !nextOpen);
+  steamRequiredModal.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+
+  if (!nextOpen || !steamRequiredText) {
+    return;
+  }
+
+  const safeName = String(gameName || "").trim();
+  steamRequiredText.textContent = safeName
+    ? `Para iniciar ${safeName}, voce precisa abrir a Steam primeiro. Abra o cliente Steam e tente novamente.`
+    : "Para iniciar este jogo, voce precisa abrir a Steam primeiro. Abra o cliente Steam e tente novamente.";
+}
+
+async function openSteamClientFromModal() {
+  if (typeof window.launcherApi?.openSteamClient !== "function") {
+    notify("error", "Steam", "API para abrir Steam indisponivel nesta versao.");
+    return;
+  }
+
+  try {
+    await window.launcherApi.openSteamClient();
+    setSteamRequiredModalOpen(false);
+    setStatus("Steam aberta. Tente iniciar o jogo novamente.");
+    notify("info", "Steam", "Cliente Steam aberto. Agora tente iniciar o jogo novamente.");
+  } catch (error) {
+    notify("error", "Steam", error?.message || "Nao foi possivel abrir Steam automaticamente.");
+  }
+}
+
 function renderAutoUpdateButton() {
   if (!topUpdateBtn) return;
 
   const autoUpdate = state.autoUpdate;
   const visible = hasAutoUpdateApiSupport() || autoUpdate.supported || autoUpdate.enabled || autoUpdate.configured;
+  const hasUpdatePending =
+    autoUpdate.status === "available" ||
+    autoUpdate.status === "downloading" ||
+    autoUpdate.status === "downloaded" ||
+    autoUpdate.status === "installing" ||
+    autoUpdate.updateDownloaded;
 
   topUpdateBtn.classList.toggle("is-hidden", !visible);
+  topUpdateBtn.classList.toggle("has-update", hasUpdatePending);
   topUpdateBtn.classList.toggle(
     "is-checking",
     autoUpdate.status === "downloading" || autoUpdate.status === "checking" || autoUpdate.status === "installing"
@@ -3268,12 +3562,20 @@ async function handleGameAction(gameId, action) {
         }
         setStatus(`Jogo iniciado: ${game.name}.`);
         notify("success", "Jogo iniciado", `${game.name} foi aberto com sucesso.`);
+        showGameStartedFloatingToast(game.name);
       } catch (error) {
         await refreshGames();
         const refreshedGame = getGameById(gameId);
         if (!refreshedGame?.installed) {
           setStatus(`${game.name} nao foi encontrado. Clique em Download Game para instalar novamente.`);
           notify("error", "Arquivo nao encontrado", `${game.name} nao foi encontrado no disco.`);
+          return;
+        }
+        const parsedPlayError = parseLauncherError(error?.message || "");
+        if (parsedPlayError.code === "STEAM_NOT_RUNNING") {
+          setSteamRequiredModalOpen(true, game.name);
+          setStatus(parsedPlayError.message || "Steam nao esta aberta.", true);
+          notify("error", "Steam fechada", parsedPlayError.message || "Abra a Steam para iniciar o jogo.");
           return;
         }
         throw error;
@@ -3575,9 +3877,7 @@ function installEventBindings() {
   if (notificationsClearBtn) {
     notificationsClearBtn.addEventListener("click", (event) => {
       event.preventDefault();
-      state.notificationHistory = [];
-      renderNotificationHistory();
-      markNotificationsAsRead();
+      clearNotificationHistory();
       setStatus("Historico de notificacoes limpo.");
     });
   }
@@ -3945,7 +4245,33 @@ function installEventBindings() {
     });
   }
 
+  if (steamRequiredModal) {
+    steamRequiredModal.addEventListener("click", (event) => {
+      const closeTarget = event.target.closest("[data-close-steam-required='true']");
+      if (closeTarget) {
+        setSteamRequiredModalOpen(false);
+      }
+    });
+  }
+
+  if (steamRequiredCancelBtn) {
+    steamRequiredCancelBtn.addEventListener("click", () => {
+      setSteamRequiredModalOpen(false);
+    });
+  }
+
+  if (steamRequiredOpenBtn) {
+    steamRequiredOpenBtn.addEventListener("click", async () => {
+      await openSteamClientFromModal();
+    });
+  }
+
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.steamRequiredModalOpen) {
+      setSteamRequiredModalOpen(false);
+      return;
+    }
+
     if (event.key === "Escape" && state.updateRestartModalOpen) {
       setUpdateRestartModalOpen(false);
       return;

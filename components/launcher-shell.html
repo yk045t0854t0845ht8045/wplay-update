@@ -406,6 +406,8 @@
       </div>
     </div>
 
+    <div id="gameStartFeed" class="game-start-feed" aria-live="polite" aria-atomic="false"></div>
+
     <div id="installPathModal" class="modal-overlay is-hidden" aria-hidden="true">
       <div class="modal-backdrop" data-close-install-path="true"></div>
       <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="installPathTitle">
@@ -438,6 +440,21 @@
         <div class="modal-actions">
           <button id="updateRestartNowBtn" class="modal-btn modal-btn-primary" type="button">Reiniciar e atualizar</button>
           <button id="updateRestartLaterBtn" class="modal-btn modal-btn-ghost" type="button">Depois</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="steamRequiredModal" class="modal-overlay is-hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-close-steam-required="true"></div>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="steamRequiredTitle">
+        <h3 id="steamRequiredTitle">Steam fechada</h3>
+        <p id="steamRequiredText" class="modal-text">
+          Para iniciar este jogo, voce precisa abrir a Steam. Depois volte ao launcher e tente novamente.
+        </p>
+
+        <div class="modal-actions">
+          <button id="steamRequiredOpenBtn" class="modal-btn modal-btn-primary" type="button">Abrir Steam</button>
+          <button id="steamRequiredCancelBtn" class="modal-btn modal-btn-ghost" type="button">Fechar</button>
         </div>
       </div>
     </div>
