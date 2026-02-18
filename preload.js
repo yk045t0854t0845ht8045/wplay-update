@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld("launcherApi", {
   getActiveInstalls: () => ipcRenderer.invoke("launcher:get-active-installs"),
   getInstallRoot: () => ipcRenderer.invoke("launcher:get-install-root"),
   chooseInstallBaseDirectory: () => ipcRenderer.invoke("launcher:choose-install-base-directory"),
+  getLaunchOnStartup: () => ipcRenderer.invoke("launcher:get-launch-on-startup"),
+  setLaunchOnStartup: (enabled) => ipcRenderer.invoke("launcher:set-launch-on-startup", enabled),
   installGame: (gameId) => ipcRenderer.invoke("launcher:install-game", gameId),
   uninstallGame: (gameId) => ipcRenderer.invoke("launcher:uninstall-game", gameId),
   playGame: (gameId) => ipcRenderer.invoke("launcher:play-game", gameId),

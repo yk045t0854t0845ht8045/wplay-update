@@ -148,7 +148,8 @@ const SOCIAL_ACTIVITY_DEFAULT_SUPABASE_TABLE = "launcher_friend_game_activity";
 const NOTIFICATIONS_HISTORY_LIMIT = 15;
 const SOCIAL_ACTIVITY_FETCH_LIMIT = 60;
 const SOCIAL_ACTIVITY_EVENT_TTL_HOURS = 24;
-const SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS = 75 * 1000;
+const SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS = 1500;
+const SOCIAL_ACTIVITY_EMIT_STALE_TTL_MS = 10 * 60 * 1000;
 const SOCIAL_ACTIVITY_BACKGROUND_POLL_INTERVAL_MS = 4200;
 const SOCIAL_ACTIVITY_BACKGROUND_POLL_INTERVAL_LOW_SPEC_MS = 6500;
 const SOCIAL_ACTIVITY_BACKGROUND_CURSOR_BACKTRACK_MS = 9000;
@@ -190,6 +191,7 @@ const STARTUP_FAILURES_BEFORE_SAFE_MODE = 2;
 const MAIN_WINDOW_MAX_LOAD_RETRIES = 2;
 const MAIN_WINDOW_LOAD_RETRY_DELAY_MS = 1200;
 const TRAY_TOOLTIP_TEXT = "WPlay Games Launcher";
+const RUNTIME_CONFIG_LAUNCH_ON_SYSTEM_STARTUP_KEY = "launchOnStartup";
 const ACTIVE_INSTALL_PHASES = new Set(["preparing", "downloading", "extracting"]);
 
 let mainWindow = null;
@@ -214,6 +216,10 @@ let autoUpdateLastCheckOrigin = "";
 let autoUpdateLastRequestedAt = 0;
 let startupAutoUpdateFlowActive = false;
 let startupIpcHandlersRegistered = false;
+const launchOnSystemStartupState = {
+  supported: false,
+  enabled: false
+};
 let remoteCatalogInFlight = null;
 const remoteCatalogCache = {
   entries: null,
@@ -1357,6 +1363,102 @@ function getTrayUpdateStatusLabel() {
   return `Status: ${status}`;
 }
 
+function isLaunchOnSystemStartupSupported() {
+  return process.platform === "win32" && app.isPackaged;
+}
+
+function detectLaunchOnSystemStartupEnabled() {
+  if (!isLaunchOnSystemStartupSupported()) {
+    return false;
+  }
+
+  try {
+    const loginItemSettings = app.getLoginItemSettings({
+      path: process.execPath,
+      args: []
+    });
+    return Boolean(loginItemSettings.openAtLogin || loginItemSettings.executableWillLaunchAtLogin);
+  } catch (error) {
+    appendStartupLog(`[STARTUP_LOGIN_GET_ERROR] ${formatStartupErrorForLog(error)}`);
+    return false;
+  }
+}
+
+function getLaunchOnSystemStartupState() {
+  return {
+    supported: launchOnSystemStartupState.supported,
+    enabled: launchOnSystemStartupState.enabled
+  };
+}
+
+async function persistLaunchOnSystemStartupPreference(enabled) {
+  await writeRuntimeConfig({
+    [RUNTIME_CONFIG_LAUNCH_ON_SYSTEM_STARTUP_KEY]: Boolean(enabled),
+    updatedAt: new Date().toISOString()
+  });
+}
+
+async function setLaunchOnSystemStartup(nextEnabledRaw, options = {}) {
+  const persist = options?.persist !== false;
+  const supported = isLaunchOnSystemStartupSupported();
+  launchOnSystemStartupState.supported = supported;
+
+  if (!supported) {
+    launchOnSystemStartupState.enabled = false;
+    refreshTrayContextMenu();
+    return getLaunchOnSystemStartupState();
+  }
+
+  const nextEnabled = Boolean(nextEnabledRaw);
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: nextEnabled,
+      path: process.execPath,
+      args: []
+    });
+  } catch (error) {
+    appendStartupLog(`[STARTUP_LOGIN_SET_ERROR] ${formatStartupErrorForLog(error)}`);
+    throw new Error("Nao foi possivel atualizar a inicializacao com o sistema.");
+  }
+
+  launchOnSystemStartupState.enabled = detectLaunchOnSystemStartupEnabled();
+  if (persist) {
+    await persistLaunchOnSystemStartupPreference(launchOnSystemStartupState.enabled);
+  }
+  refreshTrayContextMenu();
+  return getLaunchOnSystemStartupState();
+}
+
+async function initializeLaunchOnSystemStartupPreference() {
+  const supported = isLaunchOnSystemStartupSupported();
+  launchOnSystemStartupState.supported = supported;
+
+  if (!supported) {
+    launchOnSystemStartupState.enabled = false;
+    return getLaunchOnSystemStartupState();
+  }
+
+  const runtimeConfig = readRuntimeConfigSync();
+  const hasPersistedPreference = Object.prototype.hasOwnProperty.call(
+    runtimeConfig,
+    RUNTIME_CONFIG_LAUNCH_ON_SYSTEM_STARTUP_KEY
+  );
+
+  if (hasPersistedPreference) {
+    const preferredEnabled = parseBoolean(runtimeConfig[RUNTIME_CONFIG_LAUNCH_ON_SYSTEM_STARTUP_KEY], false);
+    const state = await setLaunchOnSystemStartup(preferredEnabled, { persist: false });
+    if (state.enabled !== preferredEnabled) {
+      await persistLaunchOnSystemStartupPreference(state.enabled);
+    }
+    return state;
+  }
+
+  launchOnSystemStartupState.enabled = detectLaunchOnSystemStartupEnabled();
+  await persistLaunchOnSystemStartupPreference(launchOnSystemStartupState.enabled).catch(() => {});
+  refreshTrayContextMenu();
+  return getLaunchOnSystemStartupState();
+}
+
 function buildTrayMenuTemplate() {
   const updateEnabled = Boolean(
     app.isPackaged && autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured
@@ -1401,6 +1503,16 @@ function buildTrayMenuTemplate() {
     {
       label: getTrayUpdateStatusLabel(),
       enabled: false
+    },
+    { type: "separator" },
+    {
+      label: "Inicializar com Sistema",
+      type: "checkbox",
+      enabled: launchOnSystemStartupState.supported,
+      checked: launchOnSystemStartupState.supported && launchOnSystemStartupState.enabled,
+      click: (menuItem) => {
+        void setLaunchOnSystemStartup(Boolean(menuItem?.checked));
+      }
     },
     { type: "separator" },
     {
@@ -6082,6 +6194,42 @@ async function pruneSocialActivityInSupabase(context) {
   }
 }
 
+function buildSocialActivityEmitKey(actorSteamId, gameId, gameName) {
+  const safeActorSteamId = normalizeSteamId(actorSteamId);
+  if (!safeActorSteamId) {
+    return "";
+  }
+
+  const safeGameId = sanitizeNotificationText(gameId, 120).toLowerCase();
+  const safeGameName = sanitizeNotificationText(gameName, 140).toLowerCase();
+  const gameKey = safeGameId || safeGameName;
+  if (!gameKey) {
+    return "";
+  }
+
+  return `${safeActorSteamId}:${gameKey}`;
+}
+
+function pruneStaleSocialActivityEmitCache(nowMs = Date.now()) {
+  for (const [key, emittedAt] of socialActivityEmitCache.entries()) {
+    if (nowMs - Number(emittedAt || 0) > SOCIAL_ACTIVITY_EMIT_STALE_TTL_MS) {
+      socialActivityEmitCache.delete(key);
+    }
+  }
+}
+
+function clearSocialActivityEmitDebounceForGame(payload = {}) {
+  try {
+    const context = resolveSupabaseSocialActivityContext();
+    const emitKey = buildSocialActivityEmitKey(context.userId, payload.gameId, payload.gameName);
+    if (emitKey) {
+      socialActivityEmitCache.delete(emitKey);
+    }
+  } catch (_error) {
+    // Ignore if social context is unavailable.
+  }
+}
+
 async function publishSocialGameLaunchActivity(payload = {}) {
   const context = resolveSupabaseSocialActivityContext();
   const actorSteamId = normalizeSteamId(context.userId);
@@ -6094,20 +6242,22 @@ async function publishSocialGameLaunchActivity(payload = {}) {
     return { ok: false, skipped: true };
   }
 
-  const dedupeGameKey = gameId || gameName.toLowerCase();
-  const emitKey = `${actorSteamId}:${dedupeGameKey}`;
+  const emitKey = buildSocialActivityEmitKey(actorSteamId, gameId, gameName);
+  if (!emitKey) {
+    return { ok: false, skipped: true };
+  }
+
   const now = Date.now();
+  pruneStaleSocialActivityEmitCache(now);
+
   const lastEmittedAt = Number(socialActivityEmitCache.get(emitKey) || 0);
   if (lastEmittedAt > 0 && now - lastEmittedAt < SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS) {
     return { ok: true, skipped: true, reason: "debounced" };
   }
+
   socialActivityEmitCache.set(emitKey, now);
-  if (socialActivityEmitCache.size > 400) {
-    for (const [key, value] of socialActivityEmitCache.entries()) {
-      if (now - Number(value || 0) > SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS * 8) {
-        socialActivityEmitCache.delete(key);
-      }
-    }
+  if (socialActivityEmitCache.size > 600) {
+    pruneStaleSocialActivityEmitCache(now);
   }
 
   const endpoint = getSocialActivitySupabaseEndpoint(context);
@@ -9180,6 +9330,50 @@ function invalidateRunningProcessCache() {
   runningProcessCache.namesLower = new Set();
 }
 
+function waitForMilliseconds(milliseconds) {
+  const safeDelay = Math.max(0, Number(milliseconds) || 0);
+  if (safeDelay <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    setTimeout(resolve, safeDelay);
+  });
+}
+
+async function isAnyGameProcessRunning(processCandidates = []) {
+  const candidates = Array.isArray(processCandidates) ? processCandidates.filter(Boolean) : [];
+  if (candidates.length === 0) {
+    return false;
+  }
+
+  invalidateRunningProcessCache();
+  const runningProcessNamesLower = await getRunningProcessNamesLower();
+  return candidates.some((name) => runningProcessNamesLower.has(name));
+}
+
+async function confirmGameProcessStillRunning(processCandidates = [], options = {}) {
+  const candidates = Array.isArray(processCandidates) ? processCandidates.filter(Boolean) : [];
+  if (candidates.length === 0) {
+    return false;
+  }
+
+  const retries = Math.max(1, Math.min(5, parsePositiveInteger(options?.retries) || 3));
+  const intervalMs = Math.max(120, Math.min(3000, parsePositiveInteger(options?.intervalMs) || 650));
+
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    const isRunning = await isAnyGameProcessRunning(candidates);
+    if (!isRunning) {
+      return false;
+    }
+
+    if (attempt < retries - 1) {
+      await waitForMilliseconds(intervalMs);
+    }
+  }
+
+  return true;
+}
+
 async function terminateWindowsProcessByImageName(imageName) {
   return new Promise((resolve) => {
     const args = ["/IM", imageName, "/F", "/T"];
@@ -9958,8 +10152,10 @@ async function playGame(gameId) {
     .map((value) => normalizeProcessNameForMatch(value))
     .filter(Boolean);
   if (processCandidates.length > 0) {
-    const runningProcessNamesLower = await getRunningProcessNamesLower();
-    const alreadyRunning = processCandidates.some((name) => runningProcessNamesLower.has(name));
+    const alreadyRunning = await confirmGameProcessStillRunning(processCandidates, {
+      retries: 3,
+      intervalMs: 650
+    });
     if (alreadyRunning) {
       return {
         ok: true,
@@ -10007,6 +10203,10 @@ async function closeGame(gameId) {
   const closedProcesses = await tryTerminateGameProcesses(game, installRootCandidates).catch(() => []);
   if (closedProcesses.length > 0) {
     invalidateRunningProcessCache();
+    clearSocialActivityEmitDebounceForGame({
+      gameId: game.id,
+      gameName: game.name
+    });
     return {
       ok: true,
       alreadyStopped: false,
@@ -10024,6 +10224,11 @@ async function closeGame(gameId) {
   if (hasExpectedProcessRunning) {
     throw new Error("O jogo esta em execucao, mas nao foi possivel fechar automaticamente.");
   }
+
+  clearSocialActivityEmitDebounceForGame({
+    gameId: game.id,
+    gameName: game.name
+  });
 
   return {
     ok: true,
@@ -10092,6 +10297,9 @@ if (!hasSingleInstanceLock) {
     registerAuthProtocolClient();
     ensureYoutubeEmbedRequestHeaders();
     setupAutoUpdater();
+    await initializeLaunchOnSystemStartupPreference().catch((error) => {
+      appendStartupLog(`[STARTUP_LOGIN_INIT_ERROR] ${formatStartupErrorForLog(error)}`);
+    });
     registerStartupIpcHandlers();
     try {
       ensureWindowsShortcutsWithIcon();
@@ -10154,6 +10362,8 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:get-active-installs", () => getActiveInstallProgressSnapshot());
     ipcMain.handle("launcher:get-install-root", () => getInstallRootPath());
     ipcMain.handle("launcher:choose-install-base-directory", () => chooseInstallBaseDirectory());
+    ipcMain.handle("launcher:get-launch-on-startup", () => getLaunchOnSystemStartupState());
+    ipcMain.handle("launcher:set-launch-on-startup", (_event, enabled) => setLaunchOnSystemStartup(enabled));
     ipcMain.handle("launcher:install-game", (_event, gameId) => installGame(gameId));
     ipcMain.handle("launcher:uninstall-game", (_event, gameId) => uninstallGame(gameId));
     ipcMain.handle("launcher:play-game", (_event, gameId) => playGame(gameId));

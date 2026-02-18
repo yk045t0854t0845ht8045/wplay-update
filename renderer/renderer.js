@@ -11,6 +11,7 @@ const topAccountBtn = document.getElementById("topAccountBtn");
 const accountMenu = document.getElementById("accountMenu");
 const accountMenuName = document.getElementById("accountMenuName");
 const accountMenuEmail = document.getElementById("accountMenuEmail");
+const accountStartupBtn = document.getElementById("accountStartupBtn");
 const notificationsPanel = document.getElementById("notificationsPanel");
 const notificationsList = document.getElementById("notificationsList");
 const notificationsEmpty = document.getElementById("notificationsEmpty");
@@ -185,6 +186,11 @@ const state = {
   authBusy: false,
   authConfigured: true,
   authSession: null,
+  launchOnStartup: {
+    supported: false,
+    enabled: false,
+    busy: false
+  },
   autoUpdate: {
     supported: false,
     configured: false,
@@ -542,6 +548,103 @@ function renderAccountMenuProfile() {
   accountMenuEmail.textContent = email;
 }
 
+function normalizeLaunchOnStartupState(source) {
+  const payload = source && typeof source === "object" ? source : {};
+  return {
+    supported: Boolean(payload.supported),
+    enabled: Boolean(payload.enabled)
+  };
+}
+
+function renderLaunchOnStartupAccountMenuItem() {
+  if (!accountStartupBtn) return;
+
+  const startupState = state.launchOnStartup || {};
+  const supported = Boolean(startupState.supported);
+  const enabled = Boolean(startupState.enabled);
+  const busy = Boolean(startupState.busy);
+
+  accountStartupBtn.disabled = busy || !supported;
+  accountStartupBtn.setAttribute("aria-disabled", accountStartupBtn.disabled ? "true" : "false");
+  accountStartupBtn.setAttribute("aria-checked", supported && enabled ? "true" : "false");
+
+  if (!supported) {
+    accountStartupBtn.textContent = "INICIALIZAR COM SISTEMA (SO NO APP INSTALADO)";
+    return;
+  }
+
+  accountStartupBtn.textContent = enabled
+    ? "INICIALIZAR COM SISTEMA: ATIVADO"
+    : "INICIALIZAR COM SISTEMA: DESATIVADO";
+}
+
+async function refreshLaunchOnStartupState() {
+  if (typeof window.launcherApi.getLaunchOnStartup !== "function") {
+    state.launchOnStartup.supported = false;
+    state.launchOnStartup.enabled = false;
+    state.launchOnStartup.busy = false;
+    renderLaunchOnStartupAccountMenuItem();
+    return state.launchOnStartup;
+  }
+
+  try {
+    const payload = await window.launcherApi.getLaunchOnStartup();
+    const normalized = normalizeLaunchOnStartupState(payload);
+    state.launchOnStartup.supported = normalized.supported;
+    state.launchOnStartup.enabled = normalized.enabled;
+  } catch (_error) {
+    state.launchOnStartup.supported = false;
+    state.launchOnStartup.enabled = false;
+  } finally {
+    state.launchOnStartup.busy = false;
+    renderLaunchOnStartupAccountMenuItem();
+  }
+
+  return state.launchOnStartup;
+}
+
+async function toggleLaunchOnStartupFromAccountMenu() {
+  if (state.launchOnStartup.busy) {
+    return;
+  }
+  if (typeof window.launcherApi.setLaunchOnStartup !== "function") {
+    throw new Error("Opcao indisponivel nesta versao do launcher.");
+  }
+  if (!state.launchOnStartup.supported) {
+    notify("info", "Inicializacao", "Opcao disponivel apenas no app instalado do Windows.");
+    return;
+  }
+
+  const nextEnabled = !state.launchOnStartup.enabled;
+  state.launchOnStartup.busy = true;
+  renderLaunchOnStartupAccountMenuItem();
+
+  try {
+    const payload = await window.launcherApi.setLaunchOnStartup(nextEnabled);
+    const normalized = normalizeLaunchOnStartupState(payload);
+    state.launchOnStartup.supported = normalized.supported;
+    state.launchOnStartup.enabled = normalized.enabled;
+    setStatus(
+      normalized.enabled
+        ? "Inicializar com sistema ativado."
+        : "Inicializar com sistema desativado."
+    );
+    notify(
+      "success",
+      "Inicializacao",
+      normalized.enabled
+        ? "WPlay vai iniciar junto com o Windows."
+        : "WPlay nao vai iniciar junto com o Windows."
+    );
+  } catch (error) {
+    setStatus(`Falha ao atualizar inicializacao com sistema: ${error?.message || "erro desconhecido"}`, true);
+    notify("error", "Inicializacao", error?.message || "Nao foi possivel atualizar a opcao.");
+  } finally {
+    state.launchOnStartup.busy = false;
+    renderLaunchOnStartupAccountMenuItem();
+  }
+}
+
 function setAccountMenuOpen(open) {
   if (!accountMenu || !topAccountBtn) return;
   const nextOpen = Boolean(open) && Boolean(state.authSession?.user?.id);
@@ -549,6 +652,7 @@ function setAccountMenuOpen(open) {
   accountMenu.classList.toggle("is-hidden", !nextOpen);
   topAccountBtn.classList.toggle("is-active", nextOpen);
   topAccountBtn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+  renderLaunchOnStartupAccountMenuItem();
 }
 
 function setAuthButtonsState(loading) {
@@ -571,7 +675,7 @@ async function bootstrapLauncherDataIfNeeded() {
   state.appBootstrapped = true;
 
   state.libraryGameIds = loadLibraryFromStorage();
-  await Promise.all([refreshInstallRoot(), refreshGames(), syncActiveInstallProgressSnapshot()]);
+  await Promise.all([refreshInstallRoot(), refreshGames(), syncActiveInstallProgressSnapshot(), refreshLaunchOnStartupState()]);
   syncSearchVisibility();
   updateNotificationBadge();
   renderNotificationHistory();
@@ -746,6 +850,11 @@ async function handleAccountMenuAction(action) {
     await window.launcherApi.openDownloadsFolder();
     setStatus("Abrindo pasta local dos jogos...");
     notify("info", "Pasta local", "Diretorio de instalacao aberto no Explorer.");
+    return;
+  }
+
+  if (menuAction === "startup") {
+    await toggleLaunchOnStartupFromAccountMenu();
     return;
   }
 
@@ -4427,6 +4536,9 @@ function installEventBindings() {
         setNotificationsPanelOpen(false);
       }
       renderAccountMenuProfile();
+      if (!state.accountMenuOpen) {
+        void refreshLaunchOnStartupState();
+      }
       setAccountMenuOpen(!state.accountMenuOpen);
     });
   }

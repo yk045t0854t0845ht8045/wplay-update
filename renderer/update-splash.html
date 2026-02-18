@@ -9,7 +9,7 @@
         color-scheme: dark;
         --window-bg: #09090a;
         --window-border: rgba(255, 255, 255, 0.08);
-        --panel-bg: #141922;
+        --panel-bg: #09090a;
         --text: #f2f4f8;
         --muted: #9ca9bc;
         --accent: #2e9bff;
@@ -55,7 +55,7 @@
         align-items: center;
         justify-content: space-between;
         padding: 0;
-        background: #0e0e12;
+        background: var(--window-bg);
         border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         user-select: none;
       }
@@ -139,7 +139,7 @@
         overflow: hidden;
         border: 0;
         border-radius: 0;
-        background: #0b0e14;
+        background: var(--window-bg);
       }
 
       .hero-banner {
@@ -157,7 +157,7 @@
       .hero-banner.is-fallback {
         object-fit: contain;
         padding: 34px;
-        background: #090b10;
+        background: var(--window-bg);
       }
 
       .hero-overlay {
