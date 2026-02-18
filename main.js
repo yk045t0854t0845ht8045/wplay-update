@@ -125,6 +125,7 @@ const AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS = 15 * 1000;
 const AUTO_UPDATE_WINDOW_READY_CHECK_DELAY_MS = 3500;
 const AUTO_UPDATE_SPLASH_MAX_WAIT_MS = 90 * 1000;
 const AUTO_UPDATE_SPLASH_POLL_INTERVAL_MS = 250;
+const AUTO_UPDATE_SPLASH_PREFIX_DELAY_MS = 7500;
 const RUNNING_PROCESS_CACHE_TTL_MS = 10 * 1000;
 const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 6;
 const CATALOG_MIN_POLL_INTERVAL_SECONDS = 2;
@@ -212,6 +213,7 @@ let autoUpdateFeedValidationInFlight = null;
 let autoUpdateLastCheckOrigin = "";
 let autoUpdateLastRequestedAt = 0;
 let startupAutoUpdateFlowActive = false;
+let startupIpcHandlersRegistered = false;
 let remoteCatalogInFlight = null;
 const remoteCatalogCache = {
   entries: null,
@@ -1700,6 +1702,86 @@ function resolveUpdateSplashEntryPath() {
   throw new Error("Tela de update nao encontrada. Arquivo esperado: renderer/update-splash.html");
 }
 
+function resolveTargetWindowFromIpcEvent(event) {
+  try {
+    const senderWindow = BrowserWindow.fromWebContents(event?.sender);
+    if (senderWindow && !senderWindow.isDestroyed()) {
+      return senderWindow;
+    }
+  } catch (_error) {
+    // Ignore sender lookup failures.
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return mainWindow;
+  }
+  if (updateSplashWindow && !updateSplashWindow.isDestroyed()) {
+    return updateSplashWindow;
+  }
+  return null;
+}
+
+function closeTargetWindowForIpc(targetWindow) {
+  if (!targetWindow || targetWindow.isDestroyed()) {
+    return false;
+  }
+
+  if (targetWindow === updateSplashWindow) {
+    allowUpdateSplashWindowClose = true;
+    try {
+      targetWindow.close();
+      return true;
+    } catch (_error) {
+      return false;
+    } finally {
+      if (updateSplashWindow && !updateSplashWindow.isDestroyed()) {
+        allowUpdateSplashWindowClose = false;
+      }
+    }
+  }
+
+  try {
+    targetWindow.close();
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function registerStartupIpcHandlers() {
+  if (startupIpcHandlersRegistered) {
+    return;
+  }
+  startupIpcHandlersRegistered = true;
+
+  ipcMain.handle("launcher:get-games", (_event, options) => getGamesWithStatus(options));
+  ipcMain.handle("launcher:auto-update-get-state", () => getPublicAutoUpdateState());
+  ipcMain.handle("launcher:window-minimize", (event) => {
+    const targetWindow = resolveTargetWindowFromIpcEvent(event);
+    if (!targetWindow || targetWindow.isDestroyed()) return false;
+    if (typeof targetWindow.isMinimizable === "function" && !targetWindow.isMinimizable()) return false;
+    targetWindow.minimize();
+    return true;
+  });
+  ipcMain.handle("launcher:window-toggle-maximize", (event) => {
+    const targetWindow = resolveTargetWindowFromIpcEvent(event);
+    if (!targetWindow || targetWindow.isDestroyed()) return false;
+    if (typeof targetWindow.isMaximizable === "function" && !targetWindow.isMaximizable()) return false;
+    if (targetWindow.isMaximized()) {
+      targetWindow.unmaximize();
+      return false;
+    }
+    targetWindow.maximize();
+    return true;
+  });
+  ipcMain.handle("launcher:window-is-maximized", (event) => {
+    const targetWindow = resolveTargetWindowFromIpcEvent(event);
+    if (!targetWindow || targetWindow.isDestroyed()) return false;
+    return targetWindow.isMaximized();
+  });
+  ipcMain.handle("launcher:window-close", (event) => closeTargetWindowForIpc(resolveTargetWindowFromIpcEvent(event)));
+}
+
 function createUpdateSplashWindow() {
   if (updateSplashWindow && !updateSplashWindow.isDestroyed()) {
     return updateSplashWindow;
@@ -1709,17 +1791,17 @@ function createUpdateSplashWindow() {
   allowUpdateSplashWindowClose = false;
 
   updateSplashWindow = new BrowserWindow({
-    width: 420,
-    height: 560,
-    minWidth: 420,
-    minHeight: 560,
-    maxWidth: 420,
-    maxHeight: 560,
+    width: 880,
+    height: 620,
+    minWidth: 880,
+    minHeight: 620,
+    maxWidth: 880,
+    maxHeight: 620,
     resizable: false,
     movable: true,
-    minimizable: false,
+    minimizable: true,
     maximizable: false,
-    closable: false,
+    closable: true,
     fullscreenable: false,
     frame: false,
     autoHideMenuBar: true,
@@ -1815,6 +1897,7 @@ async function runStartupAutoUpdateFlowWithSplash() {
     return;
   }
 
+  const splashFlowStartedAt = Date.now();
   startupAutoUpdateFlowActive = true;
   appendStartupLog("[AUTO_UPDATE] fluxo de update no startup iniciado (modo splash).");
   createUpdateSplashWindow();
@@ -1857,6 +1940,11 @@ async function runStartupAutoUpdateFlowWithSplash() {
   } catch (error) {
     appendStartupLog(`[AUTO_UPDATE] fluxo startup com splash falhou: ${formatStartupErrorForLog(error)}`);
   } finally {
+    const elapsedMs = Date.now() - splashFlowStartedAt;
+    const remainingPrefixDelayMs = Math.max(0, AUTO_UPDATE_SPLASH_PREFIX_DELAY_MS - elapsedMs);
+    if (remainingPrefixDelayMs > 0 && !appQuitRequested) {
+      await new Promise((resolve) => setTimeout(resolve, remainingPrefixDelayMs));
+    }
     startupAutoUpdateFlowActive = false;
   }
 }
@@ -4771,6 +4859,37 @@ function pickFirstMeaningfulValue(source, keys = []) {
   return undefined;
 }
 
+function normalizeCatalogSyncIdCandidates(...values) {
+  const normalized = [];
+  const seen = new Set();
+
+  const addValue = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        addValue(item);
+      }
+      return;
+    }
+
+    const text = String(value ?? "").trim();
+    if (!text) return;
+
+    const dedupeKey = text.toLowerCase();
+    if (seen.has(dedupeKey)) {
+      return;
+    }
+
+    seen.add(dedupeKey);
+    normalized.push(text);
+  };
+
+  for (const value of values) {
+    addValue(value);
+  }
+
+  return normalized;
+}
+
 function normalizeCatalogIdentifier(value, fallback = "") {
   const normalized = String(value || "")
     .trim()
@@ -4917,6 +5036,10 @@ function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
     ...payload,
     ...source
   };
+  const sourceRowId = pickFirstDefinedValue(source, ["id"]);
+  const sourceGameId = pickFirstDefinedValue(source, ["game_id", "gameId"]);
+  const payloadGameId = pickFirstDefinedValue(payload, ["id", "game_id", "gameId"]);
+  const sizeSyncIdCandidates = normalizeCatalogSyncIdCandidates(sourceRowId, sourceGameId, payloadGameId);
 
   const gallery = normalizeJsonArrayValue(pickFirstDefinedValue(merged, ["gallery", "screenshots", "images"]));
   const genres = normalizeJsonArrayValue(pickFirstDefinedValue(merged, ["genres", "tags", "genre"]));
@@ -4995,6 +5118,7 @@ function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
       "file_size",
       "fileSize"
     ]),
+    sizeSyncIdCandidates,
     enabled: pickFirstDefinedValue(merged, ["enabled", "is_enabled"]),
     sortOrder: pickFirstDefinedValue(merged, ["sortOrder", "sort_order"]),
     updatedAt: pickFirstDefinedValue(merged, ["updatedAt", "updated_at"])
@@ -5077,6 +5201,12 @@ function compactFailureDetails(items, maxEntries = 6, maxCharsPerEntry = 180) {
 function normalizeAbsolutePath(input) {
   const raw = String(input || "").trim();
   if (!raw) return "";
+  if (process.platform === "win32") {
+    const driveRootMatch = raw.match(/^[\\/]*([a-zA-Z]):(?:[\\/]*)$/);
+    if (driveRootMatch?.[1]) {
+      return `${driveRootMatch[1].toUpperCase()}:\\`;
+    }
+  }
   if (path.isAbsolute(raw)) {
     return path.normalize(raw);
   }
@@ -5085,6 +5215,28 @@ function normalizeAbsolutePath(input) {
     return path.join(systemDrive, raw);
   }
   return path.resolve(raw);
+}
+
+function resolveManagedInstallRootFromBaseDir(baseDir) {
+  const normalizedBaseDir = normalizeAbsolutePath(baseDir);
+  if (!normalizedBaseDir) return "";
+  if (path.basename(normalizedBaseDir).toLowerCase() === INSTALL_ROOT_NAME.toLowerCase()) {
+    return normalizedBaseDir;
+  }
+  return path.join(normalizedBaseDir, INSTALL_ROOT_NAME);
+}
+
+function normalizeInstallRootCandidate(installRoot) {
+  const normalized = normalizeAbsolutePath(installRoot);
+  if (!normalized) return "";
+  if (path.basename(normalized).toLowerCase() === INSTALL_ROOT_NAME.toLowerCase()) {
+    return normalized;
+  }
+  const rootPath = path.parse(normalized).root;
+  if (rootPath && arePathsEquivalent(rootPath, normalized)) {
+    return path.join(normalized, INSTALL_ROOT_NAME);
+  }
+  return normalized;
 }
 
 function extractDriveId(url) {
@@ -6104,10 +6256,15 @@ async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {})
   return sortCatalogEntries(mappedEntries);
 }
 
-async function syncCatalogGameSizeBytesToSupabase(gameId, sizeBytes, sourceConfig) {
+async function syncCatalogGameSizeBytesToSupabase(gameId, sizeBytes, sourceConfig, syncOptions = {}) {
   const normalizedGameId = String(gameId || "").trim();
   const normalizedSizeBytes = parseSizeBytes(sizeBytes);
   if (!normalizedGameId || normalizedSizeBytes <= 0) {
+    return false;
+  }
+
+  const syncIdCandidates = normalizeCatalogSyncIdCandidates(syncOptions?.idCandidates, normalizedGameId);
+  if (syncIdCandidates.length === 0) {
     return false;
   }
 
@@ -6135,56 +6292,88 @@ async function syncCatalogGameSizeBytesToSupabase(gameId, sizeBytes, sourceConfi
       const tableName = normalizeCatalogIdentifier(sourceConfig.table, CATALOG_DEFAULT_SUPABASE_TABLE);
       const schemaName = normalizeCatalogIdentifier(sourceConfig.schema, CATALOG_DEFAULT_SUPABASE_SCHEMA);
       const endpoint = `${authConfig.supabaseUrl}/rest/v1/${tableName}`;
-      const response = await axios.patch(
-        endpoint,
-        {
-          size_bytes: normalizedSizeBytes
-        },
-        {
-          headers: {
-            ...buildCatalogSupabaseHeaders(authConfig, schemaName),
-            Prefer: "return=representation"
-          },
-          params: {
-            id: `eq.${normalizedGameId}`,
-            select: "id,size_bytes"
-          },
-          timeout: 15_000,
-          validateStatus: (status) => status >= 200 && status < 500
-        }
-      );
+      const headers = {
+        ...buildCatalogSupabaseHeaders(authConfig, schemaName),
+        Prefer: "return=representation"
+      };
+      const filterColumns = ["id", "game_id", "gameId", "game_data->>id"];
+      let hasNoRowsMatch = false;
+      let hasPermissionError = false;
+      let hasTableNotFound = false;
+      let lastHttpStatus = 0;
+      let lastHttpMessage = "";
+      const unsupportedFilterRegex =
+        /column .* does not exist|not found in schema cache|operator does not exist|failed to parse filter|syntax error/i;
 
-      if (response.status === 404) {
-        appendStartupLog(`[CATALOG_SIZE_SYNC] tabela nao encontrada para ${schemaName}.${tableName}.`);
-        return false;
-      }
-      if (response.status >= 400) {
-        const errorMessage = String(response?.data?.message || response?.data?.hint || "").trim();
-        appendStartupLog(
-          `[CATALOG_SIZE_SYNC] falha HTTP ${response.status} ao atualizar size_bytes de ${normalizedGameId}. ${errorMessage}`
-        );
-        if (response.status === 401 || response.status === 403) {
-          appendStartupLog(
-            "[CATALOG_SIZE_SYNC] permissao negada no Supabase (RLS). Habilite UPDATE em size_bytes para sincronizar globalmente."
+      for (const filterColumn of filterColumns) {
+        for (const candidateId of syncIdCandidates) {
+          const response = await axios.patch(
+            endpoint,
+            {
+              size_bytes: normalizedSizeBytes
+            },
+            {
+              headers,
+              params: {
+                [filterColumn]: `eq.${candidateId}`,
+                select: "id,size_bytes,game_id"
+              },
+              timeout: 15_000,
+              validateStatus: (status) => status >= 200 && status < 500
+            }
           );
+
+          if (response.status === 404) {
+            hasTableNotFound = true;
+            continue;
+          }
+
+          if (response.status >= 400) {
+            const errorMessage = String(response?.data?.message || response?.data?.hint || "").trim();
+            const unsupportedFilter = filterColumn !== "id" && unsupportedFilterRegex.test(errorMessage);
+            if (unsupportedFilter) {
+              continue;
+            }
+            lastHttpStatus = response.status;
+            lastHttpMessage = errorMessage || lastHttpMessage;
+            if (response.status === 401 || response.status === 403) {
+              hasPermissionError = true;
+            }
+            continue;
+          }
+
+          const updatedRows = Array.isArray(response.data) ? response.data : [];
+          if (updatedRows.length > 0) {
+            rememberCatalogSizeBytes(normalizedGameId, normalizedSizeBytes, {
+              measuredAt: Date.now(),
+              persist: true
+            });
+            return true;
+          }
+
+          hasNoRowsMatch = true;
         }
-        return false;
       }
 
-      const updatedRows = Array.isArray(response.data) ? response.data : [];
-      if (updatedRows.length === 0) {
+      if (hasTableNotFound) {
+        appendStartupLog(`[CATALOG_SIZE_SYNC] tabela nao encontrada para ${schemaName}.${tableName}.`);
+      }
+      if (hasPermissionError) {
         appendStartupLog(
-          `[CATALOG_SIZE_SYNC] nenhuma linha atualizada para ${normalizedGameId}. Verifique id e politicas RLS no Supabase.`
+          "[CATALOG_SIZE_SYNC] permissao negada no Supabase (RLS). Habilite UPDATE em size_bytes para sincronizar globalmente."
         );
-        return false;
+      }
+      if (lastHttpStatus >= 400) {
+        appendStartupLog(
+          `[CATALOG_SIZE_SYNC] falha HTTP ${lastHttpStatus} ao atualizar size_bytes de ${normalizedGameId}. ${lastHttpMessage}`
+        );
+      } else if (hasNoRowsMatch) {
+        appendStartupLog(
+          `[CATALOG_SIZE_SYNC] nenhuma linha atualizada para ${normalizedGameId}. IDs tentados: ${syncIdCandidates.join(", ")}.`
+        );
       }
 
-      rememberCatalogSizeBytes(normalizedGameId, normalizedSizeBytes, {
-        measuredAt: Date.now(),
-        persist: true
-      });
-
-      return true;
+      return false;
     } catch (error) {
       appendStartupLog(
         `[CATALOG_SIZE_SYNC] erro ao atualizar size_bytes de ${normalizedGameId}: ${formatStartupErrorForLog(error)}`
@@ -6439,6 +6628,7 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
       const sourceCatalogSizeBytes = parseSizeBytes(game.catalogSizeBytes);
       const sourceCatalogSizeBytesField = parseSizeBytes(game.catalogSizeBytesField);
       const knownSizeBytes = parseSizeBytes(game.sizeBytes);
+      const syncIdCandidates = normalizeCatalogSyncIdCandidates(game.sizeSyncIdCandidates, game.id);
       if (sourceCatalogSizeBytes > 0) {
         rememberCatalogSizeBytes(game.id, sourceCatalogSizeBytes, { measuredAt: now, persist: true });
       }
@@ -6455,7 +6645,9 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
       setCatalogSizeSyncState(game.id, { lastAttemptAt: now });
 
       if (knownSizeBytes > 0) {
-        const syncedKnownSize = await syncCatalogGameSizeBytesToSupabase(game.id, knownSizeBytes, sourceConfig);
+        const syncedKnownSize = await syncCatalogGameSizeBytesToSupabase(game.id, knownSizeBytes, sourceConfig, {
+          idCandidates: syncIdCandidates
+        });
         if (syncedKnownSize) {
           updatedCount += 1;
           retriedKnownCount += 1;
@@ -6476,7 +6668,9 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
       rememberCatalogSizeBytes(game.id, resolvedBytes, { measuredAt: now, persist: true });
       resolvedCount += 1;
 
-      const synced = await syncCatalogGameSizeBytesToSupabase(game.id, resolvedBytes, sourceConfig);
+      const synced = await syncCatalogGameSizeBytesToSupabase(game.id, resolvedBytes, sourceConfig, {
+        idCandidates: syncIdCandidates
+      });
       if (synced) {
         updatedCount += 1;
       }
@@ -6649,6 +6843,7 @@ async function readCatalogBundle() {
     .map((entry, index) => {
       const name = String(entry.name || `Jogo ${index + 1}`).trim() || `Jogo ${index + 1}`;
       const id = String(entry.id || slugifyId(name, `game-${index + 1}`));
+      const sizeSyncIdCandidates = normalizeCatalogSyncIdCandidates(entry.sizeSyncIdCandidates, id);
       const downloadUrl = String(entry.downloadUrl || "").trim();
       const googleDriveFileId = String(entry.googleDriveFileId || extractDriveId(downloadUrl)).trim();
       const downloadUrls = normalizeStringArray(entry.downloadUrls || entry.mirrors || entry.mirrorUrls || entry.backupUrls);
@@ -6729,6 +6924,7 @@ async function readCatalogBundle() {
         sizeBytes,
         catalogSizeBytes,
         catalogSizeBytesField,
+        sizeSyncIdCandidates,
         archiveType: normalizeArchiveType(entry.archiveType),
         archivePassword,
         checksumSha256,
@@ -6800,12 +6996,14 @@ function getInstallRootCandidates(settings = {}) {
   const candidates = [];
   const runtimeConfig = readRuntimeConfigSync();
   const installBaseDir = normalizeAbsolutePath(runtimeConfig.installBaseDir || "");
-  if (installBaseDir) {
-    candidates.push(path.join(installBaseDir, INSTALL_ROOT_NAME));
+  const runtimeManagedInstallRoot = resolveManagedInstallRootFromBaseDir(installBaseDir);
+  if (runtimeManagedInstallRoot) {
+    candidates.push(runtimeManagedInstallRoot);
   }
 
-  if (settings.installRoot) {
-    candidates.push(settings.installRoot);
+  const settingsInstallRoot = normalizeInstallRootCandidate(settings.installRoot || "");
+  if (settingsInstallRoot) {
+    candidates.push(settingsInstallRoot);
   }
 
   if (process.platform === "win32") {
@@ -8825,7 +9023,9 @@ async function installGame(gameId) {
 
       if (catalogSizeBytes > 0 && parseSizeBytes(game.catalogSizeBytesField) <= 0) {
         const sourceConfig = resolveCatalogSourceConfig(settings);
-        void syncCatalogGameSizeBytesToSupabase(game.id, catalogSizeBytes, sourceConfig);
+        void syncCatalogGameSizeBytesToSupabase(game.id, catalogSizeBytes, sourceConfig, {
+          idCandidates: game.sizeSyncIdCandidates
+        });
       }
 
       await writeInstallManifest(installDir, {
@@ -9710,15 +9910,24 @@ async function chooseInstallBaseDirectory() {
     throw new Error("Diretorio invalido.");
   }
 
-  const nextInstallRoot = path.join(selectedBaseDir, INSTALL_ROOT_NAME);
+  const nextInstallRoot = resolveManagedInstallRootFromBaseDir(selectedBaseDir);
+  if (!nextInstallRoot) {
+    throw new Error("Diretorio invalido.");
+  }
+  await fsp.mkdir(nextInstallRoot, { recursive: true });
+
+  const installBaseDirToPersist =
+    path.basename(selectedBaseDir).toLowerCase() === INSTALL_ROOT_NAME.toLowerCase()
+      ? path.dirname(selectedBaseDir)
+      : selectedBaseDir;
   await writeRuntimeConfig({
-    installBaseDir: selectedBaseDir,
+    installBaseDir: installBaseDirToPersist,
     updatedAt: new Date().toISOString()
   });
 
   return {
     canceled: false,
-    installBaseDir: selectedBaseDir,
+    installBaseDir: installBaseDirToPersist,
     installRoot: nextInstallRoot
   };
 }
@@ -9883,6 +10092,7 @@ if (!hasSingleInstanceLock) {
     registerAuthProtocolClient();
     ensureYoutubeEmbedRequestHeaders();
     setupAutoUpdater();
+    registerStartupIpcHandlers();
     try {
       ensureWindowsShortcutsWithIcon();
     } catch (error) {
@@ -9941,7 +10151,6 @@ if (!hasSingleInstanceLock) {
       void handleAuthDeepLink(authDeepLinkUrlBuffer);
     }
 
-    ipcMain.handle("launcher:get-games", (_event, options) => getGamesWithStatus(options));
     ipcMain.handle("launcher:get-active-installs", () => getActiveInstallProgressSnapshot());
     ipcMain.handle("launcher:get-install-root", () => getInstallRootPath());
     ipcMain.handle("launcher:choose-install-base-directory", () => chooseInstallBaseDirectory());
@@ -9967,34 +10176,10 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:social-list-friend-game-activities", (_event, options) =>
       listFriendGameActivitiesForCurrentUser(options)
     );
-    ipcMain.handle("launcher:auto-update-get-state", () => getPublicAutoUpdateState());
     ipcMain.handle("launcher:auto-update-check", () => checkForLauncherUpdate("manual"));
     ipcMain.handle("launcher:auto-update-check-background", () => checkForLauncherUpdate("renderer-poll"));
     ipcMain.handle("launcher:auto-update-download", () => downloadLauncherUpdate());
     ipcMain.handle("launcher:auto-update-restart-and-install", () => restartAndInstallLauncherUpdate());
-    ipcMain.handle("launcher:window-minimize", () => {
-      if (!mainWindow || mainWindow.isDestroyed()) return false;
-      mainWindow.minimize();
-      return true;
-    });
-    ipcMain.handle("launcher:window-toggle-maximize", () => {
-      if (!mainWindow || mainWindow.isDestroyed()) return false;
-      if (mainWindow.isMaximized()) {
-        mainWindow.unmaximize();
-        return false;
-      }
-      mainWindow.maximize();
-      return true;
-    });
-    ipcMain.handle("launcher:window-is-maximized", () => {
-      if (!mainWindow || mainWindow.isDestroyed()) return false;
-      return mainWindow.isMaximized();
-    });
-    ipcMain.handle("launcher:window-close", () => {
-      if (!mainWindow || mainWindow.isDestroyed()) return false;
-      mainWindow.close();
-      return true;
-    });
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0 || !mainWindow || mainWindow.isDestroyed()) {

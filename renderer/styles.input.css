@@ -118,13 +118,13 @@
   .window-control-btn {
     @apply relative grid h-9 w-9 place-items-center rounded-md text-slate-300 transition-colors duration-150;
     border: 0;
-    background: rgba(255, 255, 255, 0.03);
+    background: transparent;
     cursor: pointer;
   }
 
   .window-control-btn svg {
-    width: 16px;
-    height: 16px;
+    width: 17px;
+    height: 17px;
   }
 
   .window-control-btn:hover {

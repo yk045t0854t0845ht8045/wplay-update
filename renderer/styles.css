@@ -761,13 +761,13 @@ button,
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   transition-duration: 150ms;
   border: 0;
-  background: rgba(255, 255, 255, 0.03);
+  background: transparent;
   cursor: pointer;
 }
 
 .window-control-btn svg {
-  width: 16px;
-  height: 16px;
+  width: 17px;
+  height: 17px;
 }
 
 .window-control-btn:hover{
@@ -4380,8 +4380,12 @@ body.auth-locked .auth-gate {
   visibility: visible;
 }
 
-.block{
-  display: block;
+.absolute{
+  position: absolute;
+}
+
+.relative{
+  position: relative;
 }
 
 .flex{

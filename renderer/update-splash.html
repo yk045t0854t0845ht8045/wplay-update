@@ -7,13 +7,14 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #09090a;
-        --panel: #111114;
-        --panel-border: rgba(255, 255, 255, 0.08);
-        --text: #f4f4f5;
-        --muted: #b6b6bf;
-        --track: rgba(255, 255, 255, 0.1);
-        --fill: #ffffff;
+        --window-bg: #09090a;
+        --window-border: rgba(255, 255, 255, 0.08);
+        --panel-bg: #141922;
+        --text: #f2f4f8;
+        --muted: #9ca9bc;
+        --accent: #2e9bff;
+        --progress-track: rgba(255, 255, 255, 0.14);
+        --progress-fill: #2e9bff;
       }
 
       * {
@@ -22,123 +23,312 @@
 
       html,
       body {
-        margin: 0;
         width: 100%;
         height: 100%;
-        background: radial-gradient(circle at 20% 0%, rgba(255, 255, 255, 0.08), rgba(9, 9, 10, 0.98) 36%), var(--bg);
-        font-family: "Segoe UI", "Inter", sans-serif;
-        color: var(--text);
+        margin: 0;
         overflow: hidden;
+        font-family: "Sora", "Segoe UI", "Inter", system-ui, sans-serif;
+        background: var(--window-bg);
+        color: var(--text);
       }
 
       body {
         display: grid;
         place-items: center;
-        padding: 24px;
+        padding: 0;
       }
 
-      .updater-shell {
+      .updater-window {
         width: 100%;
-        max-width: 360px;
-        min-height: 500px;
-        border-radius: 24px;
-        border: 1px solid var(--panel-border);
-        background: linear-gradient(175deg, rgba(18, 18, 22, 0.95), rgba(12, 12, 14, 0.95));
-        box-shadow: 0 28px 58px rgba(0, 0, 0, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-        padding: 34px 28px 30px;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 18px;
-      }
-
-      .logo-wrap {
-        width: 100%;
-        height: 132px;
+        height: 100%;
+        border-radius: 12px;
+        border: 1px solid var(--window-border);
+        background: var(--window-bg);
         display: grid;
-        place-items: center;
+        grid-template-rows: 44px minmax(0, 1fr) 156px;
+        overflow: hidden;
       }
 
-      .logo-wrap img {
-        width: 100%;
-        max-width: 240px;
-        max-height: 110px;
+      .titlebar {
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0;
+        background: #0e0e12;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        user-select: none;
+      }
+
+      .titlebar-left {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+        height: 100%;
+        flex: 1 1 0;
+        padding: 0 12px;
+        -webkit-app-region: drag;
+      }
+
+      .titlebar-logo {
+        width: 18px;
+        height: 18px;
         object-fit: contain;
-        filter: drop-shadow(0 12px 24px rgba(0, 0, 0, 0.38));
+        filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.3));
       }
 
-      h1 {
-        margin: 4px 0 0;
-        font-size: 28px;
-        font-weight: 800;
-        letter-spacing: 0.02em;
-        text-align: center;
+      .titlebar-text {
+        font-family: "Space Grotesk", "Sora", sans-serif;
+        font-size: 0.82rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        color: #e2e8f0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
-      p {
+      .window-controls {
+        display: flex;
+        height: 100%;
+        align-items: center;
+        gap: 0.375rem;
+        padding-right: 0.5rem;
+        -webkit-app-region: no-drag;
+      }
+
+      .window-button {
+        position: relative;
+        display: grid;
+        height: 2.25rem;
+        width: 2.25rem;
+        place-items: center;
+        border-radius: 0.375rem;
+        color: #cbd5e1;
+        border: 0;
+        background: transparent;
+        cursor: pointer;
+        transition: color 150ms ease, background-color 150ms ease;
+      }
+
+      .window-button svg {
+        width: 17px;
+        height: 17px;
+      }
+
+      .window-button:hover {
+        color: #ffffff;
+        background: rgba(255, 255, 255, 0.09);
+      }
+
+      .window-button.close:hover {
+        background: #d94e4f;
+      }
+
+      .hero-area {
+        min-height: 0;
+        padding: 0;
+      }
+
+      .hero-frame {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        overflow: hidden;
+        border: 0;
+        border-radius: 0;
+        background: #0b0e14;
+      }
+
+      .hero-banner {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        opacity: 0;
+        transition: opacity 300ms ease;
+      }
+
+      .hero-banner.visible {
+        opacity: 1;
+      }
+
+      .hero-banner.is-fallback {
+        object-fit: contain;
+        padding: 34px;
+        background: #090b10;
+      }
+
+      .hero-overlay {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, rgba(8, 11, 16, 0.04) 18%, rgba(8, 11, 16, 0.72) 100%);
+        pointer-events: none;
+      }
+
+      .hero-label {
+        position: absolute;
+        left: 14px;
+        bottom: 12px;
+        padding: 4px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        background: rgba(10, 13, 19, 0.74);
+        color: #dbe9ff;
+      }
+
+      .hero-dots {
+        position: absolute;
+        right: 16px;
+        bottom: 12px;
+        display: flex;
+        gap: 6px;
+      }
+
+      .hero-dot {
+        width: 9px;
+        height: 9px;
+        border: 1px solid rgba(150, 194, 255, 0.7);
+        border-radius: 2px;
+        background: rgba(35, 82, 133, 0.35);
+        opacity: 0.92;
+      }
+
+      .hero-dot.active {
+        border-color: #74c0ff;
+        background: var(--accent);
+      }
+
+      .status-panel {
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        background: var(--panel-bg);
+        padding: 14px 20px 16px;
+        display: grid;
+        align-content: start;
+        gap: 4px;
+      }
+
+      .panel-title {
         margin: 0;
-        text-align: center;
+        font-size: 1.25rem;
+        line-height: 1.1;
+        font-weight: 700;
+        letter-spacing: 0.01em;
       }
 
-      .subtitle {
+      .panel-version {
+        margin: 0;
         color: var(--muted);
-        font-size: 14px;
-        line-height: 1.5;
+        font-size: 12px;
+        line-height: 1.2;
+      }
+
+      .panel-status {
+        margin: 2px 0 4px;
+        color: #eaf0fa;
+        font-size: 15px;
+        line-height: 1.25;
+        font-weight: 500;
       }
 
       .progress-root {
-        margin-top: 6px;
-        width: 100%;
         display: grid;
-        gap: 10px;
+        gap: 6px;
       }
 
       .progress-track {
         width: 100%;
-        height: 8px;
+        height: 7px;
         border-radius: 999px;
-        background: var(--track);
         overflow: hidden;
+        background: var(--progress-track);
       }
 
       .progress-fill {
-        display: block;
-        width: 6%;
+        width: 5%;
         height: 100%;
         border-radius: inherit;
-        background: linear-gradient(90deg, rgba(255, 255, 255, 0.72), var(--fill));
-        transition: width 180ms ease;
+        background: linear-gradient(90deg, rgba(46, 155, 255, 0.72), var(--progress-fill));
+        box-shadow: 0 0 12px rgba(46, 155, 255, 0.38);
+        transition: width 220ms ease;
       }
 
       .progress-label {
+        margin: 0;
         color: var(--muted);
-        font-size: 13px;
-        min-height: 18px;
-        text-align: center;
+        font-size: 12px;
       }
     </style>
   </head>
   <body>
-    <main class="updater-shell" role="status" aria-live="polite">
-      <div class="logo-wrap">
-        <img src="./assets/logo.png" alt="WPlay" />
-      </div>
-      <h1>Atualizando Sistema</h1>
-      <p class="subtitle" id="statusDescription">Atualizando sistema, aguarde...</p>
-      <section class="progress-root">
-        <div class="progress-track">
-          <span class="progress-fill" id="progressFill"></span>
+    <main class="updater-window" role="status" aria-live="polite">
+      <header class="titlebar">
+        <div class="titlebar-left">
+          <img src="./assets/logo.png" alt="" class="titlebar-logo" />
+          <strong class="titlebar-text">WPlay</strong>
         </div>
-        <p class="progress-label" id="progressLabel">Preparando atualizacao...</p>
+        <div class="window-controls">
+          <button class="window-button" id="minimizeButton" type="button" aria-label="Minimizar">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M6 12.5H18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+            </svg>
+          </button>
+          <button class="window-button close" id="closeButton" type="button" aria-label="Fechar">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M8 8L16 16M16 8L8 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <section class="hero-area">
+        <div class="hero-frame">
+          <img id="heroBanner" class="hero-banner" alt="Banner em destaque" />
+          <div class="hero-overlay"></div>
+          <span class="hero-label">Atualizando launcher</span>
+          <div class="hero-dots" id="heroDots"></div>
+        </div>
+      </section>
+
+      <section class="status-panel">
+        <h1 class="panel-title">WPlay Launcher</h1>
+        <p class="panel-version" id="versionLabel">Versao atual: --</p>
+        <p class="panel-status" id="statusDescription">Inicializando atualizador...</p>
+        <div class="progress-root">
+          <div class="progress-track">
+            <span class="progress-fill" id="progressFill"></span>
+          </div>
+          <p class="progress-label" id="progressLabel">Preparando atualizacao...</p>
+        </div>
       </section>
     </main>
 
     <script>
       (() => {
+        const BANNER_SWITCH_INTERVAL_MS = 2500;
+        const PREFIX_DELAY_MS = 7500;
+        const PREFIX_PROGRESS_MAX = 24;
+        const MAX_DOTS = 8;
+        const MAX_BANNERS = 20;
+
+        const heroBanner = document.getElementById("heroBanner");
+        const heroDots = document.getElementById("heroDots");
+        const versionLabel = document.getElementById("versionLabel");
         const statusDescription = document.getElementById("statusDescription");
         const progressFill = document.getElementById("progressFill");
         const progressLabel = document.getElementById("progressLabel");
+        const minimizeButton = document.getElementById("minimizeButton");
+        const closeButton = document.getElementById("closeButton");
+
+        let latestState = {};
+        let banners = [];
+        let currentBannerIndex = 0;
+        let bannerTimer = null;
+        let prefixTimer = null;
+        const splashStartedAt = Date.now();
 
         const clampPercent = (value) => {
           const numeric = Number(value);
@@ -146,28 +336,134 @@
           return Math.max(0, Math.min(100, numeric));
         };
 
+        const sanitizeHttpUrl = (value) => {
+          const raw = String(value || "").trim();
+          if (!raw) return "";
+          try {
+            const parsed = new URL(raw);
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+            return parsed.toString();
+          } catch (_error) {
+            return "";
+          }
+        };
+
+        const shuffleArray = (list) => {
+          const arr = Array.isArray(list) ? [...list] : [];
+          for (let index = arr.length - 1; index > 0; index -= 1) {
+            const swapIndex = Math.floor(Math.random() * (index + 1));
+            [arr[index], arr[swapIndex]] = [arr[swapIndex], arr[index]];
+          }
+          return arr;
+        };
+
+        const showFallbackBanner = () => {
+          heroBanner.classList.add("is-fallback");
+          heroBanner.classList.remove("visible");
+          heroBanner.src = "./assets/logo.png";
+          heroBanner.dataset.bannerSrc = "./assets/logo.png";
+          heroDots.innerHTML = "";
+        };
+
+        const collectBannerUrl = (game) => {
+          if (!game || typeof game !== "object") return "";
+          const gallery = Array.isArray(game.gallery) ? game.gallery : [];
+          return (
+            sanitizeHttpUrl(game.bannerUrl) ||
+            sanitizeHttpUrl(game.cardImageUrl) ||
+            sanitizeHttpUrl(gallery[0]) ||
+            ""
+          );
+        };
+
+        const renderDots = (count, activeIndex) => {
+          heroDots.innerHTML = "";
+          const dotCount = Math.max(0, Math.min(MAX_DOTS, Number(count) || 0));
+          for (let index = 0; index < dotCount; index += 1) {
+            const dot = document.createElement("span");
+            dot.className = `hero-dot${index === activeIndex ? " active" : ""}`;
+            heroDots.appendChild(dot);
+          }
+        };
+
+        const showBannerAt = (index) => {
+          if (!Array.isArray(banners) || banners.length === 0) {
+            showFallbackBanner();
+            return;
+          }
+
+          const safeIndex = Math.max(0, index % banners.length);
+          const nextBannerUrl = String(banners[safeIndex] || "").trim();
+          if (!nextBannerUrl) {
+            showFallbackBanner();
+            return;
+          }
+
+          currentBannerIndex = safeIndex;
+          heroBanner.classList.remove("is-fallback");
+          heroBanner.classList.remove("visible");
+          heroBanner.src = nextBannerUrl;
+          heroBanner.dataset.bannerSrc = nextBannerUrl;
+          renderDots(banners.length, safeIndex);
+        };
+
+        heroBanner.addEventListener("load", () => {
+          heroBanner.classList.add("visible");
+        });
+
+        heroBanner.addEventListener("error", () => {
+          const failedUrl = String(heroBanner.dataset.bannerSrc || "").trim();
+          if (failedUrl && Array.isArray(banners) && banners.length > 0) {
+            banners = banners.filter((bannerUrl) => bannerUrl !== failedUrl);
+            if (currentBannerIndex >= banners.length) {
+              currentBannerIndex = 0;
+            }
+          }
+          if (!banners.length) {
+            showFallbackBanner();
+            return;
+          }
+          showBannerAt(currentBannerIndex);
+        });
+
+        const beginBannerRotation = () => {
+          if (bannerTimer) {
+            clearInterval(bannerTimer);
+            bannerTimer = null;
+          }
+
+          if (banners.length <= 1) {
+            return;
+          }
+
+          bannerTimer = setInterval(() => {
+            const nextIndex = (currentBannerIndex + 1) % banners.length;
+            showBannerAt(nextIndex);
+          }, BANNER_SWITCH_INTERVAL_MS);
+        };
+
         const getDescription = (state) => {
           const status = String(state?.status || "").toLowerCase();
           if (status === "checking") return "Verificando atualizacoes do launcher...";
-          if (status === "downloading") return "Baixando atualizacao. Aguarde alguns instantes...";
-          if (status === "installing") return "Aplicando atualizacao no launcher...";
+          if (status === "downloading") return "Baixando atualizacao...";
+          if (status === "installing") return "Aplicando atualizacao...";
           if (status === "downloaded") return "Atualizacao pronta. Reiniciando launcher...";
-          if (status === "idle") return "Sistema atualizado. Abrindo launcher...";
-          if (status === "error") return "Atualizacao temporariamente indisponivel. Abrindo launcher...";
-          return "Atualizando sistema, aguarde...";
+          if (status === "idle") return "Launcher atualizado. Abrindo...";
+          if (status === "error") return "Atualizador indisponivel no momento.";
+          if (status === "disabled") return "Atualizador desativado.";
+          return "Inicializando atualizador...";
         };
 
         const getProgressLabel = (state) => {
           const status = String(state?.status || "").toLowerCase();
           const percent = clampPercent(state?.progressPercent);
-          if (status === "downloading") {
-            return `Download ${percent.toFixed(1)}%`;
-          }
+          if (status === "downloading") return `Download ${percent.toFixed(1)}%`;
           if (status === "checking") return "Checando nova versao...";
           if (status === "downloaded") return "Atualizacao baixada";
-          if (status === "installing") return "Finalizando atualizacao...";
-          if (status === "idle") return "Versao atualizada";
-          if (status === "error") return "Sem update neste momento";
+          if (status === "installing") return "Instalando atualizacao...";
+          if (status === "idle") return "Concluido";
+          if (status === "error") return "Falha no update automatico";
+          if (status === "disabled") return "Atualizador desativado";
           return "Preparando atualizacao...";
         };
 
@@ -175,30 +471,142 @@
           const status = String(state?.status || "").toLowerCase();
           if (status === "downloading") return clampPercent(state?.progressPercent);
           if (status === "downloaded" || status === "installing" || status === "idle") return 100;
-          if (status === "checking") return 18;
+          if (status === "checking") return 20;
+          if (status === "error" || status === "disabled") return 100;
           return 8;
         };
 
-        const render = (payload) => {
-          statusDescription.textContent = getDescription(payload);
-          progressLabel.textContent = getProgressLabel(payload);
-          progressFill.style.width = `${getProgressPercent(payload)}%`;
+        const renderVersion = (state) => {
+          const currentVersion = String(state?.currentVersion || "").trim();
+          const latestVersion = String(state?.latestVersion || "").trim();
+          if (currentVersion && latestVersion && currentVersion !== latestVersion) {
+            versionLabel.textContent = `Versao atual: ${currentVersion}  |  Nova: ${latestVersion}`;
+            return;
+          }
+          if (currentVersion) {
+            versionLabel.textContent = `Versao atual: ${currentVersion}`;
+            return;
+          }
+          versionLabel.textContent = "Versao atual: --";
         };
 
-        const bootstrap = async () => {
-          try {
-            if (window.launcherApi?.autoUpdateGetState) {
-              const state = await window.launcherApi.autoUpdateGetState();
-              render(state || {});
+        const renderRealState = () => {
+          statusDescription.textContent = getDescription(latestState);
+          progressLabel.textContent = getProgressLabel(latestState);
+          progressFill.style.width = `${getProgressPercent(latestState)}%`;
+          renderVersion(latestState);
+        };
+
+        const renderPrefixState = () => {
+          const elapsedMs = Date.now() - splashStartedAt;
+          if (elapsedMs >= PREFIX_DELAY_MS) {
+            if (prefixTimer) {
+              clearInterval(prefixTimer);
+              prefixTimer = null;
             }
-          } catch (_error) {
-            render({});
+            renderRealState();
+            return;
+          }
+
+          const remainingSeconds = Math.max(1, Math.ceil((PREFIX_DELAY_MS - elapsedMs) / 1000));
+          const percent = Math.max(5, Math.min(PREFIX_PROGRESS_MAX, (elapsedMs / PREFIX_DELAY_MS) * PREFIX_PROGRESS_MAX));
+          statusDescription.textContent = "Inicializando modulo de atualizacao...";
+          progressLabel.textContent = `Preparando updater... ${remainingSeconds}s`;
+          progressFill.style.width = `${percent}%`;
+          renderVersion(latestState);
+        };
+
+        const inPrefixPhase = () => Date.now() - splashStartedAt < PREFIX_DELAY_MS;
+
+        const setLatestState = (payload) => {
+          latestState = payload && typeof payload === "object" ? payload : {};
+          if (!inPrefixPhase()) {
+            renderRealState();
           }
         };
 
-        if (window.launcherApi?.onAutoUpdateState) {
-          window.launcherApi.onAutoUpdateState((payload) => render(payload || {}));
+        const loadBannersFromCatalog = async () => {
+          try {
+            if (typeof window.launcherApi?.getGames !== "function") {
+              banners = [];
+              showFallbackBanner();
+              return;
+            }
+
+            const games = await window.launcherApi.getGames({
+              lightweight: true,
+              includeRunningState: false,
+              measureInstalledSize: false,
+              persistMeasuredSize: false
+            });
+
+            const unique = new Set();
+            const gameList = Array.isArray(games) ? games : [];
+            for (const game of gameList) {
+              const bannerUrl = collectBannerUrl(game);
+              if (bannerUrl) {
+                unique.add(bannerUrl);
+                if (unique.size >= MAX_BANNERS) break;
+              }
+            }
+            banners = shuffleArray([...unique]);
+          } catch (_error) {
+            banners = [];
+          }
+
+          if (!banners.length) {
+            showFallbackBanner();
+            return;
+          }
+
+          currentBannerIndex = Math.floor(Math.random() * banners.length);
+          showBannerAt(currentBannerIndex);
+          beginBannerRotation();
+        };
+
+        minimizeButton?.addEventListener("click", () => {
+          try {
+            window.launcherApi?.minimizeWindow?.();
+          } catch (_error) {
+            // No-op.
+          }
+        });
+
+        closeButton?.addEventListener("click", () => {
+          try {
+            window.launcherApi?.closeWindow?.();
+          } catch (_error) {
+            // No-op.
+          }
+        });
+
+        if (typeof window.launcherApi?.onAutoUpdateState === "function") {
+          window.launcherApi.onAutoUpdateState((payload) => {
+            setLatestState(payload || {});
+          });
         }
+
+        const bootstrap = async () => {
+          try {
+            if (typeof window.launcherApi?.autoUpdateGetState === "function") {
+              const state = await window.launcherApi.autoUpdateGetState();
+              setLatestState(state || {});
+            }
+          } catch (_error) {
+            setLatestState({});
+          }
+
+          prefixTimer = setInterval(() => {
+            renderPrefixState();
+          }, 120);
+          renderPrefixState();
+          await loadBannersFromCatalog();
+        };
+
+        window.addEventListener("beforeunload", () => {
+          if (prefixTimer) clearInterval(prefixTimer);
+          if (bannerTimer) clearInterval(bannerTimer);
+        });
 
         bootstrap();
       })();
