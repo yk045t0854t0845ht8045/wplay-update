@@ -1,8 +1,8 @@
 1:"$Sreact.fragment"
-6:I[27611,["./_next/static/chunks/d775bde7befad38d.js"],"default"]
+6:I[27611,["./_next/static/chunks/911dd7b083c561d3.js"],"default"]
 7:I[97367,["./_next/static/chunks/2f236954d6a65e12.js"],"OutletBoundary"]
 8:"$Sreact.suspense"
-2:T6050,
+2:T60b8,
     <div class="bg-glow glow-left"></div>
     <div class="bg-glow glow-right"></div>
     <div class="bg-noise"></div>
@@ -269,8 +269,10 @@
                             <rect x="5" y="15.5" width="14" height="4.5" rx="1.6" stroke="currentColor" stroke-width="1.8"></rect>
                           </svg>
                           <svg class="hero-action-icon icon-play" viewBox="0 0 24 24" fill="none">
-                            <path d="M9 7.6V16.4L16 12L9 7.6Z" fill="currentColor"></path>
-                            <rect x="4.7" y="4.7" width="14.6" height="14.6" rx="3.2" stroke="currentColor" stroke-width="1.5"></rect>
+                            <path d="M9 7.6V16.4L16.4 12L9 7.6Z" fill="currentColor"></path>
+                          </svg>
+                          <svg class="hero-action-icon icon-close" viewBox="0 0 24 24" fill="none">
+                            <rect x="8" y="8" width="8" height="8" rx="1.8" fill="currentColor"></rect>
                           </svg>
                           <svg class="hero-action-icon icon-busy" viewBox="0 0 24 24" fill="none">
                             <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2" opacity="0.28"></circle>
@@ -445,8 +447,8 @@
     </div>
 
     
-0:{"buildId":"DeER7xppCvOM_TNguQYgs","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
+0:{"buildId":"S1ehIfxUf8gS2mhYnjKxz","rsc":["$","$1","c",{"children":[[["$","div",null,{"id":"launcherShellRoot","dangerouslySetInnerHTML":{"__html":"$2"}}],"$L3"],["$L4"],"$L5"]}],"loading":null,"isPartial":false}
 3:["$","$L6",null,{}]
-4:["$","script","script-0",{"src":"./_next/static/chunks/d775bde7befad38d.js","async":true}]
+4:["$","script","script-0",{"src":"./_next/static/chunks/911dd7b083c561d3.js","async":true}]
 5:["$","$L7",null,{"children":["$","$8",null,{"name":"Next.MetadataOutlet","children":"$@9"}]}]
 9:null

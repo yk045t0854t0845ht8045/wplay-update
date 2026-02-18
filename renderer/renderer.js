@@ -94,12 +94,6 @@ const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = 15 * 1000;
 const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = 60 * 1000;
 const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = 8 * 1000;
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
-const DETAILS_ACTION_ICON_IMAGE_URLS = {
-  // Cole aqui links PNG (https://...) para trocar icones do botao principal.
-  play: "https://imgur.com/tYO0G77.png",
-  close: "https://imgur.com/X2RTiUm.png",
-  install: "https://imgur.com/DgPXszC.png"
-};
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
   minute: "2-digit"
@@ -1240,30 +1234,6 @@ function setButtonLabel(button, text) {
     return;
   }
   button.textContent = text;
-}
-
-function getDetailsActionIconImageUrl(action) {
-  const key = String(action || "").trim().toLowerCase();
-  const value = String(DETAILS_ACTION_ICON_IMAGE_URLS[key] || "").trim();
-  if (!value) return "";
-  if (!/^https?:\/\//i.test(value)) return "";
-  return value;
-}
-
-function applyDetailsActionIcon(action) {
-  if (!detailsActionBtn) return;
-  const actionKey = String(action || "").trim().toLowerCase();
-  const iconUrl = getDetailsActionIconImageUrl(actionKey);
-
-  detailsActionBtn.removeAttribute("data-custom-icon");
-  detailsActionBtn.style.removeProperty("--details-action-icon-url");
-
-  if (!iconUrl) {
-    return;
-  }
-
-  detailsActionBtn.setAttribute("data-custom-icon", "true");
-  detailsActionBtn.style.setProperty("--details-action-icon-url", `url('${escapeCssUrl(iconUrl)}')`);
 }
 
 function escapeHtml(value) {
@@ -3100,7 +3070,6 @@ function renderDetailsActions(game) {
   detailsActionBtn.dataset.gameId = game.id;
   detailsActionBtn.dataset.action = actionState.action;
   setButtonLabel(detailsActionBtn, actionState.label);
-  applyDetailsActionIcon(actionState.action);
   detailsActionBtn.disabled = actionState.disabled;
 
   const inLibrary = isInLibrary(game.id);
