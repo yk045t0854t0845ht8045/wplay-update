@@ -100,6 +100,7 @@ const LOW_SPEC_DEVICE =
   (Number.isFinite(deviceMemoryGb) && deviceMemoryGb > 0 && deviceMemoryGb <= 8);
 const REALTIME_SYNC_INTERVAL_MS = LOW_SPEC_DEVICE ? 10 * 1000 : 5 * 1000;
 const RECENT_COMPLETED_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
+const RECENT_COMPLETED_DOWNLOAD_MAX_ITEMS = 24;
 const NOTIFICATION_HISTORY_LIMIT = 15;
 const NOTYF_STACK_VISIBLE = 5;
 const NOTYF_STACK_OFFSET_Y = 18;
@@ -179,7 +180,7 @@ const state = {
   accountMenuOpen: false,
   downloadSpeedByGameId: new Map(),
   downloadsSectionCollapsed: false,
-  recentCompletedDownloadsByGameId: new Map(),
+  recentCompletedDownloadsByGameId: [],
   authChecking: false,
   authBusy: false,
   authConfigured: true,
@@ -216,6 +217,9 @@ const state = {
   view: "store",
   lastNonDetailView: "store",
   storeFilter: "popular",
+  storeAdvancedFiltersOpen: false,
+  storeModeFilter: "all",
+  storeGenreFilter: "all",
   introPlayed: false,
   realtimeSyncStarted: false,
   autoUpdateRealtimeSyncStarted: false,
@@ -722,7 +726,7 @@ async function handleAccountMenuAction(action) {
     state.searchOpen = false;
     syncSearchVisibility();
     renderAll();
-    setStatus("Abrindo Store...");
+    setStatus("Abrindo Jogos...");
     return;
   }
 
@@ -2031,6 +2035,144 @@ function getGenres(game) {
   return ["Action", "Adventure"];
 }
 
+function getGameGenreFilterEntries(game) {
+  const rawValues = [];
+  if (Array.isArray(game?.genres)) {
+    rawValues.push(...game.genres);
+  }
+  if (Array.isArray(game?.tags)) {
+    rawValues.push(...game.tags);
+  }
+  if (typeof game?.genre === "string") {
+    rawValues.push(game.genre);
+  }
+  if (typeof game?.tags === "string") {
+    rawValues.push(...String(game.tags).split(","));
+  }
+  if (typeof game?.category === "string") {
+    rawValues.push(game.category);
+  }
+  if (Array.isArray(game?.categories)) {
+    rawValues.push(...game.categories);
+  }
+
+  const entries = [];
+  const used = new Set();
+  for (const rawValue of rawValues) {
+    const label = String(rawValue || "").trim();
+    if (!label) continue;
+    const value = normalizeSearchText(label);
+    if (!value || used.has(value)) continue;
+    used.add(value);
+    entries.push({ value, label });
+  }
+  return entries;
+}
+
+function getStoreGenreFilterOptions() {
+  const optionsByValue = new Map();
+  for (const game of state.games) {
+    const entries = getGameGenreFilterEntries(game);
+    const sourceEntries = entries.length > 0 ? entries : getGenres(game).map((genre) => ({ label: genre }));
+    for (const entry of sourceEntries) {
+      const label = String(entry?.label || "").trim();
+      if (!label) continue;
+      const value = String(entry?.value || normalizeSearchText(label)).trim();
+      if (!value || optionsByValue.has(value)) continue;
+      optionsByValue.set(value, label);
+    }
+  }
+
+  return [...optionsByValue.entries()]
+    .map(([value, label]) => ({ value, label }))
+    .sort((a, b) => a.label.localeCompare(b.label, "pt-BR", { sensitivity: "base" }));
+}
+
+function getGameModeFlags(game) {
+  const parts = [
+    game?.mode,
+    game?.playMode,
+    game?.gameMode,
+    game?.playerMode,
+    game?.description,
+    game?.longDescription,
+    ...(Array.isArray(game?.genres) ? game.genres : []),
+    ...(Array.isArray(game?.tags) ? game.tags : [])
+  ]
+    .map((entry) => normalizeSearchText(entry))
+    .filter(Boolean);
+  const sourceText = parts.join(" ");
+
+  const multiplayerKeywords = [
+    "multiplayer",
+    "multi player",
+    "co op",
+    "coop",
+    "cooperative",
+    "co operative",
+    "online coop",
+    "online co op",
+    "pvp",
+    "mmo",
+    "squad",
+    "players",
+    "up to"
+  ];
+  const soloKeywords = [
+    "solo",
+    "single player",
+    "singleplayer",
+    "um jogador",
+    "campanha",
+    "campaign",
+    "story mode",
+    "offline"
+  ];
+
+  let hasMultiplayer = multiplayerKeywords.some((keyword) => sourceText.includes(keyword));
+  let hasSolo = soloKeywords.some((keyword) => sourceText.includes(keyword));
+
+  const maxPlayers = Number(
+    game?.maxPlayers ?? game?.max_players ?? game?.playersMax ?? game?.playerCountMax ?? game?.player_count_max ?? 0
+  );
+  const minPlayers = Number(
+    game?.minPlayers ?? game?.min_players ?? game?.playersMin ?? game?.playerCountMin ?? game?.player_count_min ?? 0
+  );
+  if (Number.isFinite(maxPlayers) && maxPlayers > 1) {
+    hasMultiplayer = true;
+  }
+  if (Number.isFinite(maxPlayers) && maxPlayers === 1) {
+    hasSolo = true;
+  }
+  if (Number.isFinite(minPlayers) && minPlayers === 1 && !hasMultiplayer) {
+    hasSolo = true;
+  }
+
+  return { hasMultiplayer, hasSolo };
+}
+
+function hasStoreAdvancedFiltersActive() {
+  return state.storeModeFilter !== "all" || state.storeGenreFilter !== "all";
+}
+
+function applyStoreAdvancedFilters(games) {
+  let filtered = [...games];
+
+  if (state.storeModeFilter === "multiplayer") {
+    filtered = filtered.filter((game) => getGameModeFlags(game).hasMultiplayer);
+  } else if (state.storeModeFilter === "solo") {
+    filtered = filtered.filter((game) => getGameModeFlags(game).hasSolo);
+  }
+
+  if (state.storeGenreFilter !== "all") {
+    filtered = filtered.filter((game) =>
+      getGameGenreFilterEntries(game).some((entry) => String(entry.value || "").trim() === state.storeGenreFilter)
+    );
+  }
+
+  return filtered;
+}
+
 function parseYoutubeStartSeconds(value) {
   const raw = String(value || "").trim().toLowerCase();
   if (!raw) return 0;
@@ -2333,22 +2475,6 @@ function toCompactSearchText(value) {
   return String(value || "").replace(/\s+/g, "");
 }
 
-function isSubsequenceMatch(needle, haystack) {
-  const query = String(needle || "");
-  const source = String(haystack || "");
-  if (!query || !source) return false;
-  if (query.length > source.length) return false;
-
-  let queryIndex = 0;
-  for (let i = 0; i < source.length && queryIndex < query.length; i += 1) {
-    if (source[i] === query[queryIndex]) {
-      queryIndex += 1;
-    }
-  }
-
-  return queryIndex === query.length;
-}
-
 function isEditDistanceWithin(sourceRaw, targetRaw, maxDistance) {
   const source = String(sourceRaw || "");
   const target = String(targetRaw || "");
@@ -2441,14 +2567,6 @@ function doesSearchTokenMatchIndex(queryTokenRaw, searchIndex) {
     return true;
   }
 
-  if (queryCompact.length >= 2 && isSubsequenceMatch(queryCompact, searchIndex.compactText)) {
-    return true;
-  }
-
-  if (queryCollapsed.length >= 2 && isSubsequenceMatch(queryCollapsed, searchIndex.compactCollapsed)) {
-    return true;
-  }
-
   if (queryForDistance.length < 3) {
     return false;
   }
@@ -2486,9 +2604,9 @@ function isGameMatchingSmartSearch(game, rawQuery) {
 
   const queryTokens = normalizedQuery.split(" ").filter(Boolean);
   const longTokens = queryTokens.filter((token) => token.length >= 2);
+  const allTokensMatch = longTokens.every((token) => doesSearchTokenMatchIndex(token, searchIndex));
 
   if (longTokens.length > 1) {
-    const allTokensMatch = longTokens.every((token) => doesSearchTokenMatchIndex(token, searchIndex));
     if (allTokensMatch) return true;
   }
 
@@ -2510,7 +2628,11 @@ function isGameMatchingSmartSearch(game, rawQuery) {
     return doesSearchTokenMatchIndex(longTokens[0], searchIndex);
   }
 
-  return longTokens.some((token) => doesSearchTokenMatchIndex(token, searchIndex));
+  if (longTokens.length > 1) {
+    return allTokensMatch;
+  }
+
+  return false;
 }
 
 function getSearchFilteredGames(games) {
@@ -2526,6 +2648,8 @@ function getStoreGames() {
     games = games.filter((game) => game.installed || isInLibrary(game.id));
   }
 
+  games = applyStoreAdvancedFilters(games);
+
   if (state.storeFilter === "top") {
     games.sort((a, b) => {
       const scoreA = Number(Boolean(a.installed)) + Number(Boolean(isInLibrary(a.id)));
@@ -2539,6 +2663,10 @@ function getStoreGames() {
 }
 
 function getLibraryGames() {
+  return getLibraryGamesBySearchMode(true);
+}
+
+function getLibraryGamesBySearchMode(applySearch = true) {
   const libraryIds = new Set([...state.libraryGameIds]);
   const result = [];
   for (const gameId of libraryIds) {
@@ -2546,20 +2674,20 @@ function getLibraryGames() {
     if (game) result.push(game);
   }
 
-  const searched = getSearchFilteredGames(result);
-  searched.sort((a, b) => {
+  const games = applySearch ? getSearchFilteredGames(result) : [...result];
+  games.sort((a, b) => {
     if (Boolean(b.installed) !== Boolean(a.installed)) {
       return Number(Boolean(b.installed)) - Number(Boolean(a.installed));
     }
     return String(a.name || "").localeCompare(String(b.name || ""), "pt-BR", { sensitivity: "base" });
   });
 
-  return searched;
+  return games;
 }
 
 function updateHeaderForView() {
   if (state.view === "store") {
-    if (state.storeFilter === "popular") viewTitle.textContent = "Store";
+    if (state.storeFilter === "popular") viewTitle.textContent = "Jogos";
     if (state.storeFilter === "downloaded") viewTitle.textContent = "Most Downloaded";
     if (state.storeFilter === "top") viewTitle.textContent = "Top Rated";
     return;
@@ -2617,6 +2745,9 @@ function setView(nextView) {
   if (nextView !== "library") {
     closeLibraryCardMenu();
   }
+  if (nextView !== "store") {
+    state.storeAdvancedFiltersOpen = false;
+  }
   document.body.classList.toggle("view-details", nextView === "details");
   document.body.classList.toggle("view-downloads", nextView === "downloads");
 
@@ -2650,7 +2781,7 @@ function getStoreShelfTitle() {
 
 function getStoreCardKind(game) {
   const value = String(game.storeType || game.productType || game.storeKind || game.cardKind || "").trim();
-  return value || "Jogo base";
+  return value || "WPlay Games - Gratuito";
 }
 
 function getStoreFeatureTag(game) {
@@ -2810,53 +2941,135 @@ function getActiveDownloadEntries() {
 
 function pruneRecentCompletedDownloads() {
   const now = Date.now();
-  for (const [gameId, meta] of state.recentCompletedDownloadsByGameId.entries()) {
+  const sourceEntries = Array.isArray(state.recentCompletedDownloadsByGameId)
+    ? state.recentCompletedDownloadsByGameId
+    : [];
+  const nextEntries = [];
+
+  for (const meta of sourceEntries) {
+    const gameId = String(meta?.gameId || "").trim();
     const completedAt = Number(meta?.completedAt || 0);
+    if (!gameId) {
+      continue;
+    }
     if (!Number.isFinite(completedAt) || completedAt <= 0) {
-      state.recentCompletedDownloadsByGameId.delete(gameId);
       continue;
     }
     if (now - completedAt > RECENT_COMPLETED_DOWNLOAD_TTL_MS) {
-      state.recentCompletedDownloadsByGameId.delete(gameId);
       continue;
     }
 
     const game = getGameById(gameId);
-    if (!game || !game.installed) {
-      state.recentCompletedDownloadsByGameId.delete(gameId);
+    const fallbackName = String(meta?.name || "").trim();
+    if (!game && !fallbackName) {
+      continue;
+    }
+
+    nextEntries.push({
+      gameId,
+      completedAt,
+      name: fallbackName,
+      cardImageUrl: String(meta?.cardImageUrl || "").trim(),
+      bannerUrl: String(meta?.bannerUrl || "").trim(),
+      imageUrl: String(meta?.imageUrl || "").trim()
+    });
+  }
+
+  nextEntries.sort((a, b) => b.completedAt - a.completedAt);
+  const dedupedEntries = [];
+  const seenGameIds = new Set();
+  for (const entry of nextEntries) {
+    if (seenGameIds.has(entry.gameId)) {
+      continue;
+    }
+    seenGameIds.add(entry.gameId);
+    dedupedEntries.push(entry);
+    if (dedupedEntries.length >= RECENT_COMPLETED_DOWNLOAD_MAX_ITEMS) {
+      break;
     }
   }
+
+  state.recentCompletedDownloadsByGameId = dedupedEntries;
 }
 
 function rememberRecentCompletedDownload(gameId) {
-  if (!gameId) return;
-  state.recentCompletedDownloadsByGameId.set(gameId, {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) return;
+
+  const game = getGameById(normalizedGameId);
+  const nextEntry = {
+    gameId: normalizedGameId,
+    name: game?.name ? String(game.name || "").trim() : "",
+    cardImageUrl: game ? String(getCardImage(game) || "").trim() : "",
+    bannerUrl: game ? String(game.bannerUrl || "").trim() : "",
+    imageUrl: game ? String(game.imageUrl || "").trim() : "",
     completedAt: Date.now()
-  });
+  };
+
+  const previousEntries = Array.isArray(state.recentCompletedDownloadsByGameId)
+    ? state.recentCompletedDownloadsByGameId
+    : [];
+  state.recentCompletedDownloadsByGameId = [
+    nextEntry,
+    ...previousEntries.filter((entry) => String(entry?.gameId || "").trim() !== normalizedGameId)
+  ];
   pruneRecentCompletedDownloads();
 }
 
 function clearRecentCompletedDownload(gameId) {
-  if (!gameId) return;
-  state.recentCompletedDownloadsByGameId.delete(gameId);
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) return;
+  const previousEntries = Array.isArray(state.recentCompletedDownloadsByGameId)
+    ? state.recentCompletedDownloadsByGameId
+    : [];
+  state.recentCompletedDownloadsByGameId = previousEntries.filter(
+    (entry) => String(entry?.gameId || "").trim() !== normalizedGameId
+  );
 }
 
 function getRecentCompletedDownloadEntries() {
   pruneRecentCompletedDownloads();
   const entries = [];
-  for (const [gameId, meta] of state.recentCompletedDownloadsByGameId.entries()) {
-    const game = getGameById(gameId);
-    if (!game || !game.installed) {
+  const sourceEntries = Array.isArray(state.recentCompletedDownloadsByGameId)
+    ? state.recentCompletedDownloadsByGameId
+    : [];
+
+  for (const meta of sourceEntries) {
+    const gameId = String(meta?.gameId || "").trim();
+    if (!gameId) {
       continue;
     }
-    const actionState = getActionState(game);
-    const action = actionState.action === "close" ? "close" : "play";
+
+    const game = getGameById(gameId);
+    const name = game?.name || String(meta?.name || "").trim() || "Jogo";
+    const cardImageUrl = game
+      ? getCardImage(game)
+      : String(meta?.cardImageUrl || meta?.bannerUrl || meta?.imageUrl || FALLBACK_CARD_IMAGE).trim() ||
+        FALLBACK_CARD_IMAGE;
+
+    let action = "details";
+    let actionLabel = "VER JOGO";
+    if (game) {
+      const actionState = getActionState(game);
+      if (actionState.action === "close" || actionState.action === "play") {
+        action = actionState.action;
+        actionLabel = actionState.action === "close" ? "PARAR JOGO" : "JOGAR";
+      }
+    }
+
+    const completedAt = Number(meta?.completedAt || 0);
+    if (!Number.isFinite(completedAt) || completedAt <= 0) {
+      continue;
+    }
+
     entries.push({
       gameId,
-      completedAt: Number(meta?.completedAt || 0),
+      completedAt,
       game,
+      name,
+      cardImageUrl,
       action,
-      actionLabel: action === "close" ? "PARAR JOGO" : "JOGAR"
+      actionLabel
     });
   }
   entries.sort((a, b) => b.completedAt - a.completedAt);
@@ -2970,12 +3183,11 @@ function renderDownloadsView() {
     .join("");
 
   const recentMarkup = recentCompletedDownloads
-    .map(({ gameId, game, action, actionLabel }) => {
-      const name = game?.name || "Jogo";
+    .map(({ gameId, name, cardImageUrl, action, actionLabel }) => {
       return `
         <article class="downloads-item is-completed" data-open-game="${escapeHtml(gameId)}" aria-label="Instalacao concluida de ${escapeHtml(name)}">
           <div class="downloads-item-cover-wrap">
-            <img class="downloads-item-cover" src="${escapeHtml(getCardImage(game || {}))}" alt="Capa de ${escapeHtml(name)}" loading="lazy" />
+            <img class="downloads-item-cover" src="${escapeHtml(cardImageUrl || FALLBACK_CARD_IMAGE)}" alt="Capa de ${escapeHtml(name)}" loading="lazy" />
           </div>
 
           <div class="downloads-item-content">
@@ -3020,7 +3232,14 @@ function renderDownloadsView() {
 }
 
 function renderStoreGrid() {
+  const genreOptions = getStoreGenreFilterOptions();
+  if (state.storeGenreFilter !== "all" && !genreOptions.some((entry) => entry.value === state.storeGenreFilter)) {
+    state.storeGenreFilter = "all";
+  }
   const games = getStoreGames();
+  const trimmedSearch = state.search.trim();
+  const hasSearch = trimmedSearch.length > 0;
+  const hasAdvancedFilters = hasStoreAdvancedFiltersActive();
   const currentStoreSignature = `${state.storeFilter}|${state.search.trim().toLowerCase()}|${games
     .map((game) => game.id)
     .join("|")}`;
@@ -3028,11 +3247,60 @@ function renderStoreGrid() {
   previousStoreGridSignature = currentStoreSignature;
 
   if (games.length === 0) {
-    storeGrid.innerHTML = `<div class="library-empty">Nenhum jogo encontrado.</div>`;
+    const safeQuery = escapeHtml(trimmedSearch);
+    const emptyMessage = hasSearch
+      ? `Nenhum jogo encontrado para "${safeQuery}".`
+      : "Nenhum jogo encontrado com os filtros atuais.";
+    const clearFiltersButton = hasAdvancedFilters
+      ? `<button class="store-empty-reset-btn" type="button" data-store-advanced-filter-reset="true">Limpar filtros</button>`
+      : "";
+    storeGrid.innerHTML = `
+      <div class="store-empty-state">
+        <p class="store-empty-text">${emptyMessage}</p>
+        ${clearFiltersButton}
+      </div>
+    `;
     return;
   }
 
   const shelfTitle = getStoreShelfTitle();
+  const modeOptions = [
+    { value: "all", label: "Todos" },
+    { value: "multiplayer", label: "Multiplayer" },
+    { value: "solo", label: "Solo" }
+  ];
+  const modeOptionsMarkup = modeOptions
+    .map((option) => {
+      const activeClass = state.storeModeFilter === option.value ? "is-active" : "";
+      return `
+        <button
+          class="store-shelf-filter-chip ${activeClass}"
+          type="button"
+          data-store-mode-filter="${escapeHtml(option.value)}"
+        >
+          ${escapeHtml(option.label)}
+        </button>
+      `;
+    })
+    .join("");
+  const genreOptionsMarkup = [{ value: "all", label: "Todos" }, ...genreOptions]
+    .map((option) => {
+      const activeClass = state.storeGenreFilter === option.value ? "is-active" : "";
+      return `
+        <button
+          class="store-shelf-filter-chip ${activeClass}"
+          type="button"
+          data-store-genre-filter="${escapeHtml(option.value)}"
+        >
+          ${escapeHtml(option.label)}
+        </button>
+      `;
+    })
+    .join("");
+  const filterMenuOpenClass = state.storeAdvancedFiltersOpen ? "is-open" : "";
+  const filterButtonOpenClass = state.storeAdvancedFiltersOpen ? "is-open" : "";
+  const filterButtonActiveClass = hasAdvancedFilters ? "is-active" : "";
+  const filterExpanded = state.storeAdvancedFiltersOpen ? "true" : "false";
   const cardsMarkup = games
     .map((game) => {
       const busyClass = isGameBusy(game.id) ? "is-busy" : "";
@@ -3116,6 +3384,47 @@ function renderStoreGrid() {
         </h2>
 
         <div class="store-shelf-nav" aria-label="Navegar pela vitrine">
+          <div class="store-shelf-filter-wrap" data-store-advanced-filter-wrap>
+            <button
+              class="store-shelf-nav-btn store-shelf-filter-btn ${filterButtonOpenClass} ${filterButtonActiveClass}"
+              type="button"
+              data-store-advanced-filter-toggle="true"
+              aria-label="Filtros avancados"
+              aria-haspopup="menu"
+              aria-expanded="${filterExpanded}"
+            >
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M5.5 7.5H18.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                <circle cx="9" cy="7.5" r="1.7" stroke="currentColor" stroke-width="1.5"></circle>
+                <path d="M5.5 12H18.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                <circle cx="15" cy="12" r="1.7" stroke="currentColor" stroke-width="1.5"></circle>
+                <path d="M5.5 16.5H18.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                <circle cx="11.5" cy="16.5" r="1.7" stroke="currentColor" stroke-width="1.5"></circle>
+              </svg>
+              <span class="store-shelf-filter-indicator ${hasAdvancedFilters ? "is-visible" : ""}" aria-hidden="true"></span>
+            </button>
+
+            <section class="store-shelf-filter-menu ${filterMenuOpenClass}" data-store-advanced-filter-menu role="menu">
+              <div class="store-shelf-filter-group">
+                <p class="store-shelf-filter-group-title">Modo</p>
+                <div class="store-shelf-filter-options">
+                  ${modeOptionsMarkup}
+                </div>
+              </div>
+
+              <div class="store-shelf-filter-group">
+                <p class="store-shelf-filter-group-title">Genero</p>
+                <div class="store-shelf-filter-options">
+                  ${genreOptionsMarkup}
+                </div>
+              </div>
+
+              <button class="store-shelf-filter-reset" type="button" data-store-advanced-filter-reset="true">
+                Limpar filtros
+              </button>
+            </section>
+          </div>
+
           <button class="store-shelf-nav-btn" type="button" data-store-scroll="-1" aria-label="Scroll para esquerda">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path d="M14.8 6.6L9.4 12L14.8 17.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
@@ -3226,7 +3535,10 @@ function toggleLibraryCardMenu(gameId) {
 }
 
 function renderLibraryGrid() {
+  const fullLibraryGames = getLibraryGamesBySearchMode(false);
   const libraryGames = getLibraryGames();
+  const trimmedSearch = state.search.trim();
+  const hasSearch = trimmedSearch.length > 0;
   const gameIds = new Set(libraryGames.map((game) => game.id));
   if (state.openLibraryMenuGameId && !gameIds.has(state.openLibraryMenuGameId)) {
     state.openLibraryMenuGameId = "";
@@ -3240,6 +3552,26 @@ function renderLibraryGrid() {
   previousLibraryGridSignature = currentLibrarySignature;
 
   if (libraryGames.length === 0) {
+    if (hasSearch && fullLibraryGames.length > 0) {
+      libraryGrid.classList.add("is-empty");
+      libraryGrid.innerHTML = `
+        <div class="library-empty-state">
+          <div class="library-empty-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M4.8 8.5C4.8 7.2 5.8 6.2 7.1 6.2H16.9C18.2 6.2 19.2 7.2 19.2 8.5V17.1C19.2 18.4 18.2 19.4 16.9 19.4H7.1C5.8 19.4 4.8 18.4 4.8 17.1V8.5Z" stroke="currentColor" stroke-width="1.7"></path>
+              <path d="M9.1 4.8H14.9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path>
+              <path d="M8.4 11.1H15.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+              <path d="M8.4 14.2H13.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
+            </svg>
+          </div>
+          <p class="library-empty-text">Nenhum jogo encontrado para "${escapeHtml(trimmedSearch)}".</p>
+          <button class="library-empty-btn" type="button" data-clear-search="true">Limpar busca</button>
+        </div>
+      `;
+      syncLibraryCardMenus();
+      return;
+    }
+
     libraryGrid.classList.add("is-empty");
     libraryGrid.innerHTML = `
       <div class="library-empty-state">
@@ -3252,7 +3584,7 @@ function renderLibraryGrid() {
           </svg>
         </div>
         <p class="library-empty-text">Sua biblioteca esta vazia. Clique em Add to Library ou Download Game.</p>
-        <button class="library-empty-btn" type="button" data-go-store="true">Ir para Store</button>
+        <button class="library-empty-btn" type="button" data-go-store="true">Ir para Jogos</button>
       </div>
     `;
     syncLibraryCardMenus();
@@ -3844,6 +4176,11 @@ function fireConfettiFromElement(element, strong = false) {
 }
 
 async function handleGameAction(gameId, action) {
+  if (action === "details") {
+    openDetails(gameId);
+    return;
+  }
+
   if (!state.authSession?.user?.id) {
     setAuthGateVisible(true);
     setAuthGateStatus("Entre com Steam para continuar.");
@@ -4229,6 +4566,10 @@ function installEventBindings() {
       if (state.accountMenuOpen) {
         setAccountMenuOpen(false);
       }
+      if (state.storeAdvancedFiltersOpen) {
+        state.storeAdvancedFiltersOpen = false;
+        renderStoreGrid();
+      }
       return;
     }
 
@@ -4236,6 +4577,11 @@ function installEventBindings() {
       if (!(searchWrap && searchWrap.contains(target))) {
         closeSearch(true);
       }
+    }
+
+    if (state.storeAdvancedFiltersOpen && !target.closest("[data-store-advanced-filter-wrap]")) {
+      state.storeAdvancedFiltersOpen = false;
+      renderStoreGrid();
     }
 
     if (state.notificationsOpen) {
@@ -4285,7 +4631,7 @@ function installEventBindings() {
         setNotificationsPanelOpen(false);
       }
       renderAll();
-      setStatus("Abrindo Store...");
+      setStatus("Abrindo Jogos...");
     });
   }
 
@@ -4337,6 +4683,49 @@ function installEventBindings() {
   }
 
   storeGrid.addEventListener("click", (event) => {
+    const advancedToggleButton = event.target.closest("[data-store-advanced-filter-toggle]");
+    if (advancedToggleButton) {
+      event.preventDefault();
+      state.storeAdvancedFiltersOpen = !state.storeAdvancedFiltersOpen;
+      renderStoreGrid();
+      return;
+    }
+
+    const modeFilterButton = event.target.closest("[data-store-mode-filter]");
+    if (modeFilterButton) {
+      event.preventDefault();
+      const nextMode = String(modeFilterButton.dataset.storeModeFilter || "all")
+        .trim()
+        .toLowerCase();
+      if (!["all", "multiplayer", "solo"].includes(nextMode)) {
+        return;
+      }
+      state.storeModeFilter = nextMode;
+      renderStoreGrid();
+      return;
+    }
+
+    const genreFilterButton = event.target.closest("[data-store-genre-filter]");
+    if (genreFilterButton) {
+      event.preventDefault();
+      const nextGenre = String(genreFilterButton.dataset.storeGenreFilter || "all")
+        .trim()
+        .toLowerCase();
+      state.storeGenreFilter = nextGenre || "all";
+      renderStoreGrid();
+      return;
+    }
+
+    const clearAdvancedFiltersButton = event.target.closest("[data-store-advanced-filter-reset]");
+    if (clearAdvancedFiltersButton) {
+      event.preventDefault();
+      state.storeModeFilter = "all";
+      state.storeGenreFilter = "all";
+      state.storeAdvancedFiltersOpen = false;
+      renderStoreGrid();
+      return;
+    }
+
     const scrollButton = event.target.closest("[data-store-scroll]");
     if (scrollButton) {
       const direction = Number(scrollButton.dataset.storeScroll || 0);
@@ -4362,13 +4751,19 @@ function installEventBindings() {
   });
 
   libraryGrid.addEventListener("click", async (event) => {
+    const clearSearchButton = event.target.closest("[data-clear-search]");
+    if (clearSearchButton) {
+      closeSearch(true);
+      return;
+    }
+
     const goStoreButton = event.target.closest("[data-go-store]");
     if (goStoreButton) {
       setView("store");
       state.searchOpen = false;
       syncSearchVisibility();
       renderAll();
-      setStatus("Abrindo Store...");
+      setStatus("Abrindo Jogos...");
       return;
     }
 
@@ -4637,6 +5032,12 @@ function installEventBindings() {
 
     if (event.key === "Escape" && state.notificationsOpen) {
       setNotificationsPanelOpen(false);
+      return;
+    }
+
+    if (event.key === "Escape" && state.storeAdvancedFiltersOpen) {
+      state.storeAdvancedFiltersOpen = false;
+      renderStoreGrid();
       return;
     }
 

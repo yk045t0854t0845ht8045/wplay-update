@@ -349,14 +349,8 @@ function Test-HttpUrlExists {
 
 function Get-ExpectedReleaseAssetNames {
   param([Parameter(Mandatory = $true)][string]$Tag)
-  $version = [string]$Tag
-  if ($version.StartsWith("v")) {
-    $version = $version.Substring(1)
-  }
   $exeCandidates = @(
-    "WPlaySetup-$version.exe",
-    "WPlaySetup.exe",
-    "WPlay-$version-x64.exe"
+    "WPlaySetup.exe"
   ) | Where-Object { $_ } | Select-Object -Unique
   $blockmapCandidates = @($exeCandidates | ForEach-Object { "$_.blockmap" } | Where-Object { $_ } | Select-Object -Unique)
   $exeName = if ($exeCandidates.Count -gt 0) { [string]$exeCandidates[0] } else { "WPlaySetup.exe" }
@@ -408,22 +402,8 @@ function Test-ReleaseAssetsReady {
     $blockmapCandidates = @([string]$expected.Blockmap)
   }
   $hasManifest = $assetNames -contains $expected.Manifest
-  $hasExe = (
-    $assetNames |
-      Where-Object { $_ -match '\.exe$' -or ($exeCandidates -contains $_) } |
-      Select-Object -First 1
-  ) -ne $null
-  if (-not $hasExe) {
-    $hasExe = ($assetNames | Where-Object { $exeCandidates -contains $_ } | Select-Object -First 1) -ne $null
-  }
-  $hasBlockmap = (
-    $assetNames |
-      Where-Object { $_ -match '\.blockmap$' -or ($blockmapCandidates -contains $_) } |
-      Select-Object -First 1
-  ) -ne $null
-  if (-not $hasBlockmap) {
-    $hasBlockmap = ($assetNames | Where-Object { $blockmapCandidates -contains $_ } | Select-Object -First 1) -ne $null
-  }
+  $hasExe = ($assetNames | Where-Object { $exeCandidates -contains $_ } | Select-Object -First 1) -ne $null
+  $hasBlockmap = ($assetNames | Where-Object { $blockmapCandidates -contains $_ } | Select-Object -First 1) -ne $null
 
   $baseDownloadUrl = "https://github.com/$Owner/$Repo/releases/download/$Tag"
   $manifestUrl = "$baseDownloadUrl/$($expected.Manifest)"
@@ -788,14 +768,25 @@ try {
   } elseif ($release.assets) {
     $assetNames = @($release.assets | ForEach-Object { [string]$_.name } | Where-Object { $_ } | Select-Object -Unique)
   }
+  $expectedAssets = Get-ExpectedReleaseAssetNames -Tag $tag
+  $exeCandidates = @($expectedAssets.ExeCandidates | ForEach-Object { [string]$_ } | Where-Object { $_ } | Select-Object -Unique)
+  $blockmapCandidates = @($expectedAssets.BlockmapCandidates | ForEach-Object { [string]$_ } | Where-Object { $_ } | Select-Object -Unique)
+  if ($exeCandidates.Count -eq 0) {
+    $exeCandidates = @([string]$expectedAssets.Exe)
+  }
+  if ($blockmapCandidates.Count -eq 0) {
+    $blockmapCandidates = @([string]$expectedAssets.Blockmap)
+  }
+
   $hasManifest = $assetNames -contains "latest.yml"
-  $hasExe = ($assetNames | Where-Object { $_ -match '\.exe$' } | Select-Object -First 1) -ne $null
-  $hasBlockmap = ($assetNames | Where-Object { $_ -match '\.blockmap$' } | Select-Object -First 1) -ne $null
+  $hasExe = ($assetNames | Where-Object { $exeCandidates -contains $_ } | Select-Object -First 1) -ne $null
+  $hasBlockmap = ($assetNames | Where-Object { $blockmapCandidates -contains $_ } | Select-Object -First 1) -ne $null
   if (-not ($hasManifest -and $hasExe -and $hasBlockmap)) {
     $assetListText = if ($assetNames.Count -gt 0) { $assetNames -join ", " } else { "(nenhum asset visivel ainda)" }
     $runSummary = Get-LatestWorkflowRunSummary -Owner $owner -Repo $repo -ApiToken $apiToken
     $suffix = if ($runSummary) { " | $runSummary" } else { "" }
-    throw "Release $tag criada, mas assets incompletos. Esperado: latest.yml + .exe + .blockmap. Encontrado: $assetListText$suffix"
+    $expectedText = "latest.yml + $($exeCandidates[0]) + $($blockmapCandidates[0])"
+    throw "Release $tag criada, mas assets incompletos. Esperado: $expectedText. Encontrado: $assetListText$suffix"
   }
 
   Write-Host ""

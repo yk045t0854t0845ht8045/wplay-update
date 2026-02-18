@@ -3,6 +3,9 @@ dist
 build/*
 !build/icon.ico
 !build/icon.png
+!build/installer.nsh
+!build/installerHeader.bmp
+!build/installerSidebar.bmp
 *.log
 config/auth.json
 config/updater.json

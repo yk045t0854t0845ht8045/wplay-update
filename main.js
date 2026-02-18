@@ -90,6 +90,7 @@ const INSTALL_ROOT_NAME = "wyzer_games";
 const TEMP_DIR_NAME = "_wyzer_temp";
 const MANIFEST_FILE_NAME = ".wyzer_manifest.json";
 const INSTALL_SESSION_STATE_FILE_NAME = "launcher.active-installs.json";
+const CATALOG_SIZE_CACHE_FILE_NAME = "launcher.catalog-size-cache.json";
 const RUNTIME_CONFIG_FILE_NAME = "launcher.runtime.json";
 const AUTH_CONFIG_FILE_NAME = "auth.json";
 const AUTH_CONFIG_EXAMPLE_FILE_NAME = "auth.example.json";
@@ -210,6 +211,7 @@ let autoUpdateFeedValidationCompleted = false;
 let autoUpdateFeedValidationInFlight = null;
 let autoUpdateLastCheckOrigin = "";
 let autoUpdateLastRequestedAt = 0;
+let startupAutoUpdateFlowActive = false;
 let remoteCatalogInFlight = null;
 const remoteCatalogCache = {
   entries: null,
@@ -310,6 +312,9 @@ let catalogMonitorSourceConfigCache = {
 let catalogSizeSyncTimer = null;
 let catalogSizeSyncInFlight = null;
 const catalogSizeSyncStateByGameId = new Map();
+let catalogSizeCacheLoaded = false;
+let catalogSizeCachePersistQueue = Promise.resolve();
+let catalogSizeCachePersistTimer = null;
 
 function isElectronBinaryPath(executablePath = process.execPath) {
   const execName = path.basename(String(executablePath || "")).trim().toLowerCase();
@@ -514,6 +519,237 @@ function getInstallSessionStateFilePath() {
     return "";
   }
   return path.join(baseDir, INSTALL_SESSION_STATE_FILE_NAME);
+}
+
+function getCatalogSizeCachePath() {
+  const baseDir = resolveRuntimeStateDirectory();
+  if (!baseDir) {
+    return "";
+  }
+  return path.join(baseDir, CATALOG_SIZE_CACHE_FILE_NAME);
+}
+
+function normalizeCatalogSizeCacheRecord(rawRecord) {
+  if (!rawRecord || typeof rawRecord !== "object") {
+    return null;
+  }
+
+  const gameId = String(rawRecord.gameId || rawRecord.id || "").trim();
+  if (!gameId) {
+    return null;
+  }
+
+  const lastSizeBytes = parseSizeBytes(rawRecord.lastSizeBytes ?? rawRecord.sizeBytes);
+  if (lastSizeBytes <= 0) {
+    return null;
+  }
+
+  const rawSuccessAt = Number(rawRecord.lastSuccessAt || rawRecord.measuredAt || 0);
+  const lastSuccessAt = Number.isFinite(rawSuccessAt) && rawSuccessAt > 0 ? Math.floor(rawSuccessAt) : Date.now();
+  const rawAttemptAt = Number(rawRecord.lastAttemptAt || lastSuccessAt || 0);
+  const lastAttemptAt = Number.isFinite(rawAttemptAt) && rawAttemptAt > 0 ? Math.floor(rawAttemptAt) : lastSuccessAt;
+
+  return {
+    gameId,
+    lastAttemptAt,
+    lastSuccessAt,
+    lastSizeBytes
+  };
+}
+
+function readCatalogSizeCacheRecordsSync() {
+  const filePath = getCatalogSizeCachePath();
+  if (!filePath) {
+    return [];
+  }
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      return [];
+    }
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const records = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.records)
+        ? parsed.records
+        : Array.isArray(parsed?.entries)
+          ? parsed.entries
+          : [];
+    return records.map((record) => normalizeCatalogSizeCacheRecord(record)).filter(Boolean);
+  } catch (error) {
+    appendStartupLog(`[CATALOG_SIZE_CACHE_READ_ERROR] ${formatStartupErrorForLog(error)}`);
+    return [];
+  }
+}
+
+async function writeCatalogSizeCacheRecordsToDisk(records) {
+  const filePath = getCatalogSizeCachePath();
+  if (!filePath) {
+    return;
+  }
+
+  const normalizedRecords = Array.isArray(records)
+    ? records
+        .map((record) => normalizeCatalogSizeCacheRecord(record))
+        .filter(Boolean)
+        .sort((left, right) => Number(right.lastSuccessAt || 0) - Number(left.lastSuccessAt || 0))
+        .slice(0, 4000)
+    : [];
+
+  if (normalizedRecords.length === 0) {
+    await fsp.rm(filePath, { force: true }).catch(() => {});
+    return;
+  }
+
+  try {
+    await fsp.mkdir(path.dirname(filePath), { recursive: true });
+    const payload = {
+      updatedAt: new Date().toISOString(),
+      records: normalizedRecords
+    };
+    await fsp.writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
+  } catch (error) {
+    appendStartupLog(`[CATALOG_SIZE_CACHE_WRITE_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function flushCatalogSizeCacheSync() {
+  const filePath = getCatalogSizeCachePath();
+  if (!filePath) {
+    return;
+  }
+
+  const records = [...catalogSizeSyncStateByGameId.values()]
+    .map((record) => normalizeCatalogSizeCacheRecord(record))
+    .filter(Boolean)
+    .sort((left, right) => Number(right.lastSuccessAt || 0) - Number(left.lastSuccessAt || 0))
+    .slice(0, 4000);
+
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    if (records.length === 0) {
+      fs.rmSync(filePath, { force: true });
+      return;
+    }
+    const payload = {
+      updatedAt: new Date().toISOString(),
+      records
+    };
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf8");
+  } catch (error) {
+    appendStartupLog(`[CATALOG_SIZE_CACHE_FLUSH_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function queuePersistCatalogSizeCache() {
+  catalogSizeCachePersistQueue = catalogSizeCachePersistQueue
+    .catch(() => {})
+    .then(async () => {
+      await writeCatalogSizeCacheRecordsToDisk([...catalogSizeSyncStateByGameId.values()]);
+    });
+  return catalogSizeCachePersistQueue;
+}
+
+function schedulePersistCatalogSizeCache() {
+  if (catalogSizeCachePersistTimer) {
+    return;
+  }
+
+  catalogSizeCachePersistTimer = setTimeout(() => {
+    catalogSizeCachePersistTimer = null;
+    void queuePersistCatalogSizeCache();
+  }, 420);
+}
+
+function ensureCatalogSizeCacheLoadedSync() {
+  if (catalogSizeCacheLoaded) {
+    return;
+  }
+
+  catalogSizeCacheLoaded = true;
+  const records = readCatalogSizeCacheRecordsSync();
+  for (const record of records) {
+    const gameId = String(record?.gameId || "").trim();
+    const sizeBytes = parseSizeBytes(record?.lastSizeBytes);
+    if (!gameId || sizeBytes <= 0) {
+      continue;
+    }
+
+    const previous = catalogSizeSyncStateByGameId.get(gameId);
+    const previousSizeBytes = parseSizeBytes(previous?.lastSizeBytes);
+    if (previousSizeBytes >= sizeBytes) {
+      continue;
+    }
+
+    catalogSizeSyncStateByGameId.set(gameId, {
+      gameId,
+      lastAttemptAt: Math.max(Number(previous?.lastAttemptAt || 0), Number(record.lastAttemptAt || 0)),
+      lastSuccessAt: Math.max(Number(previous?.lastSuccessAt || 0), Number(record.lastSuccessAt || 0)),
+      lastSizeBytes: sizeBytes
+    });
+  }
+}
+
+function rememberCatalogSizeBytes(gameId, sizeBytes, options = {}) {
+  const normalizedGameId = String(gameId || "").trim();
+  const normalizedSizeBytes = parseSizeBytes(sizeBytes);
+  if (!normalizedGameId || normalizedSizeBytes <= 0) {
+    return 0;
+  }
+
+  ensureCatalogSizeCacheLoadedSync();
+
+  const now = Date.now();
+  const previous = catalogSizeSyncStateByGameId.get(normalizedGameId) || {
+    gameId: normalizedGameId,
+    lastAttemptAt: 0,
+    lastSuccessAt: 0,
+    lastSizeBytes: 0
+  };
+
+  const previousSizeBytes = parseSizeBytes(previous.lastSizeBytes);
+  const nextSizeBytes = Math.max(previousSizeBytes, normalizedSizeBytes);
+  const measuredAtRaw = Number(options.measuredAt || options.lastSuccessAt || now);
+  const measuredAt = Number.isFinite(measuredAtRaw) && measuredAtRaw > 0 ? Math.floor(measuredAtRaw) : now;
+
+  const nextState = {
+    ...previous,
+    gameId: normalizedGameId,
+    lastAttemptAt: Math.max(Number(previous.lastAttemptAt || 0), measuredAt),
+    lastSuccessAt: Math.max(Number(previous.lastSuccessAt || 0), measuredAt),
+    lastSizeBytes: nextSizeBytes
+  };
+
+  const changed =
+    nextSizeBytes !== previousSizeBytes ||
+    Number(nextState.lastSuccessAt || 0) !== Number(previous.lastSuccessAt || 0) ||
+    Number(nextState.lastAttemptAt || 0) !== Number(previous.lastAttemptAt || 0);
+
+  if (changed) {
+    catalogSizeSyncStateByGameId.set(normalizedGameId, nextState);
+    if (options.persist !== false) {
+      schedulePersistCatalogSizeCache();
+    }
+  }
+
+  if (Array.isArray(remoteCatalogCache.entries)) {
+    for (const entry of remoteCatalogCache.entries) {
+      if (!entry || String(entry.id || "").trim() !== normalizedGameId) {
+        continue;
+      }
+      const entrySizeBytes = parseSizeBytes(entry.sizeBytes);
+      if (entrySizeBytes < nextSizeBytes) {
+        entry.sizeBytes = nextSizeBytes;
+        const currentSizeLabel = String(entry.size || "").trim();
+        if (!currentSizeLabel || currentSizeLabel.toLowerCase() === "tamanho nao informado") {
+          entry.size = formatBytesShort(nextSizeBytes);
+        }
+      }
+    }
+  }
+
+  return nextSizeBytes;
 }
 
 function normalizePathForComparison(value) {
@@ -1572,6 +1808,57 @@ async function waitForStartupUpdateBlockingStateToFinish(maxWaitMs = AUTO_UPDATE
   }
 
   return !isAutoUpdateStartupBlockingStatus(autoUpdateState.status);
+}
+
+async function runStartupAutoUpdateFlowWithSplash() {
+  if (!shouldUseStartupUpdateSplash()) {
+    return;
+  }
+
+  startupAutoUpdateFlowActive = true;
+  appendStartupLog("[AUTO_UPDATE] fluxo de update no startup iniciado (modo splash).");
+  createUpdateSplashWindow();
+
+  try {
+    setAutoUpdateState({
+      status: "checking",
+      message: "Verificando atualizacoes...",
+      error: "",
+      progressPercent: 0,
+      bytesPerSecond: 0,
+      transferredBytes: 0,
+      totalBytes: 0
+    });
+
+    const startupCheckTask = checkForLauncherUpdate("startup").catch((error) => {
+      appendStartupLog(`[AUTO_UPDATE] startup check falhou: ${formatStartupErrorForLog(error)}`);
+      return getPublicAutoUpdateState();
+    });
+
+    const startupCheckResult = await Promise.race([
+      startupCheckTask.then(() => "completed"),
+      new Promise((resolve) =>
+        setTimeout(() => resolve("timeout"), AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS)
+      )
+    ]);
+
+    if (startupCheckResult === "timeout") {
+      appendStartupLog(
+        `[AUTO_UPDATE] startup check excedeu ${AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS}ms; aguardando estado bloqueante finalizar.`
+      );
+    }
+
+    const startupBlockingFinished = await waitForStartupUpdateBlockingStateToFinish();
+    if (!startupBlockingFinished) {
+      appendStartupLog(
+        `[AUTO_UPDATE] splash de startup atingiu timeout (${AUTO_UPDATE_SPLASH_MAX_WAIT_MS}ms); abrindo janela principal.`
+      );
+    }
+  } catch (error) {
+    appendStartupLog(`[AUTO_UPDATE] fluxo startup com splash falhou: ${formatStartupErrorForLog(error)}`);
+  } finally {
+    startupAutoUpdateFlowActive = false;
+  }
 }
 
 function createWindow() {
@@ -3427,8 +3714,45 @@ function wireAutoUpdaterEventsOnce() {
 
   autoUpdater.on("update-downloaded", (info) => {
     const latestVersion = String(info?.version || "").trim();
-    const shouldAutoRestartAfterStartup = false;
-    appendStartupLog(`[AUTO_UPDATE] update-downloaded version=${latestVersion || "unknown"} origin=${autoUpdateLastCheckOrigin}`);
+    const shouldAutoRestartAfterStartup = Boolean(
+      autoUpdateConfigSnapshot?.autoRestartOnStartup &&
+        (startupAutoUpdateFlowActive || autoUpdateLastCheckOrigin === "startup")
+    );
+    appendStartupLog(
+      `[AUTO_UPDATE] update-downloaded version=${latestVersion || "unknown"} origin=${autoUpdateLastCheckOrigin} autoRestart=${shouldAutoRestartAfterStartup}`
+    );
+
+    if (shouldAutoRestartAfterStartup) {
+      setAutoUpdateState({
+        status: "installing",
+        latestVersion,
+        updateDownloaded: true,
+        progressPercent: 100,
+        message: "Atualizacao pronta. Reiniciando launcher para aplicar automaticamente...",
+        error: "",
+        lastCheckedAt: new Date().toISOString()
+      });
+
+      setTimeout(() => {
+        try {
+          appQuitRequested = true;
+          autoUpdater.quitAndInstall(true, true);
+        } catch (error) {
+          appQuitRequested = false;
+          appendStartupLog(`[AUTO_UPDATE] quitAndInstall falhou: ${formatStartupErrorForLog(error)}`);
+          setAutoUpdateState({
+            status: "downloaded",
+            latestVersion,
+            updateDownloaded: true,
+            progressPercent: 100,
+            message: "Atualizacao pronta. Clique no icone verde para reiniciar e aplicar.",
+            error: formatAutoUpdateError(error),
+            lastCheckedAt: new Date().toISOString()
+          });
+        }
+      }, 900);
+      return;
+    }
 
     setAutoUpdateState({
       status: "downloaded",
@@ -3439,21 +3763,6 @@ function wireAutoUpdaterEventsOnce() {
       error: "",
       lastCheckedAt: new Date().toISOString()
     });
-
-    if (shouldAutoRestartAfterStartup) {
-      setTimeout(() => {
-        try {
-          autoUpdater.quitAndInstall(true, true);
-        } catch (error) {
-          setAutoUpdateState({
-            status: "error",
-            message: "Falha ao reiniciar launcher para aplicar atualizacao.",
-            error: formatAutoUpdateError(error),
-            lastCheckedAt: new Date().toISOString()
-          });
-        }
-      }, 1100);
-    }
   });
 
   autoUpdater.on("update-not-available", (info) => {
@@ -5801,6 +6110,12 @@ async function syncCatalogGameSizeBytesToSupabase(gameId, sizeBytes, sourceConfi
   if (!normalizedGameId || normalizedSizeBytes <= 0) {
     return false;
   }
+
+  rememberCatalogSizeBytes(normalizedGameId, normalizedSizeBytes, {
+    measuredAt: Date.now(),
+    persist: true
+  });
+
   if (!sourceConfig || sourceConfig.useRemote !== true) {
     return false;
   }
@@ -5828,10 +6143,11 @@ async function syncCatalogGameSizeBytesToSupabase(gameId, sizeBytes, sourceConfi
         {
           headers: {
             ...buildCatalogSupabaseHeaders(authConfig, schemaName),
-            Prefer: "return=minimal"
+            Prefer: "return=representation"
           },
           params: {
-            id: `eq.${normalizedGameId}`
+            id: `eq.${normalizedGameId}`,
+            select: "id,size_bytes"
           },
           timeout: 15_000,
           validateStatus: (status) => status >= 200 && status < 500
@@ -5843,24 +6159,30 @@ async function syncCatalogGameSizeBytesToSupabase(gameId, sizeBytes, sourceConfi
         return false;
       }
       if (response.status >= 400) {
+        const errorMessage = String(response?.data?.message || response?.data?.hint || "").trim();
         appendStartupLog(
-          `[CATALOG_SIZE_SYNC] falha HTTP ${response.status} ao atualizar size_bytes de ${normalizedGameId}.`
+          `[CATALOG_SIZE_SYNC] falha HTTP ${response.status} ao atualizar size_bytes de ${normalizedGameId}. ${errorMessage}`
+        );
+        if (response.status === 401 || response.status === 403) {
+          appendStartupLog(
+            "[CATALOG_SIZE_SYNC] permissao negada no Supabase (RLS). Habilite UPDATE em size_bytes para sincronizar globalmente."
+          );
+        }
+        return false;
+      }
+
+      const updatedRows = Array.isArray(response.data) ? response.data : [];
+      if (updatedRows.length === 0) {
+        appendStartupLog(
+          `[CATALOG_SIZE_SYNC] nenhuma linha atualizada para ${normalizedGameId}. Verifique id e politicas RLS no Supabase.`
         );
         return false;
       }
 
-      if (Array.isArray(remoteCatalogCache.entries)) {
-        for (const entry of remoteCatalogCache.entries) {
-          if (!entry || String(entry.id || "").trim() !== normalizedGameId) {
-            continue;
-          }
-          entry.sizeBytes = normalizedSizeBytes;
-          const currentSizeLabel = String(entry.size || "").trim();
-          if (!currentSizeLabel || currentSizeLabel.toLowerCase() === "tamanho nao informado") {
-            entry.size = formatBytesShort(normalizedSizeBytes);
-          }
-        }
-      }
+      rememberCatalogSizeBytes(normalizedGameId, normalizedSizeBytes, {
+        measuredAt: Date.now(),
+        persist: true
+      });
 
       return true;
     } catch (error) {
@@ -6012,6 +6334,7 @@ function getCatalogSizeSyncMaxProbesPerCycle() {
 }
 
 function getCatalogSizeSyncState(gameId) {
+  ensureCatalogSizeCacheLoadedSync();
   const key = String(gameId || "").trim();
   if (!key) {
     return null;
@@ -6095,13 +6418,14 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
     const { games, settings } = await readCatalogBundle();
     const sourceConfig = resolveCatalogSourceConfig(settings);
     if (!sourceConfig.useRemote) {
-      return { updatedCount: 0, resolvedCount: 0, checkedCount: 0 };
+      return { updatedCount: 0, resolvedCount: 0, retriedKnownCount: 0, checkedCount: 0 };
     }
 
     const maxProbes = Math.max(1, getCatalogSizeSyncMaxProbesPerCycle());
     const now = Date.now();
     let updatedCount = 0;
     let resolvedCount = 0;
+    let retriedKnownCount = 0;
     let checkedCount = 0;
 
     for (const game of Array.isArray(games) ? games : []) {
@@ -6111,7 +6435,14 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
       if (!game || !game.hasDownloadSource) {
         continue;
       }
-      if (parseSizeBytes(game.sizeBytes) > 0) {
+
+      const sourceCatalogSizeBytes = parseSizeBytes(game.catalogSizeBytes);
+      const sourceCatalogSizeBytesField = parseSizeBytes(game.catalogSizeBytesField);
+      const knownSizeBytes = parseSizeBytes(game.sizeBytes);
+      if (sourceCatalogSizeBytes > 0) {
+        rememberCatalogSizeBytes(game.id, sourceCatalogSizeBytes, { measuredAt: now, persist: true });
+      }
+      if (sourceCatalogSizeBytesField > 0) {
         continue;
       }
 
@@ -6123,6 +6454,15 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
       checkedCount += 1;
       setCatalogSizeSyncState(game.id, { lastAttemptAt: now });
 
+      if (knownSizeBytes > 0) {
+        const syncedKnownSize = await syncCatalogGameSizeBytesToSupabase(game.id, knownSizeBytes, sourceConfig);
+        if (syncedKnownSize) {
+          updatedCount += 1;
+          retriedKnownCount += 1;
+        }
+        continue;
+      }
+
       const resolvedBytes = await resolveCatalogGameSizeBytesByProbe(game);
       if (resolvedBytes <= 0) {
         continue;
@@ -6133,6 +6473,7 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
         lastSuccessAt: now,
         lastSizeBytes: resolvedBytes
       });
+      rememberCatalogSizeBytes(game.id, resolvedBytes, { measuredAt: now, persist: true });
       resolvedCount += 1;
 
       const synced = await syncCatalogGameSizeBytesToSupabase(game.id, resolvedBytes, sourceConfig);
@@ -6141,29 +6482,30 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
       }
     }
 
-    if (resolvedCount > 0) {
+    if (resolvedCount > 0 || retriedKnownCount > 0) {
       invalidateRemoteCatalogCache("catalog-size-sync");
       emitCatalogChangedHint({
         reason: "size-bytes-sync",
         updatedCount,
-        resolvedCount
+        resolvedCount,
+        retriedKnownCount
       });
       if (updatedCount > 0) {
         appendStartupLog(
-          `[CATALOG_SIZE_SYNC] size_bytes resolvido para ${resolvedCount} jogo(s); persistido no Supabase: ${updatedCount}.`
+          `[CATALOG_SIZE_SYNC] size_bytes novos=${resolvedCount}, reenviados-do-cache=${retriedKnownCount}, persistidos no Supabase=${updatedCount}.`
         );
       } else {
         appendStartupLog(
-          `[CATALOG_SIZE_SYNC] size resolvido localmente para ${resolvedCount} jogo(s), sem persistencia remota (verificar RLS/update).`
+          `[CATALOG_SIZE_SYNC] size local pronto (novos=${resolvedCount}, cache=${retriedKnownCount}), sem persistencia remota (verificar RLS/update).`
         );
       }
     }
 
-    return { updatedCount, resolvedCount, checkedCount };
+    return { updatedCount, resolvedCount, retriedKnownCount, checkedCount };
   })()
     .catch((error) => {
       appendStartupLog(`[CATALOG_SIZE_SYNC_ERROR] ${formatStartupErrorForLog(error)}`);
-      return { updatedCount: 0, resolvedCount: 0, checkedCount: 0 };
+      return { updatedCount: 0, resolvedCount: 0, retriedKnownCount: 0, checkedCount: 0 };
     })
     .finally(() => {
       catalogSizeSyncInFlight = null;
@@ -6321,7 +6663,14 @@ async function readCatalogBundle() {
       const installDirName = String(entry.installDirName || name).trim() || name;
       const section = String(entry.section || "Jogos gratis").trim() || "Jogos gratis";
       const sizeLabel = String(entry.size || "").trim();
-      const sizeBytes = parseSizeBytes(entry.sizeBytes) || parseSizeBytes(sizeLabel) || getKnownCatalogSizeBytes(id);
+      const catalogSizeBytesField = parseSizeBytes(entry.sizeBytes);
+      const catalogSizeBytesLabel = parseSizeBytes(sizeLabel);
+      const catalogSizeBytes = catalogSizeBytesField || catalogSizeBytesLabel;
+      if (catalogSizeBytes > 0) {
+        rememberCatalogSizeBytes(id, catalogSizeBytes, { persist: true });
+      }
+      const knownSizeBytes = getKnownCatalogSizeBytes(id);
+      const sizeBytes = catalogSizeBytes || knownSizeBytes;
       const size = sizeLabel || (sizeBytes > 0 ? formatBytesShort(sizeBytes) : "Tamanho nao informado");
       const comingSoon = entry.comingSoon === true || !hasDownloadSource;
       const description = String(entry.description || "Sem descricao.");
@@ -6378,6 +6727,8 @@ async function readCatalogBundle() {
         hasDownloadSource,
         size,
         sizeBytes,
+        catalogSizeBytes,
+        catalogSizeBytesField,
         archiveType: normalizeArchiveType(entry.archiveType),
         archivePassword,
         checksumSha256,
@@ -8465,7 +8816,14 @@ async function installGame(gameId) {
         installSizeCache.set(sizeCacheKey, { sizeBytes: installedSizeBytes, measuredAt: sizeMeasuredAt });
       }
 
-      if (catalogSizeBytes > 0 && parseSizeBytes(game.sizeBytes) <= 0) {
+      if (catalogSizeBytes > 0) {
+        rememberCatalogSizeBytes(game.id, catalogSizeBytes, {
+          measuredAt: sizeMeasuredAt,
+          persist: true
+        });
+      }
+
+      if (catalogSizeBytes > 0 && parseSizeBytes(game.catalogSizeBytesField) <= 0) {
         const sourceConfig = resolveCatalogSourceConfig(settings);
         void syncCatalogGameSizeBytesToSupabase(game.id, catalogSizeBytes, sourceConfig);
       }
@@ -8615,6 +8973,11 @@ async function getRunningProcessNamesLower() {
   runningProcessCache.fetchedAt = now;
   runningProcessCache.namesLower = names;
   return names;
+}
+
+function invalidateRunningProcessCache() {
+  runningProcessCache.fetchedAt = 0;
+  runningProcessCache.namesLower = new Set();
 }
 
 async function terminateWindowsProcessByImageName(imageName) {
@@ -9171,6 +9534,10 @@ async function getGamesWithStatus(rawOptions = {}) {
         });
         if (installedSnapshot.sizeBytes > 0) {
           resolvedSizeBytes = installedSnapshot.sizeBytes;
+          rememberCatalogSizeBytes(game.id, installedSnapshot.sizeBytes, {
+            measuredAt: installedSnapshot.measuredAt,
+            persist: true
+          });
         }
 
         const manifestSizeBytes = parseSizeBytes(manifest?.installedSizeBytes);
@@ -9363,6 +9730,9 @@ async function playGame(gameId) {
     throw new Error("Jogo nao encontrado no catalogo.");
   }
 
+  // Force fresh process snapshot to avoid stale "alreadyRunning" right after closing a game.
+  invalidateRunningProcessCache();
+
   const installRoot = getCurrentInstallRoot(settings);
   const installDir = getGameInstallDir(game, installRoot);
   if (!(await isDirectory(installDir))) {
@@ -9405,8 +9775,7 @@ async function playGame(gameId) {
     throw new Error(launchResult);
   }
 
-  runningProcessCache.fetchedAt = 0;
-  runningProcessCache.namesLower = new Set();
+  invalidateRunningProcessCache();
 
   void publishSocialGameLaunchActivity({
     gameId: game.id,
@@ -9428,8 +9797,7 @@ async function closeGame(gameId) {
   const installRootCandidates = getInstallRootCandidates(settings);
   const closedProcesses = await tryTerminateGameProcesses(game, installRootCandidates).catch(() => []);
   if (closedProcesses.length > 0) {
-    runningProcessCache.fetchedAt = 0;
-    runningProcessCache.namesLower = new Set();
+    invalidateRunningProcessCache();
     return {
       ok: true,
       alreadyStopped: false,
@@ -9505,6 +9873,7 @@ if (!hasSingleInstanceLock) {
     appendStartupLog("[APP] whenReady iniciado.");
     await ensurePersistedAuthConfigFile().catch(() => {});
     await ensurePersistedUpdaterConfigFile().catch(() => {});
+    ensureCatalogSizeCacheLoadedSync();
     ensureSocialActivityBackgroundMonitorStarted();
     ensureCatalogRealtimeMonitorStarted();
     ensureCatalogSizeSyncMonitorStarted();
@@ -9533,6 +9902,15 @@ if (!hasSingleInstanceLock) {
         autoUpdateConfigSnapshot?.updateOnLaunch &&
         !runtimeStartupHealthState.safeMode
     );
+    const shouldRunStartupUpdateSplash = shouldCheckUpdateOnLaunch && shouldUseStartupUpdateSplash();
+
+    if (shouldRunStartupUpdateSplash) {
+      await runStartupAutoUpdateFlowWithSplash();
+      if (appQuitRequested) {
+        appendStartupLog("[AUTO_UPDATE] reinicio solicitado apos update de startup; bootstrap encerrado.");
+        return;
+      }
+    }
 
     try {
       createWindow();
@@ -9551,7 +9929,7 @@ if (!hasSingleInstanceLock) {
       return;
     }
 
-    if (shouldCheckUpdateOnLaunch) {
+    if (shouldCheckUpdateOnLaunch && !shouldRunStartupUpdateSplash) {
       const updateWarmupDelayMs = resolveHostLowSpecProfile() ? 7_000 : 2_500;
       setTimeout(() => {
         appendStartupLog("[AUTO_UPDATE] verificacao inicial em background.");
@@ -9640,6 +10018,11 @@ if (!hasSingleInstanceLock) {
     stopSocialActivityBackgroundMonitor();
     stopCatalogRealtimeMonitor();
     stopCatalogSizeSyncMonitor();
+    if (catalogSizeCachePersistTimer) {
+      clearTimeout(catalogSizeCachePersistTimer);
+      catalogSizeCachePersistTimer = null;
+    }
+    flushCatalogSizeCacheSync();
     flushActiveInstallSessionsSync();
     destroyUpdateSplashWindow();
     destroyTray();
