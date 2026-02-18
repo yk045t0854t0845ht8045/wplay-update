@@ -38,6 +38,10 @@ Exemplo no catalogo:
 
 Execute `docs/SUPABASE_SQL_CATALOGO_JOGOS.sql` (a versao atual ja inclui `steam_app_id`).
 
+Para notificacao social de amigos Steam iniciando jogo pelo launcher, execute tambem:
+
+- `docs/SUPABASE_SQL_AMIZADE_STEAM.sql`
+
 ## 5) Testar
 
 1. Abra o launcher.
@@ -47,3 +51,11 @@ Execute `docs/SUPABASE_SQL_CATALOGO_JOGOS.sql` (a versao atual ja inclui `steam_
    - `AVG. ACHIEV.` passa a mostrar % de conquistas do usuario no jogo.
 
 Se o jogo nao tiver `steamAppId`, o launcher mostra os valores padrao do catalogo.
+
+## 6) Notificacao entre amigos Steam (social)
+
+- O launcher puxa sua lista de amigos via Steam Web API.
+- Quando um amigo (que tambem usa este launcher) inicia um jogo pelo launcher, voce recebe:
+  - toast desktop de "iniciou jogo";
+  - notificacao dentro do app (historico).
+- Se a lista de amigos do perfil Steam estiver privada, a sincronizacao social pode vir vazia.

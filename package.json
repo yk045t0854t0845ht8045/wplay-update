@@ -19,25 +19,33 @@
   "dependencies": {
     "7zip-bin": "^5.2.0",
     "axios": "^1.7.9",
+    "electron-updater": "^6.6.2"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
     "canvas-confetti": "^1.9.4",
-    "electron-updater": "^6.6.2",
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8",
     "gh": "^2.8.9",
     "motion": "^12.34.0",
     "next": "^16.1.6",
     "notyf": "^3.10.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
-  },
-  "devDependencies": {
-    "autoprefixer": "^10.4.20",
-    "electron": "^32.3.3",
-    "electron-builder": "^25.1.8",
     "postcss": "^8.4.49",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "rcedit": "^5.0.2",
     "tailwindcss": "^3.4.17"
   },
   "build": {
     "appId": "com.wplay.app",
     "productName": "WPlay",
+    "compression": "maximum",
+    "asar": true,
+    "removePackageScripts": true,
+    "electronLanguages": [
+      "en-US",
+      "pt-BR"
+    ],
     "protocols": [
       {
         "name": "WPlay Auth",
@@ -52,7 +60,8 @@
       "out/**/*",
       "renderer/**/*",
       "config/**/*",
-      "package.json"
+      "package.json",
+      "scripts/electron-builder-after-pack.js"
     ],
     "asarUnpack": [
       "node_modules/7zip-bin/**",
@@ -76,7 +85,8 @@
         "to": "jogos"
       }
     ],
-    "icon": "build/icon.png",
+    "icon": "build/icon.ico",
+    "afterPack": "scripts/electron-builder-after-pack.js",
     "win": {
       "icon": "build/icon.ico",
       "signAndEditExecutable": false,
@@ -88,12 +98,13 @@
           ]
         }
       ],
-      "artifactName": "WPlaySetup.${ext}"
+      "artifactName": "WPlaySetup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",

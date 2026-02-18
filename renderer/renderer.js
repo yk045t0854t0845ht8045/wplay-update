@@ -15,7 +15,6 @@ const notificationsPanel = document.getElementById("notificationsPanel");
 const notificationsList = document.getElementById("notificationsList");
 const notificationsEmpty = document.getElementById("notificationsEmpty");
 const notificationsClearBtn = document.getElementById("notificationsClearBtn");
-const gameStartFeed = document.getElementById("gameStartFeed");
 const windowMinBtn = document.getElementById("windowMinBtn");
 const windowMaxBtn = document.getElementById("windowMaxBtn");
 const windowCloseBtn = document.getElementById("windowCloseBtn");
@@ -89,18 +88,25 @@ const authRetryBtn = document.getElementById("authRetryBtn");
 const FALLBACK_CARD_IMAGE = "https://placehold.co/640x360/0f0f0f/f2f2f2?text=Game";
 const FALLBACK_BANNER_IMAGE = "https://placehold.co/1280x720/0f0f0f/f2f2f2?text=Game+Banner";
 const LIBRARY_STORAGE_KEY = "wyzer.launcher.library.v1";
-const REALTIME_SYNC_INTERVAL_MS = 5000;
+const hardwareConcurrency = Number(window?.navigator?.hardwareConcurrency || 0);
+const deviceMemoryGb = Number(window?.navigator?.deviceMemory || 0);
+const LOW_SPEC_DEVICE =
+  (Number.isFinite(hardwareConcurrency) && hardwareConcurrency > 0 && hardwareConcurrency <= 4) ||
+  (Number.isFinite(deviceMemoryGb) && deviceMemoryGb > 0 && deviceMemoryGb <= 8);
+const REALTIME_SYNC_INTERVAL_MS = LOW_SPEC_DEVICE ? 12 * 1000 : 7 * 1000;
 const RECENT_COMPLETED_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
 const NOTIFICATION_HISTORY_LIMIT = 15;
 const NOTYF_STACK_VISIBLE = 5;
 const NOTYF_STACK_OFFSET_Y = 18;
 const PROGRESS_RENDER_MIN_INTERVAL_MS = 120;
-const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = 15 * 1000;
-const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = 60 * 1000;
+const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 60 * 1000 : 30 * 1000;
+const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = LOW_SPEC_DEVICE ? 5 * 60 * 1000 : 3 * 60 * 1000;
 const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = 8 * 1000;
+const FRIEND_ACTIVITY_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 20 * 1000 : 12 * 1000;
+const FRIEND_ACTIVITY_CURSOR_BACKTRACK_MS = 18 * 1000;
+const FRIEND_ACTIVITY_MAX_EVENT_AGE_MS = 30 * 60 * 1000;
+const FRIEND_ACTIVITY_SEEN_LIMIT = 320;
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
-const GAME_START_TOAST_DURATION_MS = 4300;
-const GAME_START_TOAST_MAX_ITEMS = 4;
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
   minute: "2-digit"
@@ -108,6 +114,11 @@ const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
 const notificationDateFormatter = new Intl.DateTimeFormat("pt-BR", {
   day: "2-digit",
   month: "2-digit"
+});
+const releaseDateStatFormatter = new Intl.DateTimeFormat("pt-BR", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric"
 });
 
 const motionApi = window.Motion || null;
@@ -180,18 +191,27 @@ const state = {
     transferredBytes: 0,
     totalBytes: 0,
     lastCheckedAt: "",
-    error: ""
+    error: "",
+    runtimeChannel: "",
+    runtimePackaged: false,
+    runtimeExec: "",
+    runtimeDebug: "",
+    startupSafeMode: false,
+    startupSafeModeReason: "",
+    preferLatestFullInstaller: true
   },
   updateRestartModalOpen: false,
   steamRequiredModalOpen: false,
   lastAutoUpdateNotifiedVersion: "",
+  startupSafeModeNoticeShown: false,
   appBootstrapped: false,
   view: "store",
   lastNonDetailView: "store",
   storeFilter: "popular",
   introPlayed: false,
   realtimeSyncStarted: false,
-  autoUpdateRealtimeSyncStarted: false
+  autoUpdateRealtimeSyncStarted: false,
+  friendActivityRealtimeSyncStarted: false
 };
 
 let refreshGamesInFlight = null;
@@ -205,6 +225,12 @@ let previousStoreGridSignature = "";
 let previousLibraryGridSignature = "";
 let autoUpdateBackgroundCheckTimer = null;
 let notificationRemoteQueue = Promise.resolve();
+let friendActivityPollTimer = null;
+let friendActivityPollInFlight = null;
+let friendActivityCursorIso = "";
+let friendActivitySeenIds = new Set();
+let friendActivityCurrentUserId = "";
+let friendActivityLifecycleBindingsReady = false;
 
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
@@ -226,88 +252,212 @@ function getAuthAvatarUrl(session) {
   return String(session?.user?.avatarUrl || "").trim();
 }
 
-function getAuthInitials(session) {
-  const displayName = getAuthDisplayName(session) || "Jogador";
-  return (
-    displayName
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((part) => part[0]?.toUpperCase() || "")
-      .join("") || "JG"
-  );
-}
+async function showDesktopGameStartedToastPayload(payload = {}) {
+  if (typeof window.launcherApi?.showGameStartedToast !== "function") {
+    return;
+  }
 
-function trimToastNodes(limit = GAME_START_TOAST_MAX_ITEMS) {
-  if (!gameStartFeed) return;
-  while (gameStartFeed.children.length > limit) {
-    const lastChild = gameStartFeed.lastElementChild;
-    if (!lastChild) break;
-    lastChild.remove();
+  try {
+    await window.launcherApi.showGameStartedToast(payload);
+  } catch (_error) {
+    // Non-blocking UI event; ignore desktop toast failures.
   }
 }
 
-function showGameStartedFloatingToast(gameName) {
-  if (!gameStartFeed) return;
+async function showDesktopGameStartedToast(gameName) {
   const safeGameName = String(gameName || "").trim() || "Jogo";
-  const session = state.authSession;
-  const nickname = getAuthDisplayName(session) || "Jogador";
-  const avatarUrl = getAuthAvatarUrl(session);
+  await showDesktopGameStartedToastPayload({
+    nickname: getAuthDisplayName(state.authSession) || "Jogador",
+    avatarUrl: getAuthAvatarUrl(state.authSession),
+    gameName: safeGameName
+  });
+}
 
-  const toast = document.createElement("article");
-  toast.className = "game-start-toast";
+function resetFriendActivityRealtimeState() {
+  if (friendActivityPollTimer) {
+    window.clearInterval(friendActivityPollTimer);
+    friendActivityPollTimer = null;
+  }
+  state.friendActivityRealtimeSyncStarted = false;
+  friendActivityPollInFlight = null;
+  friendActivityCursorIso = "";
+  friendActivitySeenIds = new Set();
+  friendActivityCurrentUserId = "";
+}
 
-  const avatarWrap = document.createElement("span");
-  avatarWrap.className = "game-start-avatar";
-  if (avatarUrl) {
-    const avatarImage = document.createElement("img");
-    avatarImage.src = avatarUrl;
-    avatarImage.alt = "";
-    avatarImage.loading = "lazy";
-    avatarWrap.appendChild(avatarImage);
-  } else {
-    const fallbackInitials = document.createElement("span");
-    fallbackInitials.className = "game-start-avatar-fallback";
-    fallbackInitials.textContent = getAuthInitials(session);
-    avatarWrap.appendChild(fallbackInitials);
+function rememberFriendActivitySeenId(activityId) {
+  const normalized = String(activityId || "").trim();
+  if (!normalized) return;
+  friendActivitySeenIds.add(normalized);
+  if (friendActivitySeenIds.size > FRIEND_ACTIVITY_SEEN_LIMIT) {
+    const overflow = friendActivitySeenIds.size - FRIEND_ACTIVITY_SEEN_LIMIT;
+    if (overflow <= 0) return;
+    const iterator = friendActivitySeenIds.values();
+    for (let index = 0; index < overflow; index += 1) {
+      const next = iterator.next();
+      if (next.done) break;
+      friendActivitySeenIds.delete(next.value);
+    }
+  }
+}
+
+function setFriendActivityCursorFromTimestamp(timestampMs) {
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return;
+  const currentMs = Date.parse(friendActivityCursorIso || "");
+  if (Number.isFinite(currentMs) && currentMs >= timestampMs) {
+    return;
+  }
+  friendActivityCursorIso = new Date(timestampMs).toISOString();
+}
+
+function getFriendActivityPollSinceIso() {
+  if (!friendActivityCursorIso) {
+    return "";
+  }
+  const cursorMs = Date.parse(friendActivityCursorIso);
+  if (!Number.isFinite(cursorMs)) {
+    return "";
+  }
+  return new Date(Math.max(0, cursorMs - FRIEND_ACTIVITY_CURSOR_BACKTRACK_MS)).toISOString();
+}
+
+function normalizeFriendActivityEntry(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const id = String(entry.id || "").trim();
+  const actorSteamId = String(entry.actorSteamId || "").trim();
+  const actorDisplayName = String(entry.actorDisplayName || "").trim() || "Jogador";
+  const actorAvatarUrl = String(entry.actorAvatarUrl || "").trim();
+  const gameId = String(entry.gameId || "").trim();
+  const gameName = String(entry.gameName || "").trim() || "Jogo";
+  const createdAtRaw = String(entry.createdAt || "").trim();
+  const createdAtMs = Date.parse(createdAtRaw);
+  const createdAt = Number.isFinite(createdAtMs) ? new Date(createdAtMs).toISOString() : new Date().toISOString();
+  return {
+    id,
+    actorSteamId,
+    actorDisplayName,
+    actorAvatarUrl,
+    gameId,
+    gameName,
+    createdAt,
+    createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : Date.now()
+  };
+}
+
+function handleFriendActivityNotification(activity) {
+  const safeName = String(activity.actorDisplayName || "").trim() || "Jogador";
+  const safeGame = String(activity.gameName || "").trim() || "Jogo";
+  notify("success", `${safeName} iniciou`, safeGame, 4600);
+  void showDesktopGameStartedToastPayload({
+    nickname: safeName,
+    avatarUrl: String(activity.actorAvatarUrl || "").trim(),
+    gameName: safeGame
+  });
+}
+
+async function pollFriendGameActivities(silent = true) {
+  const pollSessionUserId = String(state.authSession?.user?.id || "").trim();
+  if (!pollSessionUserId) {
+    return;
+  }
+  if (typeof window.launcherApi?.socialListFriendGameActivities !== "function") {
+    return;
+  }
+  if (friendActivityPollInFlight) {
+    return friendActivityPollInFlight;
   }
 
-  const body = document.createElement("div");
-  body.className = "game-start-body";
+  friendActivityPollInFlight = (async () => {
+    const sinceIso = getFriendActivityPollSinceIso();
+    const payload = await window.launcherApi.socialListFriendGameActivities({
+      since: sinceIso,
+      limit: 48
+    });
+    if (pollSessionUserId !== String(state.authSession?.user?.id || "").trim()) {
+      return;
+    }
+    const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+    if (!entries.length) {
+      return;
+    }
 
-  const title = document.createElement("strong");
-  title.className = "game-start-title";
-  title.textContent = nickname;
+    const now = Date.now();
+    const normalized = entries
+      .map((entry) => normalizeFriendActivityEntry(entry))
+      .filter(Boolean)
+      .sort((left, right) => left.createdAtMs - right.createdAtMs);
 
-  const subtitle = document.createElement("span");
-  subtitle.className = "game-start-subtitle";
-  subtitle.textContent = "iniciou";
+    for (const activity of normalized) {
+      if (!activity.id || friendActivitySeenIds.has(activity.id)) {
+        continue;
+      }
+      rememberFriendActivitySeenId(activity.id);
+      setFriendActivityCursorFromTimestamp(activity.createdAtMs);
 
-  const game = document.createElement("span");
-  game.className = "game-start-game";
-  game.textContent = safeGameName;
+      if (!activity.actorSteamId || activity.actorSteamId === pollSessionUserId) {
+        continue;
+      }
 
-  body.appendChild(title);
-  body.appendChild(subtitle);
-  body.appendChild(game);
+      if (now - activity.createdAtMs > FRIEND_ACTIVITY_MAX_EVENT_AGE_MS) {
+        continue;
+      }
 
-  toast.appendChild(avatarWrap);
-  toast.appendChild(body);
-  gameStartFeed.prepend(toast);
-  trimToastNodes();
+      handleFriendActivityNotification(activity);
+    }
+  })()
+    .catch((error) => {
+      if (!silent) {
+        setStatus(`Falha ao sincronizar atividade de amigos: ${error?.message || "erro desconhecido"}`, true);
+      }
+    })
+    .finally(() => {
+      friendActivityPollInFlight = null;
+    });
 
-  window.requestAnimationFrame(() => {
-    toast.classList.add("is-visible");
-  });
+  return friendActivityPollInFlight;
+}
 
-  const closeToast = () => {
-    toast.classList.add("is-leaving");
-    window.setTimeout(() => {
-      toast.remove();
-    }, 260);
-  };
+function startFriendActivityRealtimeSync() {
+  const currentUserId = String(state.authSession?.user?.id || "").trim();
+  if (!currentUserId) {
+    return;
+  }
 
-  window.setTimeout(closeToast, GAME_START_TOAST_DURATION_MS);
+  if (friendActivityCurrentUserId && friendActivityCurrentUserId !== currentUserId) {
+    resetFriendActivityRealtimeState();
+  }
+  friendActivityCurrentUserId = currentUserId;
+
+  if (!friendActivityCursorIso) {
+    friendActivityCursorIso = new Date(Date.now() - 3000).toISOString();
+  }
+
+  if (!state.friendActivityRealtimeSyncStarted) {
+    state.friendActivityRealtimeSyncStarted = true;
+    if (friendActivityPollTimer) {
+      window.clearInterval(friendActivityPollTimer);
+    }
+    friendActivityPollTimer = window.setInterval(() => {
+      if (document.hidden) {
+        return;
+      }
+      void pollFriendGameActivities(true);
+    }, FRIEND_ACTIVITY_POLL_INTERVAL_MS);
+  }
+
+  if (!friendActivityLifecycleBindingsReady) {
+    friendActivityLifecycleBindingsReady = true;
+    window.addEventListener("focus", () => {
+      void pollFriendGameActivities(true);
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        void pollFriendGameActivities(true);
+      }
+    });
+  }
+
+  void pollFriendGameActivities(false);
 }
 
 function setAuthGateVisible(visible) {
@@ -435,6 +585,7 @@ async function ensureAuthenticated() {
 
     if (!state.authConfigured) {
       resetNotificationState();
+      resetFriendActivityRealtimeState();
       setAuthGateVisible(true);
       setAuthGateStatus(
         "Steam nao configurado. Preencha steamWebApiKey em config/auth.json antes de entrar.",
@@ -449,6 +600,7 @@ async function ensureAuthenticated() {
 
     if (!authenticated) {
       resetNotificationState();
+      resetFriendActivityRealtimeState();
       setAuthGateVisible(true);
       setAuthGateStatus("Entre com Steam para continuar.");
       if (authRetryBtn) {
@@ -460,10 +612,12 @@ async function ensureAuthenticated() {
 
     setAuthGateVisible(false);
     await syncNotificationHistoryFromSupabase();
+    startFriendActivityRealtimeSync();
     await bootstrapLauncherDataIfNeeded();
   } catch (error) {
     state.authSession = null;
     resetNotificationState();
+    resetFriendActivityRealtimeState();
     renderTopAccountButton();
     setAuthGateVisible(true);
     setAuthGateStatus(error?.message || "Falha ao verificar login com Steam.", true);
@@ -499,11 +653,13 @@ async function startSteamLogin() {
     renderTopAccountButton();
     setAuthGateVisible(false);
     await syncNotificationHistoryFromSupabase();
+    startFriendActivityRealtimeSync();
     notify("success", "Login concluido", `Bem-vindo, ${getAuthDisplayName(result.session) || "jogador"}!`);
     await bootstrapLauncherDataIfNeeded();
   } catch (error) {
     state.authSession = null;
     resetNotificationState();
+    resetFriendActivityRealtimeState();
     renderTopAccountButton();
     setAuthGateVisible(true);
     setAuthGateStatus(error?.message || "Falha ao autenticar com Steam.", true);
@@ -530,6 +686,7 @@ async function logoutSteamSession() {
     }
     state.authSession = null;
     resetNotificationState();
+    resetFriendActivityRealtimeState();
     renderTopAccountButton();
     setAuthGateVisible(true);
     setAuthGateStatus("Sessao encerrada. Entre com Steam para continuar.");
@@ -1138,7 +1295,14 @@ function normalizeAutoUpdatePayload(payload) {
     transferredBytes: Number(source.transferredBytes) || 0,
     totalBytes: Number(source.totalBytes) || 0,
     lastCheckedAt: String(source.lastCheckedAt || "").trim(),
-    error: String(source.error || "").trim()
+    error: String(source.error || "").trim(),
+    runtimeChannel: String(source.runtimeChannel || "").trim().toLowerCase(),
+    runtimePackaged: Boolean(source.runtimePackaged),
+    runtimeExec: String(source.runtimeExec || "").trim(),
+    runtimeDebug: String(source.runtimeDebug || "").trim(),
+    startupSafeMode: Boolean(source.startupSafeMode),
+    startupSafeModeReason: String(source.startupSafeModeReason || "").trim(),
+    preferLatestFullInstaller: source.preferLatestFullInstaller !== false
   };
 }
 
@@ -1284,6 +1448,16 @@ function applyAutoUpdatePayload(payload, fromEvent = false) {
   state.autoUpdate = next;
   renderAutoUpdateButton();
 
+  if (next.startupSafeMode && !state.startupSafeModeNoticeShown) {
+    state.startupSafeModeNoticeShown = true;
+    const reasonSuffix = next.startupSafeModeReason ? ` (${next.startupSafeModeReason})` : "";
+    notify(
+      "info",
+      "Inicializacao protegida",
+      `Modo de seguranca ativo para estabilidade neste boot${reasonSuffix}.`
+    );
+  }
+
   if (!next.updateDownloaded && state.updateRestartModalOpen) {
     setUpdateRestartModalOpen(false);
   }
@@ -1384,6 +1558,9 @@ function startAutoUpdateRealtimeSync() {
 
   window.setInterval(() => {
     void (async () => {
+      if (document.hidden) {
+        return;
+      }
       try {
         const payload = await window.launcherApi.autoUpdateGetState();
         applyAutoUpdatePayload(payload, false);
@@ -1394,6 +1571,9 @@ function startAutoUpdateRealtimeSync() {
   }, AUTO_UPDATE_STATE_POLL_INTERVAL_MS);
 
   window.setInterval(() => {
+    if (document.hidden) {
+      return;
+    }
     void checkForAutoUpdateInBackground();
   }, AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS);
 
@@ -1552,101 +1732,32 @@ function shortPath(pathValue) {
   return `${value.slice(0, 3)}...${value.slice(-25)}`;
 }
 
-function getFirstStatValue(game, keys) {
-  for (const key of keys) {
-    const value = game?.[key];
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
+function formatGameSizeStat(game) {
+  const sizeBytes = Number(game?.sizeBytes);
+  if (Number.isFinite(sizeBytes) && sizeBytes > 0) {
+    const sizeGb = sizeBytes / (1024 ** 3);
+    return `${sizeGb.toFixed(sizeGb >= 10 ? 1 : 2).replace(/\.?0+$/, "")} GB`;
   }
-  return "";
+
+  const fallbackText = String(game?.size || "").trim();
+  if (!fallbackText || fallbackText.toLowerCase() === "tamanho nao informado") {
+    return "--";
+  }
+  return fallbackText;
 }
 
-function formatPlayTimeFromHours(hours) {
-  const safeHours = Number(hours);
-  if (!Number.isFinite(safeHours)) {
-    return "--";
-  }
-  if (safeHours === 0) {
-    return "0m";
-  }
-  if (safeHours < 0) {
+function formatReleaseDateStat(game) {
+  const releaseDateRaw = String(game?.releaseDate || "").trim();
+  if (!releaseDateRaw) {
     return "--";
   }
 
-  if (safeHours < 1) {
-    const minutes = Math.round(safeHours * 60);
-    return minutes > 0 ? `${minutes}m` : "--";
+  const parsed = Date.parse(releaseDateRaw);
+  if (!Number.isFinite(parsed)) {
+    return releaseDateRaw;
   }
 
-  const decimals = safeHours >= 10 ? 0 : 1;
-  return `${safeHours.toFixed(decimals).replace(/\.0$/, "")}h`;
-}
-
-function formatPlayTimeStat(game) {
-  const raw = getFirstStatValue(game, [
-    "userPlayTimeHours",
-    "averagePlayTime",
-    "avgPlayTime",
-    "playTime",
-    "avgPlayTimeHours",
-    "playTimeHours"
-  ]);
-
-  if (typeof raw === "number") {
-    return formatPlayTimeFromHours(raw);
-  }
-
-  const text = String(raw || "").trim();
-  if (!text) {
-    return "--";
-  }
-
-  const numeric = Number(text.replace(",", "."));
-  if (Number.isFinite(numeric) && numeric > 0) {
-    return formatPlayTimeFromHours(numeric);
-  }
-
-  return text;
-}
-
-function formatAchievementStat(game) {
-  const raw = getFirstStatValue(game, [
-    "userAchievementPercent",
-    "averageAchievement",
-    "avgAchievement",
-    "achievementRate",
-    "avgAchievementPercent",
-    "achievementPercent",
-    "completionRate"
-  ]);
-
-  if (typeof raw === "number") {
-    const percent = raw <= 1 ? raw * 100 : raw;
-    const clamped = Math.max(0, Math.min(100, percent));
-    return `${Math.round(clamped)}%`;
-  }
-
-  const text = String(raw || "").trim();
-  if (!text) {
-    return "--";
-  }
-
-  if (text.includes("%")) {
-    return text;
-  }
-
-  const numeric = Number(text.replace(",", "."));
-  if (Number.isFinite(numeric)) {
-    const percent = numeric <= 1 ? numeric * 100 : numeric;
-    const clamped = Math.max(0, Math.min(100, percent));
-    return `${Math.round(clamped)}%`;
-  }
-
-  return text;
+  return releaseDateStatFormatter.format(new Date(parsed));
 }
 
 function getInstallRootDisplayPath() {
@@ -3399,8 +3510,8 @@ function renderDetails(game) {
   detailsLongDescription.textContent = longDescription;
   detailsHeroBackdrop.style.backgroundImage = `url('${escapeCssUrl(getBannerImage(game))}')`;
 
-  detailsStatPlayTime.textContent = formatPlayTimeStat(game);
-  detailsStatAchievement.textContent = formatAchievementStat(game);
+  detailsStatPlayTime.textContent = formatGameSizeStat(game);
+  detailsStatAchievement.textContent = formatReleaseDateStat(game);
 
   const logoUrl = getLogoImage(game);
   if (logoUrl) {
@@ -3466,16 +3577,35 @@ function closeDetails() {
   setView(state.lastNonDetailView || "store");
 }
 
-async function refreshGames() {
+async function refreshGames(options = {}) {
   if (refreshGamesInFlight) {
     return refreshGamesInFlight;
   }
 
   refreshGamesInFlight = (async () => {
+    const hasExplicitLightweight = Object.prototype.hasOwnProperty.call(options, "lightweight");
+    const hasExplicitRunningState = Object.prototype.hasOwnProperty.call(options, "includeRunningState");
+    const hasExplicitSteamStats = Object.prototype.hasOwnProperty.call(options, "includeSteamStats");
+    const hasExplicitInstalledSize = Object.prototype.hasOwnProperty.call(options, "measureInstalledSize");
+    const normalizedLightweight = hasExplicitLightweight ? options.lightweight === true : undefined;
+    const requestPayload = {};
+    if (hasExplicitLightweight) {
+      requestPayload.lightweight = normalizedLightweight;
+    }
+    if (hasExplicitRunningState) {
+      requestPayload.includeRunningState = options.includeRunningState !== false;
+    }
+    if (hasExplicitSteamStats) {
+      requestPayload.includeSteamStats = options.includeSteamStats === true && normalizedLightweight !== true;
+    }
+    if (hasExplicitInstalledSize) {
+      requestPayload.measureInstalledSize = options.measureInstalledSize === true && normalizedLightweight !== true;
+    }
+
     const previousInstalledById = new Map(state.games.map((game) => [game.id, Boolean(game.installed)]));
     const selectedGameId = state.selectedGameId;
 
-    state.games = await window.launcherApi.getGames();
+    state.games = await window.launcherApi.getGames(requestPayload);
     syncLibraryWithInstalled();
     pruneRecentCompletedDownloads();
     renderAll();
@@ -3562,7 +3692,7 @@ async function handleGameAction(gameId, action) {
         }
         setStatus(`Jogo iniciado: ${game.name}.`);
         notify("success", "Jogo iniciado", `${game.name} foi aberto com sucesso.`);
-        showGameStartedFloatingToast(game.name);
+        void showDesktopGameStartedToast(game.name);
       } catch (error) {
         await refreshGames();
         const refreshedGame = getGameById(gameId);
@@ -3690,8 +3820,11 @@ function startRealtimeSync() {
   state.realtimeSyncStarted = true;
 
   const syncNow = async () => {
+    if (document.hidden) {
+      return;
+    }
     try {
-      await refreshGames();
+      await refreshGames({ lightweight: true, includeRunningState: true });
     } catch (_error) {
       // Silent background sync failure.
     }

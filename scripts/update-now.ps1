@@ -354,6 +354,7 @@ function Get-ExpectedReleaseAssetNames {
     $version = $version.Substring(1)
   }
   $exeCandidates = @(
+    "WPlaySetup-$version.exe",
     "WPlaySetup.exe",
     "WPlay-$version-x64.exe"
   ) | Where-Object { $_ } | Select-Object -Unique

@@ -1,12 +1,82 @@
-const { app, BrowserWindow, ipcMain, shell, dialog, safeStorage, session } = require("electron");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
+const { spawn } = require("child_process");
+
+const ELECTRON_NODE_ENV_KEY = "ELECTRON_RUN_AS_NODE";
+const ELECTRON_NODE_RELAUNCH_GUARD_KEY = "WPLAY_ELECTRON_NODE_RELAUNCHED";
+const EARLY_STARTUP_LOG_FILE_NAME = "launcher.startup.log";
+
+function appendEarlyStartupLog(message) {
+  try {
+    const appDataDir = String(process.env.APPDATA || process.cwd() || "").trim() || process.cwd();
+    const runtimeDir = path.join(appDataDir, "wplay");
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    const logPath = path.join(runtimeDir, EARLY_STARTUP_LOG_FILE_NAME);
+    const line = `[${new Date().toISOString()}] ${String(message || "").trim()}\n`;
+    fs.appendFileSync(logPath, line, "utf8");
+  } catch (_error) {
+    // Ignore logging failures during early bootstrap.
+  }
+}
+
+function relaunchWithoutElectronRunAsNode() {
+  const relaunchEnv = { ...process.env };
+  delete relaunchEnv[ELECTRON_NODE_ENV_KEY];
+  relaunchEnv[ELECTRON_NODE_RELAUNCH_GUARD_KEY] = "1";
+
+  const nextArgs = process.argv
+    .slice(1)
+    .filter((arg) => {
+      const value = String(arg || "").trim();
+      return /^wplay:\/\//i.test(value);
+    });
+  const child = spawn(process.execPath, nextArgs, {
+    env: relaunchEnv,
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  child.unref();
+}
+
+const electronModule = require("electron");
+const hasElectronMainApi = Boolean(
+  electronModule &&
+    typeof electronModule === "object" &&
+    electronModule.app &&
+    electronModule.BrowserWindow &&
+    electronModule.ipcMain
+);
+
+if (!hasElectronMainApi) {
+  const runAsNodeEnabled = String(process.env[ELECTRON_NODE_ENV_KEY] || "").trim() === "1";
+  const alreadyRelaunched = String(process.env[ELECTRON_NODE_RELAUNCH_GUARD_KEY] || "").trim() === "1";
+
+  appendEarlyStartupLog(
+    `[BOOTSTRAP] electron main API indisponivel (runAsNode=${runAsNodeEnabled}, relaunched=${alreadyRelaunched}).`
+  );
+
+  if (runAsNodeEnabled && !alreadyRelaunched) {
+    try {
+      relaunchWithoutElectronRunAsNode();
+      appendEarlyStartupLog("[BOOTSTRAP] relaunch solicitado sem ELECTRON_RUN_AS_NODE.");
+      process.exit(0);
+    } catch (error) {
+      appendEarlyStartupLog(`[BOOTSTRAP] relaunch falhou: ${error?.message || error}`);
+      process.exit(1);
+    }
+  }
+
+  process.exit(1);
+}
+
+const { app, BrowserWindow, ipcMain, shell, dialog, safeStorage, session, screen, nativeImage, Tray, Menu } =
+  electronModule;
 const fsp = require("fs/promises");
 const crypto = require("crypto");
 const http = require("http");
 const { pipeline } = require("stream/promises");
-const { spawn } = require("child_process");
 const axios = require("axios");
 const { path7za } = require("7zip-bin");
 let autoUpdater = null;
@@ -28,7 +98,7 @@ const INSTALL_PROGRESS_CHANNEL = "launcher:install-progress";
 const AUTO_UPDATE_STATE_CHANNEL = "launcher:auto-update-state";
 const MAX_SCAN_DEPTH = 6;
 const MAX_SCAN_FILES = 7000;
-const INSTALL_SIZE_CACHE_TTL_MS = 10 * 60 * 1000;
+const INSTALL_SIZE_CACHE_TTL_MS = 60 * 60 * 1000;
 const AUTH_PROTOCOL_SCHEME = "wplay";
 const AUTH_CALLBACK_URL_DEFAULT = `${AUTH_PROTOCOL_SCHEME}://auth/callback`;
 const AUTH_LOGIN_TIMEOUT_MS = 3 * 60 * 1000;
@@ -43,44 +113,69 @@ const DOWNLOAD_STREAM_TIMEOUT_MS = Math.max(
 const GOOGLE_DRIVE_MAX_CONFIRM_HOPS = 6;
 const DEFENDER_SCAN_TIMEOUT_MS = 20 * 60 * 1000;
 const ARCHIVE_TOOL_TIMEOUT_MS = 25 * 60 * 1000;
-const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 1 * 60 * 1000;
+const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 3 * 60 * 1000;
 const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const AUTO_UPDATE_CHECK_COOLDOWN_MS = 45 * 1000;
 const AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS = 15 * 1000;
 const AUTO_UPDATE_WINDOW_READY_CHECK_DELAY_MS = 3500;
 const AUTO_UPDATE_SPLASH_MAX_WAIT_MS = 90 * 1000;
 const AUTO_UPDATE_SPLASH_POLL_INTERVAL_MS = 250;
-const RUNNING_PROCESS_CACHE_TTL_MS = 2500;
-const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 5;
-const CATALOG_MIN_POLL_INTERVAL_SECONDS = 5;
+const RUNNING_PROCESS_CACHE_TTL_MS = 10 * 1000;
+const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 15;
+const CATALOG_MIN_POLL_INTERVAL_SECONDS = 10;
 const CATALOG_MAX_POLL_INTERVAL_SECONDS = 300;
 const CATALOG_DEFAULT_SUPABASE_SCHEMA = "public";
 const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
 const NOTIFICATIONS_DEFAULT_SUPABASE_SCHEMA = "public";
 const NOTIFICATIONS_DEFAULT_SUPABASE_TABLE = "launcher_notifications";
+const SOCIAL_ACTIVITY_DEFAULT_SUPABASE_SCHEMA = "public";
+const SOCIAL_ACTIVITY_DEFAULT_SUPABASE_TABLE = "launcher_friend_game_activity";
 const NOTIFICATIONS_HISTORY_LIMIT = 15;
+const SOCIAL_ACTIVITY_FETCH_LIMIT = 60;
+const SOCIAL_ACTIVITY_EVENT_TTL_HOURS = 24;
+const SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS = 75 * 1000;
 const WINDOWS_APP_USER_MODEL_ID = "com.wplay.app";
+const WINDOWS_APP_USER_MODEL_ID_DEV = "com.wplay.app.dev";
+const DEV_RUNTIME_APP_NAME = "WPlay Dev";
+const DEV_RUNTIME_USER_DATA_DIR_NAME = "WPlay-Dev";
 const YOUTUBE_EMBED_REFERER = "https://www.youtube.com/";
 const YOUTUBE_EMBED_ORIGIN = "https://www.youtube.com";
 const STEAM_OPENID_URL = "https://steamcommunity.com/openid/login";
 const STEAM_API_BASE_URL = "https://api.steampowered.com";
 const STEAM_PROFILE_CACHE_TTL_MS = 5 * 60 * 1000;
+const STEAM_FRIENDS_CACHE_TTL_MS = 5 * 60 * 1000;
+const STEAM_FRIENDS_EMPTY_RETRY_MS = 90 * 1000;
 const STEAM_OWNED_GAMES_CACHE_TTL_MS = 5 * 60 * 1000;
 const STEAM_ACHIEVEMENTS_CACHE_TTL_MS = 15 * 60 * 1000;
 const STEAM_EMPTY_CACHE_RETRY_MS = 45 * 1000;
 const STEAM_CLIENT_PROCESS_NAMES = new Set(["steam.exe", "steam"]);
-
-if (process.platform === "win32" && typeof app.setAppUserModelId === "function") {
-  try {
-    app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
-  } catch (_error) {
-    // Ignore AppUserModelID assignment failures.
-  }
-}
+const GAME_START_TOAST_WIDTH = 398;
+const GAME_START_TOAST_HEIGHT = 88;
+const GAME_START_TOAST_MARGIN_TOP = 0;
+const GAME_START_TOAST_MARGIN_RIGHT = 0;
+const GAME_START_TOAST_STACK_GAP = 2;
+const GAME_START_TOAST_LIFETIME_MS = 4300;
+const GAME_START_TOAST_EXIT_MS = 260;
+const GAME_START_TOAST_MAX_WINDOWS = 4;
+const GAME_START_TOAST_BG_COLOR = "#09090A";
+const GAME_START_TOAST_ACCENT_COLOR = "#008CFF";
+const LIGHTWEIGHT_GAMES_REFRESH_INTERVAL_MS = 12 * 1000;
+const STARTUP_LOG_FILE_NAME = "launcher.startup.log";
+const STARTUP_HEALTH_FILE_NAME = "launcher.startup-health.json";
+const STARTUP_BOOT_TIMEOUT_MS = 45 * 1000;
+const STARTUP_FAILURE_WINDOW_MS = 20 * 60 * 1000;
+const STARTUP_FAILURES_BEFORE_SAFE_MODE = 2;
+const MAIN_WINDOW_MAX_LOAD_RETRIES = 2;
+const MAIN_WINDOW_LOAD_RETRY_DELAY_MS = 1200;
+const TRAY_TOOLTIP_TEXT = "WPlay Games Launcher";
 
 let mainWindow = null;
 let updateSplashWindow = null;
+let tray = null;
+let appQuitRequested = false;
 let allowUpdateSplashWindowClose = false;
+let startupBootWatchdogTimer = null;
+let mainWindowLoadRetryCount = 0;
 let youtubeRequestHeaderHookInstalled = false;
 let authDeepLinkUrlBuffer = "";
 let activeAuthLoginRequest = null;
@@ -125,7 +220,15 @@ const autoUpdateState = {
   transferredBytes: 0,
   totalBytes: 0,
   lastCheckedAt: "",
-  error: ""
+  error: "",
+  // Filled right after runtime channel detection to avoid bootstrap TDZ.
+  runtimeChannel: "",
+  runtimePackaged: false,
+  runtimeExec: path.basename(String(process.execPath || "")).trim().toLowerCase(),
+  runtimeDebug: "",
+  startupSafeMode: false,
+  startupSafeModeReason: "",
+  preferLatestFullInstaller: true
 };
 const runningProcessCache = {
   fetchedAt: 0,
@@ -136,42 +239,844 @@ const steamUserDataCache = {
   profile: null,
   profileFetchedAt: 0,
   profileInFlight: null,
+  friendsSteamIds: new Set(),
+  friendsFetchedAt: 0,
+  friendsInFlight: null,
   ownedGamesByAppId: new Map(),
   ownedGamesFetchedAt: 0,
   ownedGamesInFlight: null,
   achievementsByAppId: new Map(),
   achievementsInFlight: new Map()
 };
+const socialActivityEmitCache = new Map();
+const windowIconAssetCache = {
+  resolved: false,
+  path: "",
+  image: null
+};
+const toastBrandDataUrlCache = {
+  resolved: false,
+  value: ""
+};
+const gameStartToastWindows = [];
+const hostPerformanceProfileCache = {
+  resolved: false,
+  lowSpec: false
+};
+const runtimeStartupHealthState = {
+  safeMode: false,
+  failureCount: 0,
+  reason: ""
+};
 
-function resolveWindowIconPath() {
+function isElectronBinaryPath(executablePath = process.execPath) {
+  const execName = path.basename(String(executablePath || "")).trim().toLowerCase();
+  return execName === "electron" || execName === "electron.exe";
+}
+
+function resolveRuntimeChannel() {
+  if (app.isPackaged) {
+    return "packaged";
+  }
+  if (Boolean(process.defaultApp) || isElectronBinaryPath(process.execPath)) {
+    return "dev";
+  }
+  return "packaged";
+}
+
+const runtimeChannel = resolveRuntimeChannel();
+autoUpdateState.runtimeChannel = runtimeChannel;
+
+function configureRuntimeIdentity() {
+  if (runtimeChannel !== "dev") {
+    return;
+  }
+
+  try {
+    app.setName(DEV_RUNTIME_APP_NAME);
+  } catch (_error) {
+    // Ignore app name assignment failures.
+  }
+
+  try {
+    const appDataDir = app.getPath("appData");
+    if (!appDataDir) {
+      return;
+    }
+    const runtimeUserDataDir = path.join(appDataDir, DEV_RUNTIME_USER_DATA_DIR_NAME);
+    app.setPath("userData", runtimeUserDataDir);
+  } catch (_error) {
+    // Ignore userData override failures.
+  }
+}
+
+configureRuntimeIdentity();
+
+function isTruthyFlagValue(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function resolveRuntimeStateDirectory() {
+  try {
+    if (app?.isReady?.()) {
+      const userDataDir = String(app.getPath("userData") || "").trim();
+      if (userDataDir) {
+        fs.mkdirSync(userDataDir, { recursive: true });
+        return userDataDir;
+      }
+    }
+  } catch (_error) {
+    // Fallback below.
+  }
+
+  const appDataDir = String(process.env.APPDATA || process.cwd() || "").trim() || process.cwd();
+  const runtimeFolder = runtimeChannel === "dev" ? DEV_RUNTIME_USER_DATA_DIR_NAME : "wplay";
+  const fallbackDir = path.join(appDataDir, runtimeFolder);
+  try {
+    fs.mkdirSync(fallbackDir, { recursive: true });
+  } catch (_error) {
+    return "";
+  }
+  return fallbackDir;
+}
+
+function getStartupHealthFilePath() {
+  const baseDir = resolveRuntimeStateDirectory();
+  if (!baseDir) {
+    return "";
+  }
+  return path.join(baseDir, STARTUP_HEALTH_FILE_NAME);
+}
+
+function readStartupHealthState() {
+  const defaultState = {
+    pendingLaunch: false,
+    lastLaunchAt: "",
+    lastSuccessAt: "",
+    consecutiveFailedLaunches: 0,
+    safeModeEnabled: false,
+    safeModeReason: ""
+  };
+  const healthPath = getStartupHealthFilePath();
+  if (!healthPath) {
+    return defaultState;
+  }
+
+  try {
+    if (!fs.existsSync(healthPath)) {
+      return defaultState;
+    }
+    const raw = fs.readFileSync(healthPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return defaultState;
+    }
+    return {
+      pendingLaunch: parsed.pendingLaunch === true,
+      lastLaunchAt: String(parsed.lastLaunchAt || "").trim(),
+      lastSuccessAt: String(parsed.lastSuccessAt || "").trim(),
+      consecutiveFailedLaunches: Math.max(0, Math.trunc(Number(parsed.consecutiveFailedLaunches) || 0)),
+      safeModeEnabled: parsed.safeModeEnabled === true,
+      safeModeReason: String(parsed.safeModeReason || "").trim()
+    };
+  } catch (_error) {
+    return defaultState;
+  }
+}
+
+function writeStartupHealthState(nextState) {
+  const healthPath = getStartupHealthFilePath();
+  if (!healthPath) {
+    return;
+  }
+
+  const safeState = nextState && typeof nextState === "object" ? nextState : {};
+  const payload = {
+    pendingLaunch: safeState.pendingLaunch === true,
+    lastLaunchAt: String(safeState.lastLaunchAt || "").trim(),
+    lastSuccessAt: String(safeState.lastSuccessAt || "").trim(),
+    consecutiveFailedLaunches: Math.max(0, Math.trunc(Number(safeState.consecutiveFailedLaunches) || 0)),
+    safeModeEnabled: safeState.safeModeEnabled === true,
+    safeModeReason: String(safeState.safeModeReason || "").trim()
+  };
+
+  try {
+    fs.writeFileSync(healthPath, JSON.stringify(payload, null, 2), "utf8");
+  } catch (_error) {
+    // Ignore health state write failures.
+  }
+}
+
+function prepareStartupHealthForLaunch() {
+  const previous = readStartupHealthState();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+
+  const previousLaunchMs = Date.parse(previous.lastLaunchAt || "");
+  const launchWasRecent =
+    Number.isFinite(previousLaunchMs) && nowMs >= previousLaunchMs && nowMs - previousLaunchMs <= STARTUP_FAILURE_WINDOW_MS;
+
+  let failureCount = launchWasRecent ? previous.consecutiveFailedLaunches : 0;
+  if (previous.pendingLaunch && launchWasRecent) {
+    failureCount += 1;
+  } else if (!launchWasRecent) {
+    failureCount = 0;
+  }
+
+  const forceSafeMode = isTruthyFlagValue(process.env.WPLAY_FORCE_SAFE_MODE);
+  const autoSafeMode = failureCount >= STARTUP_FAILURES_BEFORE_SAFE_MODE;
+  const safeModeEnabled = forceSafeMode || autoSafeMode;
+  const safeModeReason = forceSafeMode ? "forced-env" : safeModeEnabled ? `auto-${failureCount}-failed-launches` : "";
+
+  runtimeStartupHealthState.safeMode = safeModeEnabled;
+  runtimeStartupHealthState.failureCount = failureCount;
+  runtimeStartupHealthState.reason = safeModeReason;
+
+  writeStartupHealthState({
+    ...previous,
+    pendingLaunch: true,
+    lastLaunchAt: nowIso,
+    consecutiveFailedLaunches: failureCount,
+    safeModeEnabled,
+    safeModeReason
+  });
+
+  appendEarlyStartupLog(
+    `[STARTUP_HEALTH] pending launch; failures=${failureCount}; safeMode=${safeModeEnabled}; reason=${safeModeReason || "none"}`
+  );
+}
+
+function markStartupLaunchHealthy(source = "renderer-ready") {
+  const previous = readStartupHealthState();
+  const nowIso = new Date().toISOString();
+  runtimeStartupHealthState.safeMode = false;
+  runtimeStartupHealthState.failureCount = 0;
+  runtimeStartupHealthState.reason = "";
+  writeStartupHealthState({
+    ...previous,
+    pendingLaunch: false,
+    lastSuccessAt: nowIso,
+    consecutiveFailedLaunches: 0,
+    safeModeEnabled: false,
+    safeModeReason: ""
+  });
+  appendStartupLog(`[STARTUP_HEALTH] launch healthy at source=${source}.`);
+}
+
+function clearStartupBootWatchdog() {
+  if (!startupBootWatchdogTimer) {
+    return;
+  }
+  clearTimeout(startupBootWatchdogTimer);
+  startupBootWatchdogTimer = null;
+}
+
+function armStartupBootWatchdog() {
+  clearStartupBootWatchdog();
+  startupBootWatchdogTimer = setTimeout(() => {
+    startupBootWatchdogTimer = null;
+    appendStartupLog(`[WINDOW] watchdog timeout apos ${STARTUP_BOOT_TIMEOUT_MS}ms sem did-finish-load.`);
+  }, STARTUP_BOOT_TIMEOUT_MS);
+}
+
+function applyStartupSafeModeIfRequired() {
+  if (!runtimeStartupHealthState.safeMode) {
+    return;
+  }
+  try {
+    app.disableHardwareAcceleration();
+  } catch (_error) {
+    // Ignore hardware acceleration toggle failures.
+  }
+  try {
+    app.commandLine.appendSwitch("disable-gpu");
+    app.commandLine.appendSwitch("disable-gpu-compositing");
+  } catch (_error) {
+    // Ignore command-line switch failures.
+  }
+  appendEarlyStartupLog(
+    `[SAFE_MODE] ativado; failures=${runtimeStartupHealthState.failureCount}; reason=${runtimeStartupHealthState.reason || "none"}`
+  );
+}
+
+prepareStartupHealthForLaunch();
+applyStartupSafeModeIfRequired();
+
+function resolveAutoUpdateRuntimeInfo() {
+  const execPathValue = String(process.execPath || "").trim();
+  const execName = path.basename(execPathValue || "").trim().toLowerCase();
+  const defaultApp = Boolean(process.defaultApp);
+  const packagedByElectron = Boolean(app.isPackaged);
+  const electronBinary = isElectronBinaryPath(execPathValue);
+  const resourcesPathValue = String(process.resourcesPath || "").trim();
+  const asarPath = resourcesPathValue ? path.join(resourcesPathValue, "app.asar") : "";
+  const packagedByHeuristic = Boolean(asarPath && fs.existsSync(asarPath) && !defaultApp && !electronBinary);
+  const packaged = packagedByElectron || packagedByHeuristic || runtimeChannel === "packaged";
+
+  return {
+    packaged,
+    packagedByElectron,
+    packagedByHeuristic,
+    defaultApp,
+    electronBinary,
+    runtimeChannel,
+    execName,
+    execPath: execPathValue
+  };
+}
+
+function buildAutoUpdateRuntimeDiagnostic(runtimeInfo = resolveAutoUpdateRuntimeInfo()) {
+  return (
+    `channel=${runtimeInfo.runtimeChannel};` +
+    ` app.isPackaged=${runtimeInfo.packagedByElectron};` +
+    ` heuristicPackaged=${runtimeInfo.packagedByHeuristic};` +
+    ` defaultApp=${runtimeInfo.defaultApp};` +
+    ` electronBinary=${runtimeInfo.electronBinary};` +
+    ` exec=${runtimeInfo.execName || "unknown"}`
+  );
+}
+
+function resolveAutoUpdateUnsupportedMessage(runtimeInfo = resolveAutoUpdateRuntimeInfo()) {
+  if (runtimeInfo.runtimeChannel === "dev" || runtimeInfo.defaultApp || runtimeInfo.electronBinary) {
+    return "Atualizador automatico desativado no modo desenvolvimento. Feche o launcher dev e abra o WPlay instalado.";
+  }
+  return "Atualizador automatico indisponivel neste runtime.";
+}
+
+function ensureWindowsAppIdentity() {
+  if (process.platform !== "win32" || typeof app.setAppUserModelId !== "function") {
+    return;
+  }
+  try {
+    const appUserModelId = runtimeChannel === "dev" ? WINDOWS_APP_USER_MODEL_ID_DEV : WINDOWS_APP_USER_MODEL_ID;
+    app.setAppUserModelId(appUserModelId);
+  } catch (_error) {
+    // Ignore AppUserModelID assignment failures.
+  }
+}
+
+ensureWindowsAppIdentity();
+
+function resolveHostLowSpecProfile() {
+  if (hostPerformanceProfileCache.resolved) {
+    return hostPerformanceProfileCache.lowSpec;
+  }
+
+  let cpuCount = 0;
+  let totalMemoryBytes = 0;
+  try {
+    cpuCount = Array.isArray(os.cpus()) ? os.cpus().length : 0;
+  } catch (_error) {
+    cpuCount = 0;
+  }
+  try {
+    totalMemoryBytes = Number(os.totalmem() || 0);
+  } catch (_error) {
+    totalMemoryBytes = 0;
+  }
+
+  const totalMemoryGb = totalMemoryBytes > 0 ? totalMemoryBytes / (1024 ** 3) : 0;
+  const lowSpecByCpu = cpuCount > 0 && cpuCount <= 4;
+  const lowSpecByMemory = totalMemoryGb > 0 && totalMemoryGb <= 8;
+  const lowSpec = lowSpecByCpu || lowSpecByMemory;
+
+  hostPerformanceProfileCache.resolved = true;
+  hostPerformanceProfileCache.lowSpec = lowSpec;
+  return lowSpec;
+}
+
+function getStartupLogPath() {
+  try {
+    const userDataDir = app?.isReady?.() ? app.getPath("userData") : "";
+    const baseDir = String(userDataDir || process.env.APPDATA || process.cwd() || "").trim() || process.cwd();
+    if (!baseDir) {
+      return "";
+    }
+    fs.mkdirSync(baseDir, { recursive: true });
+    return path.join(baseDir, STARTUP_LOG_FILE_NAME);
+  } catch (_error) {
+    return "";
+  }
+}
+
+function formatStartupErrorForLog(error) {
+  if (!error) {
+    return "";
+  }
+  if (error instanceof Error) {
+    return error.stack || error.message || String(error);
+  }
+  return String(error);
+}
+
+function appendStartupLog(message) {
+  const logPath = getStartupLogPath();
+  if (!logPath) return;
+  const line = `[${new Date().toISOString()}] ${String(message || "").trim()}\n`;
+  try {
+    fs.appendFileSync(logPath, line, "utf8");
+  } catch (_error) {
+    // Ignore startup log write failures.
+  }
+}
+
+function installProcessRuntimeErrorHandlers() {
+  process.on("uncaughtException", (error) => {
+    appendStartupLog(`[UNCAUGHT_EXCEPTION] ${formatStartupErrorForLog(error)}`);
+    try {
+      dialog.showErrorBox(
+        "Falha ao iniciar o launcher",
+        `O WPlay encontrou um erro critico ao iniciar.\n\n${error?.message || "Erro desconhecido."}`
+      );
+    } catch (_dialogError) {
+      // Ignore dialog failures.
+    }
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    appendStartupLog(`[UNHANDLED_REJECTION] ${formatStartupErrorForLog(reason)}`);
+  });
+}
+
+installProcessRuntimeErrorHandlers();
+
+function collectWindowIconCandidatePaths() {
   const isWindows = process.platform === "win32";
-  const buildIconNames = isWindows ? ["icon.ico", "icon.png"] : ["icon.png", "icon.ico"];
+  const iconNames = isWindows ? ["icon.ico", "icon.png"] : ["icon.png", "icon.ico"];
   const candidates = [];
-
-  const pushBuildIconCandidates = (baseDir) => {
-    for (const iconName of buildIconNames) {
-      candidates.push(path.join(baseDir, "build", iconName));
+  const push = (value) => {
+    const normalized = String(value || "").trim();
+    if (normalized) {
+      candidates.push(normalized);
+    }
+  };
+  const pushBuildIconsFrom = (baseDir) => {
+    for (const iconName of iconNames) {
+      push(path.join(baseDir, "build", iconName));
     }
   };
 
   if (app.isPackaged && process.resourcesPath) {
-    // Em producao no Windows, prioriza .ico de resources para evitar fallback do Electron.
-    pushBuildIconCandidates(process.resourcesPath);
-    pushBuildIconCandidates(path.join(process.resourcesPath, "app.asar.unpacked"));
-    if (!isWindows) {
-      candidates.push(
-        path.join(process.resourcesPath, "renderer", "assets", "logo.png"),
-        path.join(process.resourcesPath, "app.asar.unpacked", "renderer", "assets", "logo.png")
-      );
+    pushBuildIconsFrom(process.resourcesPath);
+    pushBuildIconsFrom(path.join(process.resourcesPath, "app.asar.unpacked"));
+    push(path.join(process.resourcesPath, "renderer", "assets", "icon.ico"));
+    push(path.join(process.resourcesPath, "renderer", "assets", "logo.png"));
+    push(path.join(process.resourcesPath, "app.asar.unpacked", "renderer", "assets", "icon.ico"));
+    push(path.join(process.resourcesPath, "app.asar.unpacked", "renderer", "assets", "logo.png"));
+  }
+
+  pushBuildIconsFrom(__dirname);
+  push(path.join(__dirname, "icon.ico"));
+  push(path.join(__dirname, "icon.png"));
+  push(path.join(__dirname, "logo.png"));
+  push(path.join(__dirname, "renderer", "assets", "icon.ico"));
+  push(path.join(__dirname, "renderer", "assets", "logo.png"));
+  push(path.join(__dirname, "public", "assets", "icon.ico"));
+  push(path.join(__dirname, "public", "assets", "logo.png"));
+  push(process.execPath);
+
+  try {
+    const appPath = app.getAppPath();
+    if (appPath) {
+      pushBuildIconsFrom(appPath);
+      push(path.join(appPath, "icon.ico"));
+      push(path.join(appPath, "icon.png"));
+      push(path.join(appPath, "renderer", "assets", "icon.ico"));
+      push(path.join(appPath, "renderer", "assets", "logo.png"));
+    }
+  } catch (_error) {
+    // Ignore appPath resolution failures before readiness.
+  }
+
+  return [...new Set(candidates)];
+}
+
+function tryReadIconImageFromPath(iconPath) {
+  const normalized = String(iconPath || "").trim();
+  if (!normalized) {
+    return null;
+  }
+  try {
+    if (!fs.existsSync(normalized)) {
+      return null;
+    }
+    const image = nativeImage.createFromPath(normalized);
+    if (!image || typeof image.isEmpty !== "function" || image.isEmpty()) {
+      return null;
+    }
+    return image;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function resolveWindowIconAsset() {
+  if (windowIconAssetCache.resolved) {
+    return windowIconAssetCache;
+  }
+
+  const candidates = collectWindowIconCandidatePaths();
+  for (const candidatePath of candidates) {
+    const iconImage = tryReadIconImageFromPath(candidatePath);
+    if (!iconImage) {
+      continue;
+    }
+    windowIconAssetCache.path = candidatePath;
+    windowIconAssetCache.image = iconImage;
+    windowIconAssetCache.resolved = true;
+    return windowIconAssetCache;
+  }
+
+  if (process.platform === "win32") {
+    console.warn("[ICON] Nenhum arquivo de icone valido foi encontrado. Verifique build/icon.ico.");
+  }
+  windowIconAssetCache.path = "";
+  windowIconAssetCache.image = null;
+  windowIconAssetCache.resolved = true;
+  return windowIconAssetCache;
+}
+
+function resolveWindowIconPath() {
+  return resolveWindowIconAsset().path || undefined;
+}
+
+function resolveWindowIconImage() {
+  return resolveWindowIconAsset().image || undefined;
+}
+
+function applyWindowIconToWindow(targetWindow) {
+  if (!targetWindow || targetWindow.isDestroyed()) {
+    return;
+  }
+  const iconImage = resolveWindowIconImage();
+  if (!iconImage) {
+    return;
+  }
+  try {
+    targetWindow.setIcon(iconImage);
+  } catch (_error) {
+    // Ignore unsupported/icon assignment failures.
+  }
+}
+
+function resolveTrayIconAsset() {
+  const iconImage = resolveWindowIconImage();
+  if (iconImage && typeof iconImage.isEmpty === "function" && !iconImage.isEmpty()) {
+    if (process.platform === "win32") {
+      try {
+        const resized = iconImage.resize({ width: 16, height: 16, quality: "best" });
+        if (resized && typeof resized.isEmpty === "function" && !resized.isEmpty()) {
+          return resized;
+        }
+      } catch (_error) {
+        // Fall back to original image.
+      }
+    }
+    return iconImage;
+  }
+  return resolveWindowIconPath() || process.execPath;
+}
+
+function showAndFocusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    try {
+      createWindow();
+    } catch (error) {
+      appendStartupLog(`[SHOW_WINDOW_ERROR] ${formatStartupErrorForLog(error)}`);
+    }
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function requestLauncherRestart() {
+  appQuitRequested = true;
+  app.relaunch();
+  app.quit();
+}
+
+function getTrayUpdateStatusLabel() {
+  const message = String(autoUpdateState?.message || "").trim();
+  if (message) {
+    return message;
+  }
+  const status = String(autoUpdateState?.status || "").trim();
+  if (!status) {
+    return "Status desconhecido";
+  }
+  return `Status: ${status}`;
+}
+
+function buildTrayMenuTemplate() {
+  const updateEnabled = Boolean(
+    app.isPackaged && autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured
+  );
+  const canDownload = updateEnabled && autoUpdateState.status === "available";
+  const canInstall = updateEnabled && (autoUpdateState.updateDownloaded || autoUpdateState.status === "downloaded");
+
+  return [
+    {
+      label: "Abrir WPlay",
+      click: () => {
+        showAndFocusMainWindow();
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Verificar atualizacao",
+      enabled: updateEnabled,
+      click: () => {
+        void checkForLauncherUpdate("tray-manual");
+      }
+    },
+    {
+      label: "Baixar atualizacao",
+      enabled: canDownload,
+      click: () => {
+        void downloadLauncherUpdate();
+      }
+    },
+    {
+      label: "Reiniciar para atualizar",
+      enabled: canInstall,
+      click: () => {
+        try {
+          restartAndInstallLauncherUpdate();
+        } catch (error) {
+          appendStartupLog(`[TRAY_UPDATE_RESTART_ERROR] ${formatStartupErrorForLog(error)}`);
+        }
+      }
+    },
+    { type: "separator" },
+    {
+      label: getTrayUpdateStatusLabel(),
+      enabled: false
+    },
+    { type: "separator" },
+    {
+      label: "Reiniciar launcher",
+      click: () => {
+        requestLauncherRestart();
+      }
+    },
+    {
+      label: "Sair",
+      click: () => {
+        appQuitRequested = true;
+        app.quit();
+      }
+    }
+  ];
+}
+
+function refreshTrayContextMenu() {
+  if (!tray || tray.isDestroyed()) {
+    return;
+  }
+  try {
+    tray.setToolTip(TRAY_TOOLTIP_TEXT);
+    const menu = Menu.buildFromTemplate(buildTrayMenuTemplate());
+    tray.setContextMenu(menu);
+  } catch (error) {
+    appendStartupLog(`[TRAY_MENU_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function createTray() {
+  if (tray && !tray.isDestroyed()) {
+    refreshTrayContextMenu();
+    return tray;
+  }
+
+  try {
+    const trayIcon = resolveTrayIconAsset();
+    tray = new Tray(trayIcon);
+    tray.on("click", () => {
+      showAndFocusMainWindow();
+    });
+    tray.on("double-click", () => {
+      showAndFocusMainWindow();
+    });
+    refreshTrayContextMenu();
+  } catch (error) {
+    tray = null;
+    appendStartupLog(`[TRAY_CREATE_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+
+  return tray;
+}
+
+function destroyTray() {
+  if (!tray || tray.isDestroyed()) {
+    tray = null;
+    return;
+  }
+  try {
+    tray.destroy();
+  } catch (_error) {
+    // Ignore tray destroy failures.
+  } finally {
+    tray = null;
+  }
+}
+
+function ensureWindowsShortcutsWithIcon() {
+  if (process.platform !== "win32" || !app.isPackaged) {
+    return;
+  }
+
+  const safeGetPath = (pathName) => {
+    try {
+      const value = String(app.getPath(pathName) || "").trim();
+      return value;
+    } catch (error) {
+      appendStartupLog(`[SHORTCUT_PATH_ERROR] path=${pathName} error=${formatStartupErrorForLog(error)}`);
+      return "";
+    }
+  };
+
+  const iconPath = resolveWindowIconPath() || process.execPath;
+  const appDisplayName = String(app.getName() || "WPlay").trim() || "WPlay";
+  const shortcutName = `${appDisplayName}.lnk`;
+  const shortcutDetails = {
+    target: process.execPath,
+    cwd: path.dirname(process.execPath),
+    description: `${appDisplayName} Launcher`,
+    icon: iconPath,
+    iconIndex: 0,
+    appUserModelId: WINDOWS_APP_USER_MODEL_ID
+  };
+
+  const shortcutPaths = [];
+  const desktopPath = safeGetPath("desktop");
+  const startMenuPath = safeGetPath("startMenu");
+  if (desktopPath) {
+    shortcutPaths.push(path.join(desktopPath, shortcutName));
+  }
+  if (startMenuPath) {
+    shortcutPaths.push(path.join(startMenuPath, "Programs", shortcutName));
+  }
+
+  if (shortcutPaths.length === 0) {
+    appendStartupLog("[SHORTCUT] nenhum caminho valido de atalho disponivel; seguindo inicializacao.");
+    return;
+  }
+
+  for (const shortcutPath of shortcutPaths) {
+    try {
+      fs.mkdirSync(path.dirname(shortcutPath), { recursive: true });
+      const mode = fs.existsSync(shortcutPath) ? "update" : "create";
+      shell.writeShortcutLink(shortcutPath, mode, shortcutDetails);
+    } catch (_error) {
+      // Ignore shortcut write failures (permissions/locked link).
     }
   }
+}
 
-  pushBuildIconCandidates(__dirname);
-  if (!isWindows) {
-    candidates.push(path.join(__dirname, "renderer", "assets", "logo.png"));
+function toPngDataUrlFromNativeImage(image) {
+  if (!image || typeof image.isEmpty !== "function" || image.isEmpty()) {
+    return "";
+  }
+  try {
+    const pngBuffer = image.toPNG();
+    if (!Buffer.isBuffer(pngBuffer) || pngBuffer.length === 0) {
+      return "";
+    }
+    return `data:image/png;base64,${pngBuffer.toString("base64")}`;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function collectToastBrandCandidatePaths() {
+  const candidates = [];
+  const push = (value) => {
+    const normalized = String(value || "").trim();
+    if (normalized) {
+      candidates.push(normalized);
+    }
+  };
+
+  if (app.isPackaged && process.resourcesPath) {
+    push(path.join(process.resourcesPath, "renderer", "assets", "logo.png"));
+    push(path.join(process.resourcesPath, "renderer", "assets", "icon.ico"));
+    push(path.join(process.resourcesPath, "build", "icon.png"));
+    push(path.join(process.resourcesPath, "build", "icon.ico"));
+    push(path.join(process.resourcesPath, "app.asar.unpacked", "renderer", "assets", "logo.png"));
+    push(path.join(process.resourcesPath, "app.asar.unpacked", "renderer", "assets", "icon.ico"));
+    push(path.join(process.resourcesPath, "app.asar.unpacked", "build", "icon.png"));
+    push(path.join(process.resourcesPath, "app.asar.unpacked", "build", "icon.ico"));
   }
 
-  for (const candidate of candidates) {
+  push(path.join(__dirname, "renderer", "assets", "logo.png"));
+  push(path.join(__dirname, "renderer", "assets", "icon.ico"));
+  push(path.join(__dirname, "public", "assets", "logo.png"));
+  push(path.join(__dirname, "public", "assets", "icon.ico"));
+  push(path.join(__dirname, "build", "icon.png"));
+  push(path.join(__dirname, "build", "icon.ico"));
+  push(path.join(__dirname, "logo.png"));
+  push(path.join(__dirname, "icon.ico"));
+
+  const resolvedWindowIconPath = resolveWindowIconPath();
+  if (resolvedWindowIconPath) {
+    push(resolvedWindowIconPath);
+  }
+
+  return [...new Set(candidates)];
+}
+
+function resolveGameStartToastBrandDataUrl() {
+  if (toastBrandDataUrlCache.resolved) {
+    return toastBrandDataUrlCache.value;
+  }
+
+  const candidates = collectToastBrandCandidatePaths();
+  for (const candidatePath of candidates) {
+    const image = tryReadIconImageFromPath(candidatePath);
+    const dataUrl = toPngDataUrlFromNativeImage(image);
+    if (!dataUrl) {
+      continue;
+    }
+    toastBrandDataUrlCache.value = dataUrl;
+    toastBrandDataUrlCache.resolved = true;
+    return dataUrl;
+  }
+
+  const fallbackDataUrl = toPngDataUrlFromNativeImage(resolveWindowIconImage());
+  toastBrandDataUrlCache.value = fallbackDataUrl;
+  toastBrandDataUrlCache.resolved = true;
+  return fallbackDataUrl;
+}
+
+function resolveRendererEntryPath() {
+  const candidates = [];
+  const push = (value) => {
+    const normalized = String(value || "").trim();
+    if (normalized) {
+      candidates.push(normalized);
+    }
+  };
+
+  push(path.join(__dirname, "out", "index.html"));
+  try {
+    const appPath = app.getAppPath();
+    push(path.join(appPath, "out", "index.html"));
+  } catch (_error) {
+    // Ignore app path failures.
+  }
+  if (process.resourcesPath) {
+    push(path.join(process.resourcesPath, "app.asar", "out", "index.html"));
+    push(path.join(process.resourcesPath, "out", "index.html"));
+  }
+
+  for (const candidate of [...new Set(candidates)]) {
     try {
       if (fs.existsSync(candidate)) {
         return candidate;
@@ -181,19 +1086,9 @@ function resolveWindowIconPath() {
     }
   }
 
-  return undefined;
-}
-
-function resolveRendererEntryPath() {
-  const entryPath = path.join(__dirname, "out", "index.html");
-  try {
-    if (fs.existsSync(entryPath)) {
-      return entryPath;
-    }
-  } catch (_error) {
-    // Fall through to explicit error.
-  }
-  throw new Error("Interface nao encontrada. Rode `npm run next:build` para gerar a pasta `out`.");
+  throw new Error(
+    `Interface nao encontrada. Caminhos tentados: ${candidates.join(" | ")}. Rode \`npm run next:build\` e gere novo build.`
+  );
 }
 
 function ensureYoutubeEmbedRequestHeaders() {
@@ -269,7 +1164,7 @@ function createUpdateSplashWindow() {
     return updateSplashWindow;
   }
 
-  const windowIconPath = resolveWindowIconPath();
+  const windowIconAsset = resolveWindowIconAsset();
   allowUpdateSplashWindowClose = false;
 
   updateSplashWindow = new BrowserWindow({
@@ -287,9 +1182,9 @@ function createUpdateSplashWindow() {
     fullscreenable: false,
     frame: false,
     autoHideMenuBar: true,
-    title: "WPlay Updater",
+    title: "WPlay Games Updater",
     backgroundColor: "#09090A",
-    icon: windowIconPath,
+    icon: windowIconAsset.image || windowIconAsset.path || undefined,
     alwaysOnTop: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -312,6 +1207,7 @@ function createUpdateSplashWindow() {
   });
 
   updateSplashWindow.webContents.on("did-finish-load", () => {
+    applyWindowIconToWindow(updateSplashWindow);
     sendAutoUpdateStateToWindow(updateSplashWindow);
   });
 
@@ -374,7 +1270,8 @@ async function waitForStartupUpdateBlockingStateToFinish(maxWaitMs = AUTO_UPDATE
 }
 
 function createWindow() {
-  const windowIconPath = resolveWindowIconPath();
+  const windowIconAsset = resolveWindowIconAsset();
+  mainWindowLoadRetryCount = 0;
   mainWindow = new BrowserWindow({
     width: 1520,
     height: 940,
@@ -382,10 +1279,10 @@ function createWindow() {
     minHeight: 680,
     frame: false,
     autoHideMenuBar: true,
-    title: "WPlay",
+    title: "WPlay Games",
     backgroundColor: "#080808",
     show: false,
-    icon: windowIconPath,
+    icon: windowIconAsset.image || windowIconAsset.path || undefined,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -394,7 +1291,56 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile(resolveRendererEntryPath());
+  const rendererEntryPath = resolveRendererEntryPath();
+  const retryRendererLoad = (reason) => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return false;
+    }
+    if (mainWindowLoadRetryCount >= MAIN_WINDOW_MAX_LOAD_RETRIES) {
+      appendStartupLog(
+        `[WINDOW] retry esgotado (tentativas=${MAIN_WINDOW_MAX_LOAD_RETRIES}) motivo=${String(reason || "unknown")}.`
+      );
+      return false;
+    }
+    mainWindowLoadRetryCount += 1;
+    const attempt = mainWindowLoadRetryCount;
+    appendStartupLog(`[WINDOW] retry #${attempt} agendado. motivo=${String(reason || "unknown")}.`);
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        return;
+      }
+      try {
+        void mainWindow.loadFile(rendererEntryPath).catch((error) => {
+          appendStartupLog(`[WINDOW] retry #${attempt} falhou: ${formatStartupErrorForLog(error)}`);
+          retryRendererLoad("retry-load-rejection");
+        });
+      } catch (error) {
+        appendStartupLog(`[WINDOW] retry #${attempt} erro: ${formatStartupErrorForLog(error)}`);
+        retryRendererLoad("retry-load-throw");
+      }
+    }, MAIN_WINDOW_LOAD_RETRY_DELAY_MS);
+    return true;
+  };
+
+  mainWindow.on("close", (event) => {
+    if (appQuitRequested) {
+      return;
+    }
+    event.preventDefault();
+    mainWindow.hide();
+  });
+
+  mainWindow.on("closed", () => {
+    clearStartupBootWatchdog();
+    mainWindow = null;
+  });
+
+  appendStartupLog(`[WINDOW] carregando renderer: ${rendererEntryPath}`);
+  armStartupBootWatchdog();
+  void mainWindow.loadFile(rendererEntryPath).catch((error) => {
+    appendStartupLog(`[WINDOW] loadFile rejection: ${formatStartupErrorForLog(error)}`);
+    retryRendererLoad("loadfile-rejection");
+  });
 
   const sendMaximizedState = () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -404,7 +1350,9 @@ function createWindow() {
   mainWindow.on("maximize", sendMaximizedState);
   mainWindow.on("unmaximize", sendMaximizedState);
   mainWindow.on("focus", () => {
-    void checkForLauncherUpdate("focus");
+    if (!runtimeStartupHealthState.safeMode) {
+      void checkForLauncherUpdate("focus");
+    }
   });
   mainWindow.webContents.on("did-attach-webview", (_event, guestWebContents) => {
     if (!guestWebContents) return;
@@ -428,19 +1376,417 @@ function createWindow() {
       void shell.openExternal(value);
     });
   });
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    if (errorCode === -3) {
+      return;
+    }
+    appendStartupLog(
+      `[WINDOW] did-fail-load code=${errorCode} description=${String(errorDescription || "")} url=${String(validatedURL || "")}`
+    );
+    retryRendererLoad(`did-fail-load:${errorCode}`);
+  });
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    const reason = String(details?.reason || "unknown");
+    const exitCode = Number(details?.exitCode || 0);
+    appendStartupLog(`[WINDOW] render-process-gone reason=${reason} exitCode=${exitCode}`);
+    if (reason === "crashed" || reason === "oom") {
+      retryRendererLoad(`render-process-gone:${reason}`);
+    }
+  });
+  mainWindow.on("unresponsive", () => {
+    appendStartupLog("[WINDOW] janela principal sem resposta.");
+  });
   mainWindow.webContents.on("did-finish-load", () => {
+    clearStartupBootWatchdog();
+    markStartupLaunchHealthy("did-finish-load");
+    mainWindowLoadRetryCount = 0;
+    applyWindowIconToWindow(mainWindow);
+    createTray();
+    appendStartupLog("[WINDOW] did-finish-load concluido.");
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
     }
     destroyUpdateSplashWindow();
     sendMaximizedState();
     broadcastAutoUpdateState();
-    if (autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured) {
+    if (autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured && !runtimeStartupHealthState.safeMode) {
       setTimeout(() => {
         void checkForLauncherUpdate("window-ready");
       }, AUTO_UPDATE_WINDOW_READY_CHECK_DELAY_MS);
     }
   });
+}
+
+function escapeHtmlText(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function sanitizeToastText(value, fallback = "", maxLength = 64) {
+  const normalized = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const nextValue = normalized || String(fallback || "").trim();
+  if (!nextValue) {
+    return "";
+  }
+  if (nextValue.length <= maxLength) {
+    return nextValue;
+  }
+  return `${nextValue.slice(0, Math.max(1, maxLength - 1)).trim()}...`;
+}
+
+function sanitizeHttpUrlForToast(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return "";
+    }
+    return parsed.toString();
+  } catch (_error) {
+    return "";
+  }
+}
+
+function computeToastInitials(name) {
+  const parts = String(name || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("");
+  return parts || "JG";
+}
+
+function buildGameStartToastHtml(payload = {}) {
+  const nickname = sanitizeToastText(payload.nickname, "Jogador", 42);
+  const gameName = sanitizeToastText(payload.gameName, "Jogo", 56);
+  const avatarUrl = sanitizeHttpUrlForToast(payload.avatarUrl);
+  const initials = computeToastInitials(nickname);
+  const toastBrandDataUrl = resolveGameStartToastBrandDataUrl();
+
+  const safeNickname = escapeHtmlText(nickname);
+  const safeGameName = escapeHtmlText(gameName);
+  const safeInitials = escapeHtmlText(initials);
+  const safeBrandDataUrl = escapeHtmlText(toastBrandDataUrl || "");
+  const safeAvatarTag = avatarUrl
+    ? `<img src="${escapeHtmlText(avatarUrl)}" alt="" loading="lazy" />`
+    : `<span class="avatar-fallback">${safeInitials}</span>`;
+  const brandMarkup = safeBrandDataUrl ? `<span class="brand-mark" aria-hidden="true"></span>` : "";
+
+  const hideDelayMs = Math.max(900, GAME_START_TOAST_LIFETIME_MS - GAME_START_TOAST_EXIT_MS);
+
+  return `<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline';"
+    />
+    <style>
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        background: ${GAME_START_TOAST_BG_COLOR};
+        overflow: hidden;
+      }
+      body {
+        font-family: "Sora", "Segoe UI", "Inter", system-ui, sans-serif;
+      }
+      .toast {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        border: 0;
+        display: grid;
+        grid-template-columns: 70px minmax(0, 1fr);
+        align-items: center;
+        gap: 7px;
+        padding: 6px 9px 6px 6px;
+        box-sizing: border-box;
+        background: ${GAME_START_TOAST_BG_COLOR};
+        transform: translate3d(0, -16px, 0);
+        opacity: 0;
+        animation: in 210ms cubic-bezier(0.22, 0.78, 0.3, 1) forwards;
+        overflow: hidden;
+      }
+      .brand-mark {
+        position: absolute;
+        right: -54px;
+        top: 50%;
+        width: 210px;
+        height: 256px;
+        transform: translateY(-50%);
+        background-image: url("${safeBrandDataUrl}");
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: auto 100%;
+        opacity: 0.12;
+        filter: grayscale(1) brightness(0.38) contrast(1.15);
+        pointer-events: none;
+      }
+      .toast.is-leaving {
+        animation: out ${GAME_START_TOAST_EXIT_MS}ms ease forwards;
+      }
+      .avatar {
+        width: 56px;
+        height: 56px;
+        border-radius: 0;
+        overflow: hidden;
+        border: 0;
+        background: #171720;
+        display: grid;
+        place-items: center;
+        z-index: 1;
+      }
+      .avatar img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      .avatar-fallback {
+        color: #626571;
+        font-size: 0.78rem;
+        font-weight: 400;
+        letter-spacing: 0.02em;
+      }
+      .body {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        z-index: 1;
+      }
+      .title {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.05;
+        color: ${GAME_START_TOAST_ACCENT_COLOR};
+        font-weight: 400;
+        letter-spacing: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .subtitle {
+        margin: 0;
+        font-size: 12px;
+        line-height: 1.1;
+        color: #b5b8c0;
+        font-weight: 400;
+        letter-spacing: 0;
+      }
+      .game {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.06;
+        color: ${GAME_START_TOAST_ACCENT_COLOR};
+        font-weight: 400;
+        letter-spacing: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      @keyframes in {
+        from { transform: translate3d(0, -16px, 0); opacity: 0; }
+        to { transform: translate3d(0, 0, 0); opacity: 1; }
+      }
+      @keyframes out {
+        from { transform: translate3d(0, 0, 0); opacity: 1; }
+        to { transform: translate3d(0, -12px, 0); opacity: 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <article class="toast" id="toast">
+      ${brandMarkup}
+      <span class="avatar">${safeAvatarTag}</span>
+      <div class="body">
+        <strong class="title">${safeNickname}</strong>
+        <span class="subtitle">iniciou</span>
+        <span class="game">${safeGameName}</span>
+      </div>
+    </article>
+    <script>
+      const toastEl = document.getElementById("toast");
+      setTimeout(() => {
+        if (toastEl) {
+          toastEl.classList.add("is-leaving");
+        }
+      }, ${hideDelayMs});
+      setTimeout(() => {
+        window.close();
+      }, ${GAME_START_TOAST_LIFETIME_MS});
+    </script>
+  </body>
+</html>`;
+}
+
+function getGameStartToastWorkArea() {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const currentDisplay = screen.getDisplayMatching(mainWindow.getBounds());
+      if (currentDisplay?.workArea) {
+        return currentDisplay.workArea;
+      }
+    }
+  } catch (_error) {
+    // Fallback below.
+  }
+
+  try {
+    const cursorPoint = screen.getCursorScreenPoint();
+    const currentDisplay = screen.getDisplayNearestPoint(cursorPoint);
+    if (currentDisplay?.workArea) {
+      return currentDisplay.workArea;
+    }
+  } catch (_error) {
+    // Fallback below.
+  }
+
+  const primary = screen.getPrimaryDisplay();
+  return primary?.workArea || { x: 0, y: 0, width: 1920, height: 1080 };
+}
+
+function reflowGameStartToastWindows() {
+  for (let index = gameStartToastWindows.length - 1; index >= 0; index -= 1) {
+    const entry = gameStartToastWindows[index];
+    if (!entry?.window || entry.window.isDestroyed()) {
+      gameStartToastWindows.splice(index, 1);
+    }
+  }
+
+  const area = getGameStartToastWorkArea();
+  for (let index = 0; index < gameStartToastWindows.length; index += 1) {
+    const entry = gameStartToastWindows[index];
+    const toastWindow = entry.window;
+    if (!toastWindow || toastWindow.isDestroyed()) {
+      continue;
+    }
+    const x = Math.round(area.x + area.width - GAME_START_TOAST_WIDTH - GAME_START_TOAST_MARGIN_RIGHT);
+    const y = Math.round(area.y + GAME_START_TOAST_MARGIN_TOP + index * (GAME_START_TOAST_HEIGHT + GAME_START_TOAST_STACK_GAP));
+    try {
+      toastWindow.setBounds(
+        {
+          x,
+          y,
+          width: GAME_START_TOAST_WIDTH,
+          height: GAME_START_TOAST_HEIGHT
+        },
+        false
+      );
+    } catch (_error) {
+      // Ignore if window is closing.
+    }
+  }
+}
+
+async function showGameStartedDesktopToast(payload = {}) {
+  const html = buildGameStartToastHtml(payload);
+  const toastWindow = new BrowserWindow({
+    width: GAME_START_TOAST_WIDTH,
+    height: GAME_START_TOAST_HEIGHT,
+    show: false,
+    frame: false,
+    transparent: true,
+    thickFrame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    focusable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    fullscreenable: false,
+    hasShadow: false,
+    roundedCorners: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  try {
+    toastWindow.setAlwaysOnTop(true, "screen-saver");
+  } catch (_error) {
+    // Ignore unsupported level.
+  }
+
+  try {
+    toastWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  } catch (_error) {
+    // Ignore unsupported option.
+  }
+
+  try {
+    toastWindow.setIgnoreMouseEvents(true);
+  } catch (_error) {
+    // Ignore platform limitations.
+  }
+
+  const entry = {
+    window: toastWindow,
+    closeTimer: null
+  };
+  gameStartToastWindows.unshift(entry);
+  while (gameStartToastWindows.length > GAME_START_TOAST_MAX_WINDOWS) {
+    const overflowEntry = gameStartToastWindows.pop();
+    const overflowWindow = overflowEntry?.window;
+    if (overflowWindow && !overflowWindow.isDestroyed()) {
+      try {
+        overflowWindow.close();
+      } catch (_error) {
+        // Ignore close races.
+      }
+    }
+  }
+  reflowGameStartToastWindows();
+
+  toastWindow.on("closed", () => {
+    if (entry.closeTimer) {
+      clearTimeout(entry.closeTimer);
+      entry.closeTimer = null;
+    }
+    const index = gameStartToastWindows.indexOf(entry);
+    if (index >= 0) {
+      gameStartToastWindows.splice(index, 1);
+    }
+    reflowGameStartToastWindows();
+  });
+
+  entry.closeTimer = setTimeout(() => {
+    if (!toastWindow.isDestroyed()) {
+      try {
+        toastWindow.close();
+      } catch (_error) {
+        // Ignore close races.
+      }
+    }
+  }, GAME_START_TOAST_LIFETIME_MS + 120);
+
+  toastWindow.once("ready-to-show", () => {
+    reflowGameStartToastWindows();
+    try {
+      toastWindow.showInactive();
+    } catch (_error) {
+      toastWindow.show();
+    }
+  });
+
+  await toastWindow.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(html)}`);
+  return { ok: true };
 }
 
 function getCatalogPath() {
@@ -1118,6 +2464,9 @@ function clearSteamUserDataCache() {
   steamUserDataCache.profile = null;
   steamUserDataCache.profileFetchedAt = 0;
   steamUserDataCache.profileInFlight = null;
+  steamUserDataCache.friendsSteamIds = new Set();
+  steamUserDataCache.friendsFetchedAt = 0;
+  steamUserDataCache.friendsInFlight = null;
   steamUserDataCache.ownedGamesByAppId = new Map();
   steamUserDataCache.ownedGamesFetchedAt = 0;
   steamUserDataCache.ownedGamesInFlight = null;
@@ -1209,7 +2558,8 @@ function resolveAutoUpdaterProvider(config) {
   if (config.privateRepo || config.allowPrerelease) {
     return "github";
   }
-  return "generic";
+  // Default to GitHub provider to avoid stale generic CDN responses.
+  return "github";
 }
 
 function resolveAutoUpdaterConfig() {
@@ -1223,6 +2573,10 @@ function resolveAutoUpdaterConfig() {
   const provider = normalizeUpdaterProvider(process.env.WPLAY_UPDATER_PROVIDER || fileConfig.provider || "auto");
   const allowPrerelease = parseBoolean(process.env.WPLAY_UPDATER_ALLOW_PRERELEASE ?? fileConfig.allowPrerelease, false);
   const allowDowngrade = parseBoolean(process.env.WPLAY_UPDATER_ALLOW_DOWNGRADE ?? fileConfig.allowDowngrade, false);
+  const preferLatestFullInstaller = parseBoolean(
+    process.env.WPLAY_UPDATER_PREFER_FULL_INSTALLER ?? fileConfig.preferLatestFullInstaller,
+    true
+  );
   const autoDownload = parseBoolean(process.env.WPLAY_UPDATER_AUTO_DOWNLOAD ?? fileConfig.autoDownload, true);
   const updateOnLaunch = parseBoolean(process.env.WPLAY_UPDATER_ON_LAUNCH ?? fileConfig.updateOnLaunch, true);
   const autoRestartOnStartup = parseBoolean(
@@ -1249,6 +2603,7 @@ function resolveAutoUpdaterConfig() {
     provider,
     allowPrerelease,
     allowDowngrade,
+    preferLatestFullInstaller,
     autoDownload,
     updateOnLaunch,
     autoRestartOnStartup,
@@ -1283,6 +2638,7 @@ function setAutoUpdateState(nextPatch, shouldBroadcast = true) {
     return;
   }
   Object.assign(autoUpdateState, nextPatch);
+  refreshTrayContextMenu();
   if (shouldBroadcast) {
     broadcastAutoUpdateState();
   }
@@ -1679,8 +3035,11 @@ function wireAutoUpdaterEventsOnce() {
   autoUpdater.on("update-available", (info) => {
     const latestVersion = String(info?.version || "").trim();
     const latestLabel = latestVersion ? `v${latestVersion}` : "nova versao";
+    const directLatestMode = Boolean(autoUpdateConfigSnapshot?.preferLatestFullInstaller);
     const message = autoUpdater.autoDownload
-      ? `${latestLabel} encontrada. Baixando em segundo plano...`
+      ? directLatestMode
+        ? `${latestLabel} encontrada. Baixando pacote completo mais recente...`
+        : `${latestLabel} encontrada. Baixando em segundo plano...`
       : `${latestLabel} encontrada. Clique para baixar.`;
 
     setAutoUpdateState({
@@ -1709,17 +3068,15 @@ function wireAutoUpdaterEventsOnce() {
 
   autoUpdater.on("update-downloaded", (info) => {
     const latestVersion = String(info?.version || "").trim();
-    const shouldAutoRestartAfterStartup =
-      Boolean(autoUpdateConfigSnapshot?.autoRestartOnStartup) && autoUpdateLastCheckOrigin === "startup";
+    const shouldAutoRestartAfterStartup = false;
+    appendStartupLog(`[AUTO_UPDATE] update-downloaded version=${latestVersion || "unknown"} origin=${autoUpdateLastCheckOrigin}`);
 
     setAutoUpdateState({
       status: "downloaded",
       latestVersion,
       updateDownloaded: true,
       progressPercent: 100,
-      message: shouldAutoRestartAfterStartup
-        ? "Atualizacao pronta. Reiniciando automaticamente para aplicar..."
-        : "Atualizacao pronta. Clique no icone verde para reiniciar e aplicar.",
+      message: "Atualizacao pronta. Clique no icone verde para reiniciar e aplicar.",
       error: "",
       lastCheckedAt: new Date().toISOString()
     });
@@ -1782,20 +3139,29 @@ function wireAutoUpdaterEventsOnce() {
 }
 
 function setupAutoUpdater() {
+  const runtimeInfo = resolveAutoUpdateRuntimeInfo();
+
   setAutoUpdateState(
     {
-      currentVersion: app.getVersion()
+      currentVersion: app.getVersion(),
+      runtimeChannel: runtimeInfo.runtimeChannel,
+      runtimePackaged: runtimeInfo.packaged,
+      runtimeExec: runtimeInfo.execName,
+      runtimeDebug: buildAutoUpdateRuntimeDiagnostic(runtimeInfo),
+      startupSafeMode: runtimeStartupHealthState.safeMode,
+      startupSafeModeReason: runtimeStartupHealthState.reason || "",
+      preferLatestFullInstaller: true
     },
     false
   );
 
-  if (!app.isPackaged) {
+  if (!runtimeInfo.packaged) {
     setAutoUpdateState({
       supported: false,
       configured: false,
       enabled: false,
       status: "disabled",
-      message: "Atualizador automatico ativo apenas no app instalado (build).",
+      message: resolveAutoUpdateUnsupportedMessage(runtimeInfo),
       error: ""
     });
     return;
@@ -1849,6 +3215,9 @@ function setupAutoUpdater() {
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.allowPrerelease = config.allowPrerelease;
     autoUpdater.allowDowngrade = config.allowDowngrade;
+    if (Object.prototype.hasOwnProperty.call(autoUpdater, "disableDifferentialDownload")) {
+      autoUpdater.disableDifferentialDownload = config.preferLatestFullInstaller;
+    }
     const feedProvider = resolveAutoUpdaterProvider(config);
     if (feedProvider === "generic") {
       autoUpdater.setFeedURL({
@@ -1875,6 +3244,7 @@ function setupAutoUpdater() {
       status: "idle",
       latestVersion: "",
       updateDownloaded: false,
+      preferLatestFullInstaller: config.preferLatestFullInstaller,
       progressPercent: 0,
       bytesPerSecond: 0,
       transferredBytes: 0,
@@ -1897,7 +3267,12 @@ function setupAutoUpdater() {
 }
 
 async function checkForLauncherUpdate(origin = "manual") {
-  if (!autoUpdater || !autoUpdateConfigSnapshot?.enabled || !autoUpdateConfigSnapshot?.configured || !app.isPackaged) {
+  const runtimeInfo = resolveAutoUpdateRuntimeInfo();
+  if (!autoUpdater || !autoUpdateConfigSnapshot?.enabled || !autoUpdateConfigSnapshot?.configured || !runtimeInfo.packaged) {
+    return getPublicAutoUpdateState();
+  }
+
+  if (autoUpdateState.updateDownloaded || autoUpdateState.status === "downloaded") {
     return getPublicAutoUpdateState();
   }
 
@@ -1972,7 +3347,8 @@ async function checkForLauncherUpdate(origin = "manual") {
 }
 
 async function downloadLauncherUpdate() {
-  if (!autoUpdater || !autoUpdateConfigSnapshot?.enabled || !autoUpdateConfigSnapshot?.configured || !app.isPackaged) {
+  const runtimeInfo = resolveAutoUpdateRuntimeInfo();
+  if (!autoUpdater || !autoUpdateConfigSnapshot?.enabled || !autoUpdateConfigSnapshot?.configured || !runtimeInfo.packaged) {
     return getPublicAutoUpdateState();
   }
 
@@ -2039,6 +3415,7 @@ function restartAndInstallLauncherUpdate() {
   });
 
   setTimeout(() => {
+    appQuitRequested = true;
     autoUpdater.quitAndInstall(true, true);
   }, 140);
 
@@ -2976,7 +4353,8 @@ async function calculateDirectorySizeBytes(rootDir) {
   return totalBytes;
 }
 
-async function getInstalledSizeSnapshot(installDir, manifest = null) {
+async function getInstalledSizeSnapshot(installDir, manifest = null, options = {}) {
+  const skipMeasurement = options?.skipMeasurement === true;
   const cacheKey = getInstallSizeCacheKey(installDir);
   const now = Date.now();
   if (cacheKey) {
@@ -2994,6 +4372,13 @@ async function getInstalledSizeSnapshot(installDir, manifest = null) {
       installSizeCache.set(cacheKey, fromManifest);
     }
     return fromManifest;
+  }
+
+  if (skipMeasurement) {
+    if (manifestSize > 0) {
+      return { sizeBytes: manifestSize, measuredAt: manifestMeasuredAt || now };
+    }
+    return { sizeBytes: 0, measuredAt: now };
   }
 
   const measured = {
@@ -3308,6 +4693,321 @@ async function clearNotificationsForCurrentUser() {
   }
 
   return { entries: [] };
+}
+
+function resolveSocialActivityStorageConfig() {
+  const runtimeConfig = readRuntimeConfigSync();
+  const runtimeSocial =
+    runtimeConfig?.socialActivity && typeof runtimeConfig.socialActivity === "object" ? runtimeConfig.socialActivity : {};
+
+  return {
+    schema: normalizeCatalogIdentifier(
+      process.env.WPLAY_SOCIAL_SUPABASE_SCHEMA || runtimeSocial.supabaseSchema || runtimeSocial.schema,
+      SOCIAL_ACTIVITY_DEFAULT_SUPABASE_SCHEMA
+    ),
+    table: normalizeCatalogIdentifier(
+      process.env.WPLAY_SOCIAL_SUPABASE_TABLE || runtimeSocial.supabaseTable || runtimeSocial.table,
+      SOCIAL_ACTIVITY_DEFAULT_SUPABASE_TABLE
+    )
+  };
+}
+
+function resolveSupabaseSocialActivityContext() {
+  const authConfig = resolveAuthConfig();
+  if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
+    throw new Error("[SOCIAL_SUPABASE_AUTH] Supabase nao configurado para atividade social.");
+  }
+
+  const steamSession = getSteamSessionSnapshot();
+  const userId = String(steamSession?.steamId || steamSession?.user?.id || "").trim();
+  if (!userId) {
+    throw new Error("[SOCIAL_AUTH_REQUIRED] Faca login para usar atividade social.");
+  }
+
+  const storageConfig = resolveSocialActivityStorageConfig();
+  return {
+    authConfig,
+    schema: storageConfig.schema,
+    table: storageConfig.table,
+    userId,
+    userDisplayName: String(steamSession?.user?.displayName || "").trim(),
+    userAvatarUrl: String(steamSession?.user?.avatarUrl || "").trim()
+  };
+}
+
+function getSocialActivitySupabaseEndpoint(context) {
+  return `${context.authConfig.supabaseUrl}/rest/v1/${context.table}`;
+}
+
+function mapSupabaseSocialActivityRow(row) {
+  if (!row || typeof row !== "object") return null;
+  const id = String(row.id || "").trim();
+  const actorSteamId = normalizeSteamId(row.actor_steam_id || row.actorSteamId);
+  if (!id || !actorSteamId) return null;
+
+  const actorDisplayName = sanitizeNotificationText(row.actor_display_name || row.actorDisplayName, 80) || "Jogador";
+  const actorAvatarUrl = sanitizeHttpUrlForToast(row.actor_avatar_url || row.actorAvatarUrl);
+  const gameId = sanitizeNotificationText(row.game_id || row.gameId, 120);
+  const gameName = sanitizeNotificationText(row.game_name || row.gameName, 140) || "Jogo";
+  const createdAtRaw = String(row.created_at || row.createdAt || "").trim();
+  const createdAtMs = Date.parse(createdAtRaw);
+  const createdAt = Number.isFinite(createdAtMs) ? new Date(createdAtMs).toISOString() : new Date().toISOString();
+
+  return {
+    id,
+    actorSteamId,
+    actorDisplayName,
+    actorAvatarUrl,
+    gameId,
+    gameName,
+    createdAt
+  };
+}
+
+function normalizeSocialActivitySince(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) return "";
+  return new Date(parsed).toISOString();
+}
+
+function splitIntoChunks(values = [], chunkSize = 80) {
+  const list = Array.isArray(values) ? values : [];
+  const size = Math.max(1, Math.min(200, parsePositiveInteger(chunkSize) || 80));
+  const chunks = [];
+  for (let index = 0; index < list.length; index += size) {
+    chunks.push(list.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function toSocialActivityCreatedAtMs(entry) {
+  const parsed = Date.parse(String(entry?.createdAt || "").trim());
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function fetchSteamFriendSteamIds(steamId, steamWebApiKey) {
+  const normalizedSteamId = normalizeSteamId(steamId);
+  const apiKey = normalizeSteamWebApiKey(steamWebApiKey);
+  if (!normalizedSteamId || !apiKey) {
+    return [];
+  }
+
+  const endpoint = `${STEAM_API_BASE_URL}/ISteamUser/GetFriendList/v0001/`;
+  const response = await axios.get(endpoint, {
+    params: {
+      key: apiKey,
+      steamid: normalizedSteamId,
+      relationship: "friend"
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 401 || response.status === 403 || response.status === 404) {
+    return [];
+  }
+  if (response.status >= 400) {
+    throw new Error(`[STEAM_FRIEND_LIST_HTTP_${response.status}]`);
+  }
+
+  const friends = Array.isArray(response.data?.friendslist?.friends) ? response.data.friendslist.friends : [];
+  return [
+    ...new Set(
+      friends
+        .map((friendEntry) => normalizeSteamId(friendEntry?.steamid))
+        .filter(Boolean)
+    )
+  ];
+}
+
+async function getSteamFriendSteamIdsCached(steamId, steamWebApiKey) {
+  ensureSteamUserCacheScope(steamId);
+  const currentIds = steamUserDataCache.friendsSteamIds instanceof Set ? steamUserDataCache.friendsSteamIds : new Set();
+  const hasCachedFriends = currentIds.size > 0;
+  const effectiveTtlMs = hasCachedFriends ? STEAM_FRIENDS_CACHE_TTL_MS : STEAM_FRIENDS_EMPTY_RETRY_MS;
+  const cacheAge = Date.now() - Number(steamUserDataCache.friendsFetchedAt || 0);
+  const hasFreshCache = cacheAge >= 0 && cacheAge < effectiveTtlMs;
+
+  if (hasFreshCache) {
+    return [...currentIds];
+  }
+
+  if (steamUserDataCache.friendsInFlight) {
+    return steamUserDataCache.friendsInFlight;
+  }
+
+  steamUserDataCache.friendsInFlight = fetchSteamFriendSteamIds(steamId, steamWebApiKey)
+    .then((friendIds) => {
+      steamUserDataCache.friendsSteamIds = new Set(friendIds);
+      steamUserDataCache.friendsFetchedAt = Date.now();
+      return friendIds;
+    })
+    .catch((error) => {
+      if (!(steamUserDataCache.friendsSteamIds instanceof Set)) {
+        steamUserDataCache.friendsSteamIds = new Set();
+      }
+      steamUserDataCache.friendsFetchedAt = Date.now();
+      if (steamUserDataCache.friendsSteamIds.size > 0) {
+        return [...steamUserDataCache.friendsSteamIds];
+      }
+      throw error;
+    })
+    .finally(() => {
+      steamUserDataCache.friendsInFlight = null;
+    });
+
+  return steamUserDataCache.friendsInFlight;
+}
+
+async function pruneSocialActivityInSupabase(context) {
+  const endpoint = getSocialActivitySupabaseEndpoint(context);
+  const cutoffIso = new Date(Date.now() - SOCIAL_ACTIVITY_EVENT_TTL_HOURS * 60 * 60 * 1000).toISOString();
+  const response = await axios.delete(endpoint, {
+    headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+    params: {
+      created_at: `lt.${cutoffIso}`
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(`[SOCIAL_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`);
+  }
+
+  if (response.status >= 400) {
+    throw new Error(`[SOCIAL_PRUNE_HTTP_${response.status}] Falha ao limpar eventos sociais antigos.`);
+  }
+}
+
+async function publishSocialGameLaunchActivity(payload = {}) {
+  const context = resolveSupabaseSocialActivityContext();
+  const actorSteamId = normalizeSteamId(context.userId);
+  const actorDisplayName = sanitizeNotificationText(context.userDisplayName, 80) || "Jogador";
+  const actorAvatarUrl = sanitizeHttpUrlForToast(context.userAvatarUrl);
+  const gameId = sanitizeNotificationText(payload.gameId, 120);
+  const gameName = sanitizeNotificationText(payload.gameName, 140) || "Jogo";
+
+  if (!actorSteamId || !gameName) {
+    return { ok: false, skipped: true };
+  }
+
+  const dedupeGameKey = gameId || gameName.toLowerCase();
+  const emitKey = `${actorSteamId}:${dedupeGameKey}`;
+  const now = Date.now();
+  const lastEmittedAt = Number(socialActivityEmitCache.get(emitKey) || 0);
+  if (lastEmittedAt > 0 && now - lastEmittedAt < SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS) {
+    return { ok: true, skipped: true, reason: "debounced" };
+  }
+  socialActivityEmitCache.set(emitKey, now);
+  if (socialActivityEmitCache.size > 400) {
+    for (const [key, value] of socialActivityEmitCache.entries()) {
+      if (now - Number(value || 0) > SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS * 8) {
+        socialActivityEmitCache.delete(key);
+      }
+    }
+  }
+
+  const endpoint = getSocialActivitySupabaseEndpoint(context);
+  const response = await axios.post(
+    endpoint,
+    {
+      actor_steam_id: actorSteamId,
+      actor_display_name: actorDisplayName,
+      actor_avatar_url: actorAvatarUrl,
+      game_id: gameId || null,
+      game_name: gameName
+    },
+    {
+      headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+      timeout: 20_000,
+      validateStatus: (status) => status >= 200 && status < 500
+    }
+  );
+
+  if (response.status === 404) {
+    throw new Error(`[SOCIAL_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`);
+  }
+  if (response.status >= 400) {
+    throw new Error(`[SOCIAL_HTTP_${response.status}] Falha ao publicar atividade social.`);
+  }
+
+  await pruneSocialActivityInSupabase(context).catch(() => {});
+
+  return { ok: true };
+}
+
+async function listFriendGameActivitiesForCurrentUser(options = {}) {
+  const context = resolveSupabaseSocialActivityContext();
+  const steamWebApiKey = normalizeSteamWebApiKey(context.authConfig.steamWebApiKey);
+  if (!steamWebApiKey) {
+    return { entries: [] };
+  }
+
+  const friendSteamIds = await getSteamFriendSteamIdsCached(context.userId, steamWebApiKey).catch(() => []);
+  if (!Array.isArray(friendSteamIds) || friendSteamIds.length === 0) {
+    return { entries: [] };
+  }
+
+  const sinceIso = normalizeSocialActivitySince(options?.since);
+  const limit = Math.max(1, Math.min(200, parsePositiveInteger(options?.limit) || SOCIAL_ACTIVITY_FETCH_LIMIT));
+  const endpoint = getSocialActivitySupabaseEndpoint(context);
+  const idChunks = splitIntoChunks(
+    friendSteamIds.map((friendId) => normalizeSteamId(friendId)).filter(Boolean),
+    80
+  );
+
+  const entries = [];
+  for (const chunk of idChunks) {
+    if (!chunk.length) {
+      continue;
+    }
+
+    const params = {
+      select: "id,actor_steam_id,actor_display_name,actor_avatar_url,game_id,game_name,created_at",
+      actor_steam_id: `in.(${chunk.join(",")})`,
+      order: "created_at.desc",
+      limit
+    };
+    if (sinceIso) {
+      params.created_at = `gt.${sinceIso}`;
+    }
+
+    const response = await axios.get(endpoint, {
+      headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+      params,
+      timeout: 20_000,
+      validateStatus: (status) => status >= 200 && status < 500
+    });
+
+    if (response.status === 404) {
+      throw new Error(`[SOCIAL_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`);
+    }
+    if (response.status >= 400) {
+      throw new Error(`[SOCIAL_HTTP_${response.status}] Falha ao carregar atividade social.`);
+    }
+
+    const rows = Array.isArray(response.data) ? response.data : [];
+    entries.push(...rows.map((row) => mapSupabaseSocialActivityRow(row)).filter(Boolean));
+  }
+
+  const dedupedById = new Map();
+  for (const entry of entries) {
+    if (!entry?.id) {
+      continue;
+    }
+    if (!dedupedById.has(entry.id)) {
+      dedupedById.set(entry.id, entry);
+    }
+  }
+
+  const sorted = [...dedupedById.values()]
+    .sort((left, right) => toSocialActivityCreatedAtMs(right) - toSocialActivityCreatedAtMs(left))
+    .slice(0, limit);
+
+  return { entries: sorted };
 }
 
 async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {}) {
@@ -6238,10 +7938,27 @@ async function applySteamStatsToCatalogGames(games = []) {
   });
 }
 
-async function getGamesWithStatus() {
+function resolveGamesStatusRequestOptions(rawOptions = {}) {
+  const options = rawOptions && typeof rawOptions === "object" ? rawOptions : {};
+  const lowSpecHost = resolveHostLowSpecProfile();
+  const lightweightRequested = options.lightweight === true;
+  const forceFullRequested = options.lightweight === false;
+  const lightweight = lightweightRequested || (lowSpecHost && !forceFullRequested);
+
+  return {
+    lightweight,
+    includeSteamStats: options.includeSteamStats === true && !lightweight,
+    includeRunningState: options.includeRunningState !== false,
+    measureInstalledSize: options.measureInstalledSize === true || !lightweight,
+    persistMeasuredSize: options.persistMeasuredSize !== false && !lightweight
+  };
+}
+
+async function getGamesWithStatus(rawOptions = {}) {
+  const requestOptions = resolveGamesStatusRequestOptions(rawOptions);
   const { games, settings } = await readCatalogBundle();
   const installRoot = getCurrentInstallRoot(settings);
-  const runningProcessNamesLower = await getRunningProcessNamesLower();
+  const runningProcessNamesLower = requestOptions.includeRunningState ? await getRunningProcessNamesLower() : new Set();
 
   const gamesWithStatus = await Promise.all(
     games.map(async (game) => {
@@ -6253,7 +7970,9 @@ async function getGamesWithStatus() {
 
       if (installed) {
         manifest = await readInstallManifest(executable.installDir);
-        const installedSnapshot = await getInstalledSizeSnapshot(executable.installDir, manifest);
+        const installedSnapshot = await getInstalledSizeSnapshot(executable.installDir, manifest, {
+          skipMeasurement: !requestOptions.measureInstalledSize
+        });
         if (installedSnapshot.sizeBytes > 0) {
           resolvedSizeBytes = installedSnapshot.sizeBytes;
         }
@@ -6261,6 +7980,7 @@ async function getGamesWithStatus() {
         const manifestSizeBytes = parseSizeBytes(manifest?.installedSizeBytes);
         const manifestMeasuredAt = Number(manifest?.sizeMeasuredAt || 0);
         const shouldPersistSize =
+          requestOptions.persistMeasuredSize &&
           installedSnapshot.sizeBytes > 0 &&
           (manifestSizeBytes !== installedSnapshot.sizeBytes || manifestMeasuredAt !== installedSnapshot.measuredAt);
 
@@ -6277,10 +7997,12 @@ async function getGamesWithStatus() {
           }).catch(() => {});
         }
 
-        const processCandidates = getProcessCandidatesForInstalledGame(game, executable, manifest)
-          .map((value) => normalizeProcessNameForMatch(value))
-          .filter(Boolean);
-        running = processCandidates.some((candidate) => runningProcessNamesLower.has(candidate));
+        if (requestOptions.includeRunningState) {
+          const processCandidates = getProcessCandidatesForInstalledGame(game, executable, manifest)
+            .map((value) => normalizeProcessNameForMatch(value))
+            .filter(Boolean);
+          running = processCandidates.some((candidate) => runningProcessNamesLower.has(candidate));
+        }
       }
 
       const resolvedSize = resolvedSizeBytes > 0 ? formatBytesShort(resolvedSizeBytes) : game.size;
@@ -6296,6 +8018,10 @@ async function getGamesWithStatus() {
       };
     })
   );
+
+  if (!requestOptions.includeSteamStats) {
+    return gamesWithStatus;
+  }
 
   const gamesWithSteamStats = await applySteamStatsToCatalogGames(gamesWithStatus);
   return gamesWithSteamStats;
@@ -6486,6 +8212,11 @@ async function playGame(gameId) {
   runningProcessCache.fetchedAt = 0;
   runningProcessCache.namesLower = new Set();
 
+  void publishSocialGameLaunchActivity({
+    gameId: game.id,
+    gameName: game.name
+  }).catch(() => {});
+
   return {
     ok: true
   };
@@ -6528,9 +8259,23 @@ async function closeGame(gameId) {
   };
 }
 
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
+appendStartupLog("[APP] main bootstrap iniciado.");
+const startupRuntimeInfo = resolveAutoUpdateRuntimeInfo();
+const singleInstanceEnabled = runtimeChannel !== "dev";
+const hasSingleInstanceLock = singleInstanceEnabled ? app.requestSingleInstanceLock() : true;
+appendStartupLog(
+  `[APP] runtime channel=${runtimeChannel} app.isPackaged=${startupRuntimeInfo.packagedByElectron} ` +
+    `defaultApp=${startupRuntimeInfo.defaultApp} exec=${startupRuntimeInfo.execName || "unknown"}`
+);
+appendStartupLog(
+  `[APP] startup safeMode=${runtimeStartupHealthState.safeMode} ` +
+    `failures=${runtimeStartupHealthState.failureCount} reason=${runtimeStartupHealthState.reason || "none"}`
+);
+appendStartupLog(`[APP] singleInstanceEnabled=${singleInstanceEnabled} singleInstanceLock=${hasSingleInstanceLock}`);
 
 if (!hasSingleInstanceLock) {
+  appendStartupLog("[APP] encerrando por instancia secundaria.");
+  markStartupLaunchHealthy("secondary-instance-exit");
   app.quit();
 } else {
   authDeepLinkUrlBuffer = extractDeepLinkFromArgv(process.argv);
@@ -6551,44 +8296,72 @@ if (!hasSingleInstanceLock) {
     void handleAuthDeepLink(urlValue);
   });
 
+  app.on("child-process-gone", (_event, details) => {
+    const processType = String(details?.type || "unknown");
+    const reason = String(details?.reason || "unknown");
+    const exitCode = Number(details?.exitCode || 0);
+    appendStartupLog(`[CHILD_PROCESS] gone type=${processType} reason=${reason} exitCode=${exitCode}`);
+  });
+
   app.whenReady().then(async () => {
+    appQuitRequested = false;
+    ensureWindowsAppIdentity();
+    appendStartupLog("[APP] whenReady iniciado.");
     await ensurePersistedAuthConfigFile().catch(() => {});
     await ensurePersistedUpdaterConfigFile().catch(() => {});
     registerAuthProtocolClient();
     ensureYoutubeEmbedRequestHeaders();
     setupAutoUpdater();
+    try {
+      ensureWindowsShortcutsWithIcon();
+    } catch (error) {
+      appendStartupLog(`[SHORTCUT_FATAL_ERROR] ${formatStartupErrorForLog(error)}`);
+    }
+    createTray();
+
+    if (runtimeStartupHealthState.safeMode) {
+      appendStartupLog(
+        `[SAFE_MODE] inicializacao protegida ativa. updates-on-launch desativado para este boot (${runtimeStartupHealthState.reason || "auto"}).`
+      );
+    }
 
     const shouldCheckUpdateOnLaunch = Boolean(
-      autoUpdateConfigSnapshot?.enabled && autoUpdateConfigSnapshot?.configured && autoUpdateConfigSnapshot?.updateOnLaunch
+      autoUpdateConfigSnapshot?.enabled &&
+        autoUpdateConfigSnapshot?.configured &&
+        autoUpdateConfigSnapshot?.updateOnLaunch &&
+        !runtimeStartupHealthState.safeMode
     );
-    const useStartupUpdateSplash = shouldUseStartupUpdateSplash();
 
-    if (useStartupUpdateSplash) {
+    try {
+      createWindow();
+    } catch (error) {
+      appendStartupLog(`[CREATE_WINDOW_ERROR] ${formatStartupErrorForLog(error)}`);
       try {
-        createUpdateSplashWindow();
-      } catch (error) {
-        console.error("Nao foi possivel abrir tela de atualizacao:", error?.message || error);
+        dialog.showErrorBox(
+          "Falha ao abrir o launcher",
+          `Nao foi possivel abrir a interface do WPlay.\n\n${error?.message || "Erro desconhecido."}`
+        );
+      } catch (_dialogError) {
+        // Ignore dialog failures.
       }
+      appQuitRequested = true;
+      app.quit();
+      return;
     }
 
     if (shouldCheckUpdateOnLaunch) {
-      await Promise.race([
-        checkForLauncherUpdate("startup"),
-        new Promise((resolve) => setTimeout(resolve, AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS))
-      ]).catch(() => {});
-
-      if (useStartupUpdateSplash && isAutoUpdateStartupBlockingStatus(autoUpdateState.status)) {
-        await waitForStartupUpdateBlockingStateToFinish(AUTO_UPDATE_SPLASH_MAX_WAIT_MS).catch(() => {});
-      }
+      const updateWarmupDelayMs = resolveHostLowSpecProfile() ? 7_000 : 2_500;
+      setTimeout(() => {
+        appendStartupLog("[AUTO_UPDATE] verificacao inicial em background.");
+        void checkForLauncherUpdate("startup");
+      }, updateWarmupDelayMs);
     }
-
-    createWindow();
 
     if (authDeepLinkUrlBuffer) {
       void handleAuthDeepLink(authDeepLinkUrlBuffer);
     }
 
-    ipcMain.handle("launcher:get-games", () => getGamesWithStatus());
+    ipcMain.handle("launcher:get-games", (_event, options) => getGamesWithStatus(options));
     ipcMain.handle("launcher:get-install-root", () => getInstallRootPath());
     ipcMain.handle("launcher:choose-install-base-directory", () => chooseInstallBaseDirectory());
     ipcMain.handle("launcher:install-game", (_event, gameId) => installGame(gameId));
@@ -6599,6 +8372,7 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:open-game-install-folder", (_event, gameId) => openGameInstallFolder(gameId));
     ipcMain.handle("launcher:open-external-url", (_event, rawUrl) => openExternalUrl(rawUrl));
     ipcMain.handle("launcher:open-steam-client", () => openSteamClient());
+    ipcMain.handle("launcher:show-game-start-toast", (_event, payload) => showGameStartedDesktopToast(payload));
     ipcMain.handle("launcher:auth-get-session", () => getAuthSessionState());
     ipcMain.handle("launcher:auth-login-steam", () => loginWithSteam());
     ipcMain.handle("launcher:auth-login-discord", () => loginWithSteam());
@@ -6609,6 +8383,9 @@ if (!hasSingleInstanceLock) {
       deleteNotificationForCurrentUser(notificationId)
     );
     ipcMain.handle("launcher:notifications-clear", () => clearNotificationsForCurrentUser());
+    ipcMain.handle("launcher:social-list-friend-game-activities", (_event, options) =>
+      listFriendGameActivitiesForCurrentUser(options)
+    );
     ipcMain.handle("launcher:auto-update-get-state", () => getPublicAutoUpdateState());
     ipcMain.handle("launcher:auto-update-check", () => checkForLauncherUpdate("manual"));
     ipcMain.handle("launcher:auto-update-check-background", () => checkForLauncherUpdate("renderer-poll"));
@@ -6639,20 +8416,26 @@ if (!hasSingleInstanceLock) {
     });
 
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
+      if (BrowserWindow.getAllWindows().length === 0 || !mainWindow || mainWindow.isDestroyed()) {
         createWindow();
+        return;
       }
+      showAndFocusMainWindow();
     });
   });
 
   app.on("window-all-closed", () => {
-    if (process.platform !== "darwin") {
+    if (appQuitRequested && process.platform !== "darwin") {
       app.quit();
     }
   });
 
   app.on("before-quit", () => {
+    appQuitRequested = true;
+    clearStartupBootWatchdog();
     clearAutoUpdaterInterval();
     destroyUpdateSplashWindow();
+    destroyTray();
+    appendStartupLog("[APP] encerrando launcher.");
   });
 }

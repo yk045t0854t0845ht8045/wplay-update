@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("launcherApi", {
-  getGames: () => ipcRenderer.invoke("launcher:get-games"),
+  getGames: (options = {}) => ipcRenderer.invoke("launcher:get-games", options),
   getInstallRoot: () => ipcRenderer.invoke("launcher:get-install-root"),
   chooseInstallBaseDirectory: () => ipcRenderer.invoke("launcher:choose-install-base-directory"),
   installGame: (gameId) => ipcRenderer.invoke("launcher:install-game", gameId),
@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   openGameInstallFolder: (gameId) => ipcRenderer.invoke("launcher:open-game-install-folder", gameId),
   openExternalUrl: (urlValue) => ipcRenderer.invoke("launcher:open-external-url", urlValue),
   openSteamClient: () => ipcRenderer.invoke("launcher:open-steam-client"),
+  showGameStartedToast: (payload) => ipcRenderer.invoke("launcher:show-game-start-toast", payload),
   authGetSession: () => ipcRenderer.invoke("launcher:auth-get-session"),
   authLoginSteam: () => ipcRenderer.invoke("launcher:auth-login-steam"),
   authLoginDiscord: () => ipcRenderer.invoke("launcher:auth-login-steam"),
@@ -20,6 +21,8 @@ contextBridge.exposeInMainWorld("launcherApi", {
   notificationsCreate: (payload) => ipcRenderer.invoke("launcher:notifications-create", payload),
   notificationsDelete: (notificationId) => ipcRenderer.invoke("launcher:notifications-delete", notificationId),
   notificationsClear: () => ipcRenderer.invoke("launcher:notifications-clear"),
+  socialListFriendGameActivities: (options = {}) =>
+    ipcRenderer.invoke("launcher:social-list-friend-game-activities", options),
   autoUpdateGetState: () => ipcRenderer.invoke("launcher:auto-update-get-state"),
   autoUpdateCheck: () => ipcRenderer.invoke("launcher:auto-update-check"),
   autoUpdateCheckBackground: () => ipcRenderer.invoke("launcher:auto-update-check-background"),

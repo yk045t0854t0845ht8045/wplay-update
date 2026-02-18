@@ -2,11 +2,12 @@
   "enabled": true,
   "owner": "SEU_USUARIO_OU_ORG",
   "repo": "SEU_REPO_DO_LAUNCHER",
-  "provider": "auto",
+  "provider": "github",
   "channel": "latest",
   "updateOnLaunch": true,
   "autoRestartOnStartup": true,
   "autoDownload": true,
+  "preferLatestFullInstaller": true,
   "checkIntervalMinutes": 1,
   "allowPrerelease": false,
   "allowDowngrade": false
