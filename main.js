@@ -128,12 +128,12 @@ const CATALOG_MIN_POLL_INTERVAL_SECONDS = 2;
 const CATALOG_MAX_POLL_INTERVAL_SECONDS = 120;
 const CATALOG_MONITOR_INTERVAL_MS = 4500;
 const CATALOG_MONITOR_INTERVAL_LOW_SPEC_MS = 9000;
-const CATALOG_SIZE_SYNC_STARTUP_DELAY_MS = 2500;
-const CATALOG_SIZE_SYNC_INTERVAL_MS = 10 * 60 * 1000;
-const CATALOG_SIZE_SYNC_INTERVAL_LOW_SPEC_MS = 15 * 60 * 1000;
-const CATALOG_SIZE_SYNC_MAX_PROBES_PER_CYCLE = 4;
-const CATALOG_SIZE_SYNC_MAX_PROBES_PER_CYCLE_LOW_SPEC = 2;
-const CATALOG_SIZE_SYNC_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
+const CATALOG_SIZE_SYNC_STARTUP_DELAY_MS = 1200;
+const CATALOG_SIZE_SYNC_INTERVAL_MS = 10 * 1000;
+const CATALOG_SIZE_SYNC_INTERVAL_LOW_SPEC_MS = 20 * 1000;
+const CATALOG_SIZE_SYNC_MAX_PROBES_PER_CYCLE = 2;
+const CATALOG_SIZE_SYNC_MAX_PROBES_PER_CYCLE_LOW_SPEC = 1;
+const CATALOG_SIZE_SYNC_RETRY_COOLDOWN_MS = 45 * 1000;
 const CATALOG_SIZE_SYNC_PROBE_TIMEOUT_MS = 20 * 1000;
 const CATALOG_DEFAULT_SUPABASE_SCHEMA = "public";
 const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
@@ -6042,6 +6042,14 @@ function setCatalogSizeSyncState(gameId, patch = {}) {
   });
 }
 
+function getKnownCatalogSizeBytes(gameId) {
+  const state = getCatalogSizeSyncState(gameId);
+  if (!state) {
+    return 0;
+  }
+  return parseSizeBytes(state.lastSizeBytes);
+}
+
 async function resolveCatalogGameSizeBytesByProbe(game) {
   if (!game || typeof game !== "object") {
     return 0;
@@ -6085,12 +6093,13 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
     const { games, settings } = await readCatalogBundle();
     const sourceConfig = resolveCatalogSourceConfig(settings);
     if (!sourceConfig.useRemote) {
-      return { updatedCount: 0, checkedCount: 0 };
+      return { updatedCount: 0, resolvedCount: 0, checkedCount: 0 };
     }
 
     const maxProbes = Math.max(1, getCatalogSizeSyncMaxProbesPerCycle());
     const now = Date.now();
     let updatedCount = 0;
+    let resolvedCount = 0;
     let checkedCount = 0;
 
     for (const game of Array.isArray(games) ? games : []) {
@@ -6117,33 +6126,42 @@ async function syncMissingCatalogSizeBytesInBackground(force = false) {
         continue;
       }
 
-      const synced = await syncCatalogGameSizeBytesToSupabase(game.id, resolvedBytes, sourceConfig);
-      if (!synced) {
-        continue;
-      }
-
       setCatalogSizeSyncState(game.id, {
         lastAttemptAt: now,
         lastSuccessAt: now,
         lastSizeBytes: resolvedBytes
       });
-      updatedCount += 1;
+      resolvedCount += 1;
+
+      const synced = await syncCatalogGameSizeBytesToSupabase(game.id, resolvedBytes, sourceConfig);
+      if (synced) {
+        updatedCount += 1;
+      }
     }
 
-    if (updatedCount > 0) {
+    if (resolvedCount > 0) {
       invalidateRemoteCatalogCache("catalog-size-sync");
       emitCatalogChangedHint({
         reason: "size-bytes-sync",
-        updatedCount
+        updatedCount,
+        resolvedCount
       });
-      appendStartupLog(`[CATALOG_SIZE_SYNC] size_bytes atualizado para ${updatedCount} jogo(s).`);
+      if (updatedCount > 0) {
+        appendStartupLog(
+          `[CATALOG_SIZE_SYNC] size_bytes resolvido para ${resolvedCount} jogo(s); persistido no Supabase: ${updatedCount}.`
+        );
+      } else {
+        appendStartupLog(
+          `[CATALOG_SIZE_SYNC] size resolvido localmente para ${resolvedCount} jogo(s), sem persistencia remota (verificar RLS/update).`
+        );
+      }
     }
 
-    return { updatedCount, checkedCount };
+    return { updatedCount, resolvedCount, checkedCount };
   })()
     .catch((error) => {
       appendStartupLog(`[CATALOG_SIZE_SYNC_ERROR] ${formatStartupErrorForLog(error)}`);
-      return { updatedCount: 0, checkedCount: 0 };
+      return { updatedCount: 0, resolvedCount: 0, checkedCount: 0 };
     })
     .finally(() => {
       catalogSizeSyncInFlight = null;
@@ -6162,6 +6180,7 @@ function ensureCatalogSizeSyncMonitorStarted() {
     void syncMissingCatalogSizeBytesInBackground(false);
   }, intervalMs);
 
+  void syncMissingCatalogSizeBytesInBackground(true);
   setTimeout(() => {
     void syncMissingCatalogSizeBytesInBackground(true);
   }, CATALOG_SIZE_SYNC_STARTUP_DELAY_MS);
@@ -6300,7 +6319,7 @@ async function readCatalogBundle() {
       const installDirName = String(entry.installDirName || name).trim() || name;
       const section = String(entry.section || "Jogos gratis").trim() || "Jogos gratis";
       const sizeLabel = String(entry.size || "").trim();
-      const sizeBytes = parseSizeBytes(entry.sizeBytes) || parseSizeBytes(sizeLabel);
+      const sizeBytes = parseSizeBytes(entry.sizeBytes) || parseSizeBytes(sizeLabel) || getKnownCatalogSizeBytes(id);
       const size = sizeLabel || (sizeBytes > 0 ? formatBytesShort(sizeBytes) : "Tamanho nao informado");
       const comingSoon = entry.comingSoon === true || !hasDownloadSource;
       const description = String(entry.description || "Sem descricao.");
@@ -8768,6 +8787,8 @@ async function uninstallGame(gameId) {
       }
       removedDirs.push(installDir);
     }
+
+    void syncMissingCatalogSizeBytesInBackground(true);
 
     return {
       ok: true,
