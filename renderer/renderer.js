@@ -3112,6 +3112,28 @@ function syncSearchVisibility() {
   }
 }
 
+function shouldUseSmoothStageScroll() {
+  if (typeof window.matchMedia !== "function") {
+    return true;
+  }
+  return !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function scrollStageToTop(options = {}) {
+  if (!(stageSurface instanceof HTMLElement)) return;
+  const currentScrollTop = Math.max(0, Number(stageSurface.scrollTop || 0));
+  if (currentScrollTop <= 1) return;
+
+  const preferSmooth = options.smooth !== false;
+  const behavior = preferSmooth && shouldUseSmoothStageScroll() ? "smooth" : "auto";
+  if (typeof stageSurface.scrollTo === "function") {
+    stageSurface.scrollTo({ top: 0, left: 0, behavior });
+    return;
+  }
+
+  stageSurface.scrollTop = 0;
+}
+
 function closeSearch(clearQuery = true) {
   state.searchOpen = false;
   if (clearQuery) {
@@ -3128,6 +3150,10 @@ function setView(nextView) {
     return;
   }
   const previousView = state.view;
+
+  if (nextView === "details") {
+    scrollStageToTop({ smooth: true });
+  }
 
   if (nextView !== "details") {
     state.lastNonDetailView = nextView;

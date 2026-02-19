@@ -473,10 +473,9 @@
     background: #101014;
     box-shadow: 0 10px 32px rgba(1, 7, 16, 0.34);
     backdrop-filter: blur(14px) saturate(1.08);
-    contain: paint;
+    overflow: visible;
     isolation: isolate;
-    transform: translateZ(0);
-    transform: translateY(0);
+    transform: translate3d(0, 0, 0);
     opacity: 1;
     transition:
       top 0.24s ease,
@@ -533,6 +532,7 @@
 
   .top-actions {
     @apply relative flex items-center gap-2.5;
+    z-index: 70;
   }
 
   .search-wrap {
@@ -656,7 +656,8 @@
   }
 
   .account-menu {
-    @apply absolute right-0 top-[52px] z-30 w-[236px] rounded-2xl border p-1.5;
+    @apply absolute right-0 top-[52px] w-[236px] rounded-2xl border p-1.5;
+    z-index: 120;
     border-color: rgba(255, 255, 255, 0.12);
     background: #101014;
     box-shadow: 0 22px 52px rgba(0, 0, 0, 0.5);
@@ -704,7 +705,8 @@
   }
 
   .notifications-panel {
-    @apply absolute right-14 top-[52px] z-30 w-[364px] rounded-2xl border-0 p-3.5;
+    @apply absolute right-14 top-[52px] w-[364px] rounded-2xl border-0 p-3.5;
+    z-index: 120;
     background: #131318;
     box-shadow: 0 22px 48px rgba(2, 8, 18, 0.52);
     -webkit-backdrop-filter: none;

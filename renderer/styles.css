@@ -1280,10 +1280,9 @@ body.ui-transitions-hold .top-header,
   background: #101014;
   box-shadow: 0 10px 32px rgba(1, 7, 16, 0.34);
   backdrop-filter: blur(14px) saturate(1.08);
-  contain: paint;
+  overflow: visible;
   isolation: isolate;
-  transform: translateZ(0);
-  transform: translateY(0);
+  transform: translate3d(0, 0, 0);
   opacity: 1;
   transition:
       top 0.24s ease,
@@ -1361,6 +1360,7 @@ body.header-scrolled:not(.view-details):not(.ui-transitions-hold) .top-header {
   display: flex;
   align-items: center;
   gap: 0.625rem;
+  z-index: 70;
 }
 
 .search-wrap{
@@ -1547,11 +1547,11 @@ body.header-scrolled:not(.view-details):not(.ui-transitions-hold) .top-header {
   position: absolute;
   right: 0px;
   top: 52px;
-  z-index: 30;
   width: 236px;
   border-radius: 1rem;
   border-width: 1px;
   padding: 0.375rem;
+  z-index: 120;
   border-color: rgba(255, 255, 255, 0.12);
   background: #101014;
   box-shadow: 0 22px 52px rgba(0, 0, 0, 0.5);
@@ -1657,11 +1657,11 @@ body.header-scrolled:not(.view-details):not(.ui-transitions-hold) .top-header {
   position: absolute;
   right: 3.5rem;
   top: 52px;
-  z-index: 30;
   width: 364px;
   border-radius: 1rem;
   border-width: 0px;
   padding: 0.875rem;
+  z-index: 120;
   background: #131318;
   box-shadow: 0 22px 48px rgba(2, 8, 18, 0.52);
   backdrop-filter: none;
