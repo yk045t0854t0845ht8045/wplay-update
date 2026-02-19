@@ -8006,9 +8006,16 @@ function buildDriveConfirmUrlFromToken(sourceUrl, driveId, token) {
   return url.toString();
 }
 
+function normalizeTextForMatch(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 function detectDriveBlockingReason(bodyText, statusCode = 0) {
   const text = String(bodyText || "");
-  const lower = text.toLowerCase();
+  const lower = normalizeTextForMatch(text);
 
   if (
     statusCode === 404 ||
@@ -8020,6 +8027,13 @@ function detectDriveBlockingReason(bodyText, statusCode = 0) {
   }
 
   if (
+    statusCode === 429 ||
+    lower.includes("limite ultrapassado") ||
+    lower.includes("limite de downloads") ||
+    lower.includes("limite de download") ||
+    lower.includes("muitos usuarios visualizaram") ||
+    lower.includes("muitos usuarios viram ou baixaram") ||
+    lower.includes("nao e possivel visualizar ou fazer download deste arquivo no momento") ||
     lower.includes("too many users have viewed or downloaded this file recently") ||
     lower.includes("download quota is exceeded") ||
     lower.includes("quota exceeded") ||
@@ -8028,7 +8042,11 @@ function detectDriveBlockingReason(bodyText, statusCode = 0) {
     return "Google Drive atingiu o limite de downloads deste arquivo. Tente novamente mais tarde.";
   }
 
-  if (lower.includes("can't scan this file for viruses") || lower.includes("virus scan warning")) {
+  if (
+    lower.includes("can't scan this file for viruses") ||
+    lower.includes("virus scan warning") ||
+    lower.includes("nao pode fazer a verificacao de virus neste arquivo")
+  ) {
     return "Google Drive exibiu pagina de aviso de virus e nao liberou o download automaticamente.";
   }
 
@@ -8590,7 +8608,7 @@ function detectArchiveTypeFromBuffer(buffer) {
 }
 
 function looksLikeHtmlOrDriveText(buffer) {
-  const probe = buffer.toString("utf8").toLowerCase();
+  const probe = normalizeTextForMatch(buffer.toString("utf8"));
   if (probe.includes("<!doctype html") || probe.includes("<html")) {
     return true;
   }
@@ -8604,6 +8622,14 @@ function looksLikeHtmlOrDriveText(buffer) {
     return true;
   }
   if (probe.includes("you can't view or download this file at this time")) {
+    return true;
+  }
+  if (
+    probe.includes("limite ultrapassado") ||
+    probe.includes("limite de downloads") ||
+    probe.includes("limite de download") ||
+    probe.includes("muitos usuarios visualizaram")
+  ) {
     return true;
   }
   if (probe.includes("quota exceeded") || probe.includes("download quota")) {
@@ -9096,9 +9122,9 @@ function normalizeInstallFailureMessage(error) {
     return raw;
   }
 
-  const lower = raw.toLowerCase();
+  const lower = normalizeTextForMatch(raw);
   const detailChunk = raw.match(/detalhes:\s*(.+)$/i)?.[1] || "";
-  const detailLower = detailChunk.toLowerCase();
+  const detailLower = normalizeTextForMatch(detailChunk);
 
   if (lower.includes("este jogo ainda nao esta disponivel para download")) {
     return formatInstallFailure("GAME_UNAVAILABLE", "Este jogo ainda nao esta disponivel para download.");
@@ -9111,7 +9137,10 @@ function normalizeInstallFailureMessage(error) {
     );
   }
   if (
+    lower.includes("limite ultrapassado") ||
     lower.includes("limite de downloads") ||
+    lower.includes("limite de download") ||
+    lower.includes("muitos usuarios visualizaram") ||
     lower.includes("download quota") ||
     lower.includes("quota exceeded")
   ) {
