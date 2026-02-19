@@ -2381,7 +2381,7 @@ function getActionState(game) {
   }
 
   if (isGameDriveQuotaBlocked(game.id)) {
-    return { action: "drive-limited", label: "ARQUIVO LIMITADO PELO DRIVE", disabled: false };
+    return { action: "install", label: "ARQUIVO LIMITADO PELO DRIVE", disabled: false };
   }
 
   return { action: "install", label: "Download Game", disabled: false };
@@ -5028,21 +5028,12 @@ async function handleGameAction(gameId, action) {
       return;
     }
 
-    if (action === "drive-limited") {
-      const hint = getDriveQuotaBlockedHint(gameId);
-      const message = `${game.name}: arquivo temporariamente limitado pelo Google Drive. ${hint}`;
-      setStatus(message);
-      notify("info", "Arquivo limitado pelo Drive", message, 5200);
-      return;
-    }
-
     if (action === "install") {
       if (isGameDriveQuotaBlocked(gameId)) {
         const hint = getDriveQuotaBlockedHint(gameId);
         const message = `${game.name}: arquivo temporariamente limitado pelo Google Drive. ${hint}`;
         setStatus(message);
         notify("info", "Arquivo limitado pelo Drive", message, 5200);
-        return;
       }
 
       const installChoice = await askInstallPathChoice();
