@@ -107,6 +107,78 @@ function Get-VersionFromPackageJson {
   return $version
 }
 
+function Parse-WPlayVersion {
+  param([Parameter(Mandatory = $true)][string]$Version)
+
+  $safeVersion = ([string]$Version).Trim()
+  if ($safeVersion -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
+    throw "Versao invalida '$Version'. Use o formato numerico X.Y.Z (ex: 1.0.65)."
+  }
+
+  return [pscustomobject]@{
+    Major = [int]$Matches[1]
+    Minor = [int]$Matches[2]
+    Patch = [int]$Matches[3]
+  }
+}
+
+function Get-NextVersionWithRollover {
+  param(
+    [Parameter(Mandatory = $true)][string]$CurrentVersion,
+    [Parameter(Mandatory = $true)][ValidateSet("patch", "minor", "major")][string]$BumpType
+  )
+
+  $parts = Parse-WPlayVersion -Version $CurrentVersion
+  $major = [int]$parts.Major
+  $minor = [int]$parts.Minor
+  $patch = [int]$parts.Patch
+
+  switch ($BumpType) {
+    "patch" {
+      $patch += 1
+      if ($patch -gt 99) {
+        $patch = 0
+        $minor += 1
+      }
+      if ($minor -gt 99) {
+        $minor = 0
+        $major += 1
+      }
+    }
+    "minor" {
+      $minor += 1
+      $patch = 0
+      if ($minor -gt 99) {
+        $minor = 0
+        $major += 1
+      }
+    }
+    "major" {
+      $major += 1
+      $minor = 0
+      $patch = 0
+    }
+  }
+
+  return "$major.$minor.$patch"
+}
+
+function Set-ProjectVersionWithRollover {
+  param([Parameter(Mandatory = $true)][ValidateSet("patch", "minor", "major")][string]$BumpType)
+
+  $currentVersion = Get-VersionFromPackageJson
+  $nextVersion = Get-NextVersionWithRollover -CurrentVersion $currentVersion -BumpType $BumpType
+
+  Invoke-Checked -Title "Aplicando versao $nextVersion (regra de rollover 0-99)" -Command "npm.cmd" -Arguments @("version", $nextVersion, "--no-git-tag-version")
+
+  $writtenVersion = Get-VersionFromPackageJson
+  if ($writtenVersion -ne $nextVersion) {
+    throw "Versao aplicada diverge do esperado. Esperado=$nextVersion, atual=$writtenVersion."
+  }
+
+  return $nextVersion
+}
+
 function Test-GitTrackedFile {
   param([Parameter(Mandatory = $true)][string]$RelativePath)
   try {
@@ -426,11 +498,14 @@ function New-DiscordUpdateEmbedPayload {
   $openLauncherLinkHttp = Convert-DeepLinkToFriendlyHttpUrl -DeepLink $openLauncherLink
 
   $timestampUtc = (Get-Date).ToUniversalTime().ToString("o")
+  $discordRoleId = "1473924315991904334"
 
   return @{
     username = "Wanessa Dos Links"
+    content = "||<@&$discordRoleId>||"
     allowed_mentions = @{
       parse = @()
+      roles = @($discordRoleId)
     }
     embeds = @(
       @{
@@ -1114,9 +1189,7 @@ try {
     Sync-RepositoryBeforeRelease -CommitMessage "chore: sync repo before update release" -PushToRemote $true
   }
 
-  Invoke-Checked -Title "Incrementando versao ($VersionType)" -Command "npm.cmd" -Arguments @("version", $VersionType, "--no-git-tag-version")
-
-  $nextVersion = Get-VersionFromPackageJson
+  $nextVersion = Set-ProjectVersionWithRollover -BumpType $VersionType
   $tag = "v$nextVersion"
 
   if ($Mode -eq "local") {
