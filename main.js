@@ -2929,6 +2929,7 @@ function readAuthConfigFileSync() {
     const supabaseAnonKey = sanitizeAuthConfigValue(source.supabaseAnonKey);
     const redirectUrl = normalizeAuthRedirectUrl(sanitizeAuthConfigValue(source.redirectUrl));
     const steamWebApiKey = normalizeSteamWebApiKey(source.steamWebApiKey || source.steam_api_key);
+    const googleApiKey = normalizeGoogleApiKey(source.googleApiKey || source.google_api_key);
 
     if (!sanitizeAuthConfigValue(merged.supabaseUrl) && supabaseUrl) {
       merged.supabaseUrl = supabaseUrl;
@@ -2941,6 +2942,9 @@ function readAuthConfigFileSync() {
     }
     if (!normalizeSteamWebApiKey(merged.steamWebApiKey || merged.steam_api_key) && steamWebApiKey) {
       merged.steamWebApiKey = steamWebApiKey;
+    }
+    if (!normalizeGoogleApiKey(merged.googleApiKey || merged.google_api_key) && googleApiKey) {
+      merged.googleApiKey = googleApiKey;
     }
   }
 
@@ -2983,6 +2987,10 @@ function normalizeSteamWebApiKey(value) {
   return sanitizeAuthConfigValue(value);
 }
 
+function normalizeGoogleApiKey(value) {
+  return sanitizeAuthConfigValue(value);
+}
+
 function normalizeAuthRedirectUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return AUTH_CALLBACK_URL_DEFAULT;
@@ -3011,12 +3019,19 @@ function resolveAuthConfig() {
   const steamWebApiKey = normalizeSteamWebApiKey(
     process.env.WPLAY_STEAM_WEB_API_KEY || fileConfig.steamWebApiKey || fileConfig.steam_api_key
   );
+  const googleApiKey = normalizeGoogleApiKey(
+    process.env.WPLAY_GOOGLE_API_KEY ||
+      process.env.WYZER_GOOGLE_API_KEY ||
+      fileConfig.googleApiKey ||
+      fileConfig.google_api_key
+  );
 
   return {
     supabaseUrl,
     supabaseAnonKey,
     redirectUrl,
-    steamWebApiKey
+    steamWebApiKey,
+    googleApiKey
   };
 }
 
@@ -6558,7 +6573,7 @@ async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {})
     );
   }
 
-  const fallbackGoogleApiKey = String(localSettings.googleApiKey || "").trim();
+  const fallbackGoogleApiKey = String(localSettings.googleApiKey || authConfig.googleApiKey || "").trim();
   const rows = Array.isArray(response.data) ? response.data : [];
   const fetchedSignature = buildCatalogRemoteSignature(rows, response.headers);
   if (fetchedSignature) {
@@ -7271,9 +7286,10 @@ async function readCatalogBundle() {
   const resolvedCatalog = await resolveCatalogEntries(settings, localEntries);
   const entries = Array.isArray(resolvedCatalog.entries) ? resolvedCatalog.entries : [];
   const catalogSourceConfig = resolvedCatalog.sourceConfig || resolveCatalogSourceConfig(settings);
+  const authConfig = resolveAuthConfig();
 
   const globalApiKey = String(
-    settings.googleApiKey || process.env.WPLAY_GOOGLE_API_KEY || process.env.WYZER_GOOGLE_API_KEY || ""
+    settings.googleApiKey || authConfig.googleApiKey || process.env.WPLAY_GOOGLE_API_KEY || process.env.WYZER_GOOGLE_API_KEY || ""
   ).trim();
   const defaultExecutable = String(settings.defaultExecutable || "game.exe").trim() || "game.exe";
   const installRoot = normalizeAbsolutePath(settings.installRoot || "");
@@ -7809,10 +7825,30 @@ function normalizeDownloadCandidates(game) {
       });
     }
 
-    addCandidate(`https://drive.usercontent.google.com/download?id=${driveId}&export=download&confirm=t`, {
+    // Mantem compatibilidade com o formato legado que funcionava melhor:
+    // driveusercontent + authuser=0 (com e sem confirm), antes do link uc padrao.
+    addCandidate(`https://drive.usercontent.google.com/download?id=${driveId}&export=download&authuser=0`, {
+      label: "google-drive-usercontent-authuser",
+      kind: "google-drive",
+      priority: 88
+    });
+
+    addCandidate(`https://drive.usercontent.google.com/download?id=${driveId}&export=download&authuser=0&confirm=t`, {
+      label: "google-drive-usercontent-authuser-confirm",
+      kind: "google-drive",
+      priority: 89
+    });
+
+    addCandidate(`https://drive.usercontent.google.com/download?id=${driveId}&export=download`, {
       label: "google-drive-usercontent",
       kind: "google-drive",
       priority: 90
+    });
+
+    addCandidate(`https://drive.usercontent.google.com/download?id=${driveId}&export=download&confirm=t`, {
+      label: "google-drive-usercontent-confirm",
+      kind: "google-drive",
+      priority: 90.5
     });
 
     addCandidate(`https://drive.google.com/uc?export=download&id=${driveId}`, {
