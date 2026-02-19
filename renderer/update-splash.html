@@ -248,12 +248,35 @@
       }
 
       .progress-fill {
+        display: block;
         width: 5%;
         height: 100%;
         border-radius: inherit;
         background: linear-gradient(90deg, rgba(46, 155, 255, 0.72), var(--progress-fill));
         box-shadow: 0 0 12px rgba(46, 155, 255, 0.38);
         transition: width 220ms ease;
+      }
+
+      .progress-track.is-indeterminate .progress-fill {
+        width: 42% !important;
+        background:
+          linear-gradient(
+            90deg,
+            rgba(46, 155, 255, 0.12) 0%,
+            rgba(46, 155, 255, 0.95) 38%,
+            rgba(46, 155, 255, 0.12) 72%
+          );
+        background-size: 220% 100%;
+        animation: updaterIndeterminateSlide 1.05s linear infinite;
+      }
+
+      @keyframes updaterIndeterminateSlide {
+        0% {
+          background-position: 220% 0;
+        }
+        100% {
+          background-position: -220% 0;
+        }
       }
 
       .progress-label {
@@ -319,6 +342,7 @@
         const versionLabel = document.getElementById("versionLabel");
         const statusDescription = document.getElementById("statusDescription");
         const progressFill = document.getElementById("progressFill");
+        const progressTrack = document.querySelector(".progress-track");
         const progressLabel = document.getElementById("progressLabel");
         const minimizeButton = document.getElementById("minimizeButton");
         const closeButton = document.getElementById("closeButton");
@@ -334,6 +358,28 @@
           const numeric = Number(value);
           if (!Number.isFinite(numeric)) return 0;
           return Math.max(0, Math.min(100, numeric));
+        };
+
+        const toSafeNumber = (value) => {
+          const numeric = Number(value);
+          return Number.isFinite(numeric) ? numeric : 0;
+        };
+
+        const formatBytesShort = (value) => {
+          const bytes = toSafeNumber(value);
+          if (bytes <= 0) return "0 B";
+          if (bytes < 1024) return `${Math.round(bytes)} B`;
+          if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+          if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+          return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+        };
+
+        const formatSpeedShort = (value) => {
+          const bytesPerSecond = toSafeNumber(value);
+          if (bytesPerSecond <= 0) return "";
+          if (bytesPerSecond < 1024) return `${Math.round(bytesPerSecond)} B/s`;
+          if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
+          return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
         };
 
         const sanitizeHttpUrl = (value) => {
@@ -454,10 +500,44 @@
           return "Inicializando atualizador...";
         };
 
+        const getDownloadProgressInfo = (state) => {
+          const progressPercent = clampPercent(state?.progressPercent);
+          const transferredBytes = Math.max(0, toSafeNumber(state?.transferredBytes));
+          const totalBytes = Math.max(0, toSafeNumber(state?.totalBytes));
+          const bytesPerSecond = Math.max(0, toSafeNumber(state?.bytesPerSecond));
+          let computedPercent = progressPercent;
+
+          if (computedPercent <= 0 && totalBytes > 0 && transferredBytes > 0) {
+            computedPercent = clampPercent((transferredBytes / totalBytes) * 100);
+          }
+
+          if (computedPercent <= 0 && transferredBytes > 0 && totalBytes <= 0) {
+            computedPercent = Math.min(92, 10 + Math.log10(transferredBytes + 1) * 18);
+          }
+
+          return {
+            percent: clampPercent(computedPercent),
+            transferredBytes,
+            totalBytes,
+            bytesPerSecond
+          };
+        };
+
         const getProgressLabel = (state) => {
           const status = String(state?.status || "").toLowerCase();
-          const percent = clampPercent(state?.progressPercent);
-          if (status === "downloading") return `Download ${percent.toFixed(1)}%`;
+          if (status === "downloading") {
+            const info = getDownloadProgressInfo(state);
+            const speedLabel = formatSpeedShort(info.bytesPerSecond);
+            if (info.totalBytes > 0) {
+              const base = `Download ${info.percent.toFixed(1)}% (${formatBytesShort(info.transferredBytes)} / ${formatBytesShort(info.totalBytes)})`;
+              return speedLabel ? `${base} | ${speedLabel}` : base;
+            }
+            if (info.transferredBytes > 0) {
+              const base = `Download ${info.percent.toFixed(1)}% (${formatBytesShort(info.transferredBytes)})`;
+              return speedLabel ? `${base} | ${speedLabel}` : base;
+            }
+            return "Download em andamento...";
+          }
           if (status === "checking") return "Checando nova versao...";
           if (status === "downloaded") return "Atualizacao baixada";
           if (status === "installing") return "Instalando atualizacao...";
@@ -469,7 +549,11 @@
 
         const getProgressPercent = (state) => {
           const status = String(state?.status || "").toLowerCase();
-          if (status === "downloading") return clampPercent(state?.progressPercent);
+          if (status === "downloading") {
+            const info = getDownloadProgressInfo(state);
+            if (info.percent > 0) return Math.max(6, info.percent);
+            return 14;
+          }
           if (status === "downloaded" || status === "installing" || status === "idle") return 100;
           if (status === "checking") return 20;
           if (status === "error" || status === "disabled") return 100;
@@ -491,9 +575,14 @@
         };
 
         const renderRealState = () => {
+          const status = String(latestState?.status || "").toLowerCase();
           statusDescription.textContent = getDescription(latestState);
           progressLabel.textContent = getProgressLabel(latestState);
           progressFill.style.width = `${getProgressPercent(latestState)}%`;
+          if (progressTrack) {
+            const shouldIndeterminate = status === "downloading" && getDownloadProgressInfo(latestState).totalBytes <= 0;
+            progressTrack.classList.toggle("is-indeterminate", shouldIndeterminate);
+          }
           renderVersion(latestState);
         };
 
@@ -513,6 +602,9 @@
           statusDescription.textContent = "Inicializando modulo de atualizacao...";
           progressLabel.textContent = `Preparando updater... ${remainingSeconds}s`;
           progressFill.style.width = `${percent}%`;
+          if (progressTrack) {
+            progressTrack.classList.remove("is-indeterminate");
+          }
           renderVersion(latestState);
         };
 

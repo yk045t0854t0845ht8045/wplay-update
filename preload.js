@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("launcherApi", {
   getGames: (options = {}) => ipcRenderer.invoke("launcher:get-games", options),
+  getMaintenanceState: () => ipcRenderer.invoke("launcher:get-maintenance-state"),
   getActiveInstalls: () => ipcRenderer.invoke("launcher:get-active-installs"),
   getInstallRoot: () => ipcRenderer.invoke("launcher:get-install-root"),
   chooseInstallBaseDirectory: () => ipcRenderer.invoke("launcher:choose-install-base-directory"),
@@ -54,5 +55,10 @@ contextBridge.exposeInMainWorld("launcherApi", {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("launcher:catalog-changed", listener);
     return () => ipcRenderer.removeListener("launcher:catalog-changed", listener);
+  },
+  onMaintenanceState: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("launcher:maintenance-state", listener);
+    return () => ipcRenderer.removeListener("launcher:maintenance-state", listener);
   }
 });

@@ -3,7 +3,8 @@ param(
   [string]$VersionType = "patch",
   [ValidateSet("workflow", "local")]
   [string]$Mode = "workflow",
-  [string]$GitHubToken = ""
+  [string]$GitHubToken = "",
+  [string]$DiscordWebhookUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -213,6 +214,226 @@ function Get-CmdTokenHint {
 
 function Get-TokenHintBundle {
   return (Get-PowerShellTokenHint) + " | " + (Get-CmdTokenHint)
+}
+
+function Resolve-DiscordWebhookUrl {
+  param([string]$ExplicitWebhookUrl = "")
+
+  if ($ExplicitWebhookUrl) {
+    return [string]$ExplicitWebhookUrl.Trim()
+  }
+
+  if ($env:WPLAY_UPDATE_WEBHOOK_URL) {
+    return [string]$env:WPLAY_UPDATE_WEBHOOK_URL.Trim()
+  }
+
+  return "https://ptb.discord.com/api/webhooks/1473889542040715393/S2Y2fuUOxrSz67rK0i51tHKaa7FAvd851XJ3h4nZGTwMgmt_S7S1u6W5U4lQRMnykA17"
+}
+
+function Test-DiscordWebhookUrl {
+  param([Parameter(Mandatory = $true)][string]$WebhookUrl)
+
+  try {
+    $parsed = [Uri]$WebhookUrl
+    if (-not $parsed.IsAbsoluteUri) {
+      return $false
+    }
+    if ($parsed.Scheme -notin @("http", "https")) {
+      return $false
+    }
+    $host = $parsed.Host.ToLowerInvariant()
+    $allowedHosts = @("discord.com", "ptb.discord.com", "canary.discord.com", "discordapp.com")
+    if ($allowedHosts -notcontains $host) {
+      return $false
+    }
+    return $parsed.AbsolutePath.ToLowerInvariant().StartsWith("/api/webhooks/")
+  } catch {
+    return $false
+  }
+}
+
+function Get-GitBranchNameSafe {
+  try {
+    $branch = (& git rev-parse --abbrev-ref HEAD | Out-String).Trim()
+    if ($branch) {
+      return [string]$branch
+    }
+  } catch {
+    # Ignore and fallback below.
+  }
+  return "unknown"
+}
+
+function Get-GitCommitShortSafe {
+  try {
+    $commit = (& git rev-parse --short HEAD | Out-String).Trim()
+    if ($commit) {
+      return [string]$commit
+    }
+  } catch {
+    # Ignore and fallback below.
+  }
+  return "unknown"
+}
+
+function New-WPlayDeepLink {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [hashtable]$Query = @{}
+  )
+
+  $sanitizedPath = [string]$Path
+  $sanitizedPath = $sanitizedPath.Trim()
+  $sanitizedPath = $sanitizedPath.TrimStart("/")
+  if (-not $sanitizedPath) {
+    $sanitizedPath = "launcher/open"
+  }
+
+  $pairs = @()
+  foreach ($key in @($Query.Keys | Sort-Object)) {
+    $keyText = [string]$key
+    $valueText = [string]$Query[$key]
+    if (-not $keyText -or -not $valueText) {
+      continue
+    }
+    $pairs += ([Uri]::EscapeDataString($keyText) + "=" + [Uri]::EscapeDataString($valueText))
+  }
+
+  $queryText = if ($pairs.Count -gt 0) { "?" + ($pairs -join "&") } else { "" }
+  return "wplay://$sanitizedPath$queryText"
+}
+
+function New-DiscordUpdateEmbedPayload {
+  param(
+    [Parameter(Mandatory = $true)][string]$Version,
+    [Parameter(Mandatory = $true)][string]$Tag,
+    [Parameter(Mandatory = $true)][string]$Mode
+  )
+
+  $branch = Get-GitBranchNameSafe
+  $commit = Get-GitCommitShortSafe
+
+  $openLauncherLink = New-WPlayDeepLink -Path "launcher/open" -Query @{
+    source = "discord"
+    target = "updates"
+    version = $Version
+    tag = $Tag
+  }
+  $openUpdateLink = New-WPlayDeepLink -Path "launcher/update" -Query @{
+    version = $Version
+    tag = $Tag
+    mode = $Mode
+  }
+  $installLink = New-WPlayDeepLink -Path "launcher/update/install" -Query @{
+    version = $Version
+    tag = $Tag
+  }
+  $notesLink = New-WPlayDeepLink -Path "launcher/update/notes" -Query @{
+    version = $Version
+    tag = $Tag
+  }
+
+  $timestampUtc = (Get-Date).ToUniversalTime().ToString("o")
+
+  return @{
+    username = "WPlay Update Service"
+    allowed_mentions = @{
+      parse = @()
+    }
+    embeds = @(
+      @{
+        title = "WPlay Launcher - Atualizacao $Tag"
+        url = $openLauncherLink
+        description = (
+          "Atualizacao publicada com sucesso.`n" +
+          "[Abrir Launcher]($openLauncherLink) | [Abrir Atualizacao]($openUpdateLink) | [Instalar Agora]($installLink)"
+        )
+        color = 3066993
+        fields = @(
+          @{
+            name = "Versao"
+            value = "[$Version]($openUpdateLink)"
+            inline = $true
+          },
+          @{
+            name = "Canal"
+            value = "[latest]($openLauncherLink)"
+            inline = $true
+          },
+          @{
+            name = "Modo"
+            value = "[$Mode]($openUpdateLink)"
+            inline = $true
+          },
+          @{
+            name = "Branch"
+            value = "[$branch]($openLauncherLink)"
+            inline = $true
+          },
+          @{
+            name = "Commit"
+            value = "[$commit]($notesLink)"
+            inline = $true
+          },
+          @{
+            name = "Tag"
+            value = "[$Tag]($installLink)"
+            inline = $true
+          },
+          @{
+            name = "Detalhes"
+            value = "[Abrir detalhes da atualizacao]($notesLink)"
+            inline = $false
+          }
+        )
+        footer = @{
+          text = "WPlay Release Automation"
+        }
+        timestamp = $timestampUtc
+      }
+    )
+  }
+}
+
+function Send-DiscordUpdateWebhook {
+  param(
+    [Parameter(Mandatory = $true)][string]$Version,
+    [Parameter(Mandatory = $true)][string]$Tag,
+    [Parameter(Mandatory = $true)][string]$Mode,
+    [Parameter(Mandatory = $false)][string]$WebhookUrl = ""
+  )
+
+  $resolvedWebhookUrl = Resolve-DiscordWebhookUrl -ExplicitWebhookUrl $WebhookUrl
+  if (-not $resolvedWebhookUrl) {
+    Write-Host "Webhook Discord nao configurado. Notificacao de update ignorada." -ForegroundColor DarkYellow
+    return $false
+  }
+
+  if (-not (Test-DiscordWebhookUrl -WebhookUrl $resolvedWebhookUrl)) {
+    Write-Host "Webhook Discord invalido. Notificacao de update ignorada." -ForegroundColor Yellow
+    return $false
+  }
+
+  $payload = New-DiscordUpdateEmbedPayload -Version $Version -Tag $Tag -Mode $Mode
+  $jsonBody = $payload | ConvertTo-Json -Depth 12
+
+  try {
+    Invoke-RestMethod -Uri $resolvedWebhookUrl -Method POST -ContentType "application/json; charset=utf-8" -Body $jsonBody | Out-Null
+    Write-Host "Webhook Discord enviado com sucesso para $Tag." -ForegroundColor Green
+    return $true
+  } catch {
+    $statusCode = Get-HttpStatusCodeFromError -ErrorRecord $_
+    $errorBody = Get-HttpErrorBodyText -ErrorRecord $_
+    $statusHint = if ($statusCode -gt 0) { " (status=$statusCode)" } else { "" }
+    if ($errorBody) {
+      $maxLen = [Math]::Min(180, $errorBody.Length)
+      $preview = $errorBody.Substring(0, $maxLen)
+      Write-Host "Falha ao enviar webhook Discord$statusHint. Resposta: $preview" -ForegroundColor Yellow
+    } else {
+      Write-Host "Falha ao enviar webhook Discord$statusHint." -ForegroundColor Yellow
+    }
+    return $false
+  }
 }
 
 function Get-LatestWorkflowRunInfo {
@@ -701,6 +922,7 @@ try {
 
   if ($Mode -eq "local") {
     Invoke-Checked -Title "Publicando release $tag no GitHub (modo local)" -Command "npm.cmd" -Arguments @("run", "release:github")
+    $null = Send-DiscordUpdateWebhook -Version $nextVersion -Tag $tag -Mode $Mode -WebhookUrl $DiscordWebhookUrl
 
     Write-Host ""
     Write-Host "Update publicado com sucesso: $tag" -ForegroundColor Green
@@ -788,6 +1010,8 @@ try {
     $expectedText = "latest.yml + $($exeCandidates[0]) + $($blockmapCandidates[0])"
     throw "Release $tag criada, mas assets incompletos. Esperado: $expectedText. Encontrado: $assetListText$suffix"
   }
+
+  $null = Send-DiscordUpdateWebhook -Version $nextVersion -Tag $tag -Mode $Mode -WebhookUrl $DiscordWebhookUrl
 
   Write-Host ""
   Write-Host "Update publicado com sucesso: $tag" -ForegroundColor Green

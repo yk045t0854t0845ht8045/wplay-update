@@ -91,6 +91,9 @@ const authGateStatus = document.getElementById("authGateStatus");
 const authSteamLoginBtn = document.getElementById("authSteamLoginBtn");
 const authRetryBtn = document.getElementById("authRetryBtn");
 const stageSurface = document.querySelector(".stage-surface");
+const maintenanceBanner = document.getElementById("maintenanceBanner");
+const maintenanceBannerTitle = document.getElementById("maintenanceBannerTitle");
+const maintenanceBannerMessage = document.getElementById("maintenanceBannerMessage");
 
 const FALLBACK_CARD_IMAGE = "https://placehold.co/640x360/0f0f0f/f2f2f2?text=Game";
 const FALLBACK_BANNER_IMAGE = "https://placehold.co/1280x720/0f0f0f/f2f2f2?text=Game+Banner";
@@ -115,7 +118,8 @@ const FRIEND_ACTIVITY_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 10 * 1000 : 6 * 1000;
 const FRIEND_ACTIVITY_CURSOR_BACKTRACK_MS = 18 * 1000;
 const FRIEND_ACTIVITY_MAX_EVENT_AGE_MS = 30 * 60 * 1000;
 const FRIEND_ACTIVITY_SEEN_LIMIT = 320;
-const HEADER_SCROLL_MIN_OFFSET_PX = 0;
+const HEADER_SCROLL_ACTIVATE_OFFSET_PX = 10;
+const HEADER_SCROLL_DEACTIVATE_OFFSET_PX = 2;
 const STAGE_SCROLLABLE_EPSILON_PX = 1;
 const CENTERED_LAYOUT_ENTER_WIDTH_PX = 1500;
 const CENTERED_LAYOUT_EXIT_WIDTH_PX = 1440;
@@ -219,6 +223,13 @@ const state = {
     startupSafeModeReason: "",
     preferLatestFullInstaller: true
   },
+  maintenance: {
+    enabled: false,
+    title: "Manutencao programada",
+    message: "Pode haver instabilidades temporarias durante este periodo.",
+    updatedAt: "",
+    signature: ""
+  },
   updateRestartModalOpen: false,
   uninstallConfirmModalOpen: false,
   steamRequiredModalOpen: false,
@@ -265,6 +276,135 @@ let uiTransitionReleaseTimer = null;
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
   statusMessage.classList.toggle("status-error", isError);
+}
+
+function parseBooleanLike(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return Boolean(fallback);
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  return Boolean(fallback);
+}
+
+function sanitizeMaintenanceBannerText(value, fallback = "", maxLength = 240) {
+  const normalized = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const safeFallback = String(fallback || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const nextValue = normalized || safeFallback;
+  if (!nextValue) return "";
+  if (nextValue.length <= maxLength) return nextValue;
+  return `${nextValue.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
+}
+
+function getMaintenanceStateSignature(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return [
+    source.enabled === true ? "1" : "0",
+    String(source.title || "").trim(),
+    String(source.message || "").trim(),
+    String(source.updatedAt || "").trim()
+  ].join("|");
+}
+
+function normalizeMaintenanceStatePayload(payload = {}, fallbackState = state.maintenance) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const nestedData = source.data && typeof source.data === "object" ? source.data : {};
+  const merged = {
+    ...nestedData,
+    ...source
+  };
+  const fallback = fallbackState && typeof fallbackState === "object" ? fallbackState : state.maintenance;
+  const enabled = parseBooleanLike(
+    merged.enabled ?? merged.is_enabled ?? merged.isEnabled ?? merged.maintenance ?? merged.maintenance_mode ?? merged.active,
+    fallback.enabled === true
+  );
+  const title =
+    sanitizeMaintenanceBannerText(
+      merged.title ?? merged.banner_title ?? merged.bannerTitle ?? merged.headline,
+      "",
+      96
+    ) ||
+    sanitizeMaintenanceBannerText(fallback.title, "Manutencao programada", 96) ||
+    "Manutencao programada";
+  const message =
+    sanitizeMaintenanceBannerText(
+      merged.message ?? merged.banner_message ?? merged.bannerMessage ?? merged.description ?? merged.text,
+      "",
+      280
+    ) ||
+    sanitizeMaintenanceBannerText(
+      fallback.message,
+      "Pode haver instabilidades temporarias durante este periodo.",
+      280
+    ) ||
+    "Pode haver instabilidades temporarias durante este periodo.";
+  const updatedAt = String(merged.updatedAt || merged.updated_at || merged.created_at || merged.createdAt || "").trim();
+  return {
+    enabled,
+    title,
+    message,
+    updatedAt
+  };
+}
+
+function renderMaintenanceBanner() {
+  if (!(maintenanceBanner instanceof HTMLElement)) {
+    return;
+  }
+  const normalized = normalizeMaintenanceStatePayload(state.maintenance, state.maintenance);
+  const shouldShow = normalized.enabled === true;
+
+  if (maintenanceBannerTitle) {
+    maintenanceBannerTitle.textContent = normalized.title;
+  }
+  if (maintenanceBannerMessage) {
+    maintenanceBannerMessage.textContent = normalized.message;
+  }
+
+  maintenanceBanner.classList.toggle("is-visible", shouldShow);
+  maintenanceBanner.setAttribute("aria-hidden", shouldShow ? "false" : "true");
+  document.body.classList.toggle("maintenance-mode-on", shouldShow);
+
+  window.requestAnimationFrame(() => {
+    syncHeaderStateStable();
+  });
+}
+
+function applyMaintenanceState(payload = {}, options = {}) {
+  const normalized = normalizeMaintenanceStatePayload(payload, state.maintenance);
+  const signature = getMaintenanceStateSignature(normalized);
+  if (options.force !== true && signature === state.maintenance.signature) {
+    return false;
+  }
+  state.maintenance = {
+    ...state.maintenance,
+    ...normalized,
+    signature
+  };
+  renderMaintenanceBanner();
+  return true;
+}
+
+async function bootstrapMaintenanceState() {
+  if (typeof window.launcherApi?.getMaintenanceState !== "function") {
+    renderMaintenanceBanner();
+    return;
+  }
+
+  try {
+    const payload = await window.launcherApi.getMaintenanceState();
+    applyMaintenanceState(payload || {}, { force: true });
+  } catch (_error) {
+    renderMaintenanceBanner();
+  }
 }
 
 function getAuthDisplayName(session) {
@@ -3012,16 +3152,17 @@ function syncScrolledHeaderState() {
   }
 
   if (state.view === "details" || !isStageSurfaceScrollable()) {
-    if (!headerScrolledState) return;
     headerScrolledState = false;
     document.body.classList.remove("header-scrolled");
     return;
   }
 
   const currentScrollTop = Math.max(0, Number(stageSurface.scrollTop || 0));
-  const nextState = currentScrollTop > HEADER_SCROLL_MIN_OFFSET_PX;
-
-  if (nextState === headerScrolledState) return;
+  const nextState = headerScrolledState
+    ? currentScrollTop > HEADER_SCROLL_DEACTIVATE_OFFSET_PX
+    : currentScrollTop > HEADER_SCROLL_ACTIVATE_OFFSET_PX;
+  const domState = document.body.classList.contains("header-scrolled");
+  if (nextState === headerScrolledState && domState === nextState) return;
 
   headerScrolledState = nextState;
   document.body.classList.toggle("header-scrolled", headerScrolledState);
@@ -3094,7 +3235,7 @@ function primeScrolledHeaderStateOnWheel(event) {
   }
 
   const deltaY = Number(event?.deltaY || 0);
-  if (!Number.isFinite(deltaY) || deltaY <= 0) return;
+  if (!Number.isFinite(deltaY) || deltaY === 0) return;
 
   window.requestAnimationFrame(() => {
     syncScrolledHeaderState();
@@ -3152,7 +3293,12 @@ function setView(nextView) {
   const previousView = state.view;
 
   if (nextView === "details") {
-    scrollStageToTop({ smooth: true });
+    scrollStageToTop({ smooth: false });
+    if (stageSurface instanceof HTMLElement) {
+      stageSurface.scrollTop = 0;
+    }
+    headerScrolledState = false;
+    document.body.classList.remove("header-scrolled");
   }
 
   if (nextView !== "details") {
@@ -4869,6 +5015,7 @@ function startRealtimeSync() {
 }
 
 async function loadInitialData() {
+  await bootstrapMaintenanceState();
   await ensureAuthenticated();
 }
 
@@ -4879,6 +5026,7 @@ function installEventBindings() {
   ensureNotyfDeckStack();
   renderTopAccountButton();
   renderAutoUpdateButton();
+  renderMaintenanceBanner();
   void bootstrapAutoUpdateState();
   startAutoUpdateRealtimeSync();
   scheduleAutoUpdateBackgroundCheckSoon(2500);
@@ -5735,6 +5883,12 @@ function installEventBindings() {
   if (typeof window.launcherApi.onCatalogChanged === "function") {
     window.launcherApi.onCatalogChanged((_payload) => {
       scheduleCatalogChangedRefresh("catalog-hint");
+    });
+  }
+
+  if (typeof window.launcherApi.onMaintenanceState === "function") {
+    window.launcherApi.onMaintenanceState((payload) => {
+      applyMaintenanceState(payload || {});
     });
   }
 

@@ -99,6 +99,7 @@ const UPDATER_CONFIG_EXAMPLE_FILE_NAME = "updater.example.json";
 const INSTALL_PROGRESS_CHANNEL = "launcher:install-progress";
 const AUTO_UPDATE_STATE_CHANNEL = "launcher:auto-update-state";
 const CATALOG_CHANGED_CHANNEL = "launcher:catalog-changed";
+const MAINTENANCE_STATE_CHANNEL = "launcher:maintenance-state";
 const MAX_SCAN_DEPTH = 6;
 const MAX_SCAN_FILES = 7000;
 const INSTALL_SIZE_CACHE_TTL_MS = 60 * 60 * 1000;
@@ -141,6 +142,9 @@ const CATALOG_SIZE_SYNC_RETRY_COOLDOWN_MS = 45 * 1000;
 const CATALOG_SIZE_SYNC_PROBE_TIMEOUT_MS = 20 * 1000;
 const CATALOG_DEFAULT_SUPABASE_SCHEMA = "public";
 const CATALOG_DEFAULT_SUPABASE_TABLE = "launcher_games";
+const MAINTENANCE_DEFAULT_SUPABASE_SCHEMA = "public";
+const MAINTENANCE_DEFAULT_SUPABASE_TABLE = "launcher_runtime_flags";
+const MAINTENANCE_DEFAULT_FLAG_ID = "maintenance_mode";
 const NOTIFICATIONS_DEFAULT_SUPABASE_SCHEMA = "public";
 const NOTIFICATIONS_DEFAULT_SUPABASE_TABLE = "launcher_notifications";
 const SOCIAL_ACTIVITY_DEFAULT_SUPABASE_SCHEMA = "public";
@@ -156,6 +160,8 @@ const SOCIAL_ACTIVITY_BACKGROUND_CURSOR_BACKTRACK_MS = 9000;
 const SOCIAL_ACTIVITY_BACKGROUND_MAX_EVENT_AGE_MS = 30 * 60 * 1000;
 const SOCIAL_ACTIVITY_BACKGROUND_SEEN_LIMIT = 420;
 const SOCIAL_ACTIVITY_BACKGROUND_LIMIT = 80;
+const MAINTENANCE_MONITOR_INTERVAL_MS = 4500;
+const MAINTENANCE_MONITOR_INTERVAL_LOW_SPEC_MS = 9000;
 const WINDOWS_APP_USER_MODEL_ID = "com.wplay.app";
 const WINDOWS_APP_USER_MODEL_ID_DEV = "com.wplay.app.dev";
 const DEV_RUNTIME_APP_NAME = "WPlay Dev";
@@ -229,6 +235,13 @@ const remoteCatalogCache = {
   lastSyncAt: 0,
   remoteSignature: ""
 };
+const maintenanceState = {
+  enabled: false,
+  title: "Manutencao programada",
+  message: "Pode haver instabilidades temporarias durante este periodo.",
+  updatedAt: ""
+};
+let maintenanceStateSignature = "";
 const catalogSizeSyncInFlightByGameId = new Map();
 const activeInstalls = new Map();
 const activeInstallProgressByGameId = new Map();
@@ -314,6 +327,12 @@ let catalogRealtimeMonitorTimer = null;
 let catalogRealtimeMonitorInFlight = null;
 let catalogRealtimeSignature = "";
 let catalogMonitorSourceConfigCache = {
+  loadedAt: 0,
+  sourceConfig: null
+};
+let maintenanceRealtimeMonitorTimer = null;
+let maintenanceRealtimeMonitorInFlight = null;
+let maintenanceMonitorSourceConfigCache = {
   loadedAt: 0,
   sourceConfig: null
 };
@@ -2146,6 +2165,7 @@ function createWindow() {
       void checkForLauncherUpdate("focus");
     }
     void pollCatalogChangesInBackground(true);
+    void pollMaintenanceStateInBackground(true);
   });
   mainWindow.on("blur", () => {
     void pollBackgroundFriendGameActivities(true);
@@ -2213,6 +2233,7 @@ function createWindow() {
     destroyUpdateSplashWindow();
     sendMaximizedState();
     broadcastAutoUpdateState();
+    broadcastMaintenanceState();
     setTimeout(() => {
       if (!mainWindow || mainWindow.isDestroyed()) {
         return;
@@ -5063,6 +5084,53 @@ function resolveCatalogSourceConfig(settings = {}) {
   };
 }
 
+function resolveMaintenanceSourceConfig(settings = {}) {
+  const maintenanceSettings = settings.maintenance && typeof settings.maintenance === "object" ? settings.maintenance : {};
+  const catalogSourceConfig = resolveCatalogSourceConfig(settings);
+  const defaultPollSeconds = Math.max(
+    CATALOG_MIN_POLL_INTERVAL_SECONDS,
+    Math.round(getMaintenanceMonitorIntervalMs() / 1000)
+  );
+  const pollIntervalSeconds = clampCatalogPollSeconds(
+    process.env.WPLAY_MAINTENANCE_POLL_SECONDS ??
+      maintenanceSettings.pollIntervalSeconds ??
+      maintenanceSettings.pollSeconds,
+    defaultPollSeconds
+  );
+  const schema = normalizeCatalogIdentifier(
+    process.env.WPLAY_MAINTENANCE_SUPABASE_SCHEMA ||
+      maintenanceSettings.supabaseSchema ||
+      maintenanceSettings.schema ||
+      catalogSourceConfig.schema,
+    MAINTENANCE_DEFAULT_SUPABASE_SCHEMA
+  );
+  const table = normalizeCatalogIdentifier(
+    process.env.WPLAY_MAINTENANCE_SUPABASE_TABLE || maintenanceSettings.supabaseTable || maintenanceSettings.table,
+    MAINTENANCE_DEFAULT_SUPABASE_TABLE
+  );
+  const enabled = parseBoolean(
+    process.env.WPLAY_MAINTENANCE_ENABLED ?? maintenanceSettings.enabled,
+    catalogSourceConfig.useRemote
+  );
+  const flagId = String(
+    process.env.WPLAY_MAINTENANCE_FLAG_ID ||
+      maintenanceSettings.flagId ||
+      maintenanceSettings.id ||
+      MAINTENANCE_DEFAULT_FLAG_ID
+  )
+    .trim()
+    .replace(/[^\w.-]/g, "");
+
+  return {
+    enabled,
+    pollIntervalSeconds,
+    pollIntervalMs: pollIntervalSeconds * 1000,
+    schema,
+    table,
+    flagId: flagId || MAINTENANCE_DEFAULT_FLAG_ID
+  };
+}
+
 function sortCatalogEntries(entries = []) {
   return [...entries].sort((a, b) => {
     const orderA = Number(a?.sortOrder);
@@ -5113,6 +5181,108 @@ function buildCatalogRemoteSignature(rows = [], headers = {}) {
   const topEnabled = firstRow && typeof firstRow === "object" ? String(firstRow.enabled) : "";
   const totalCount = parseSupabaseContentRangeTotal(headers);
   return `${topUpdatedAt}|${topId}|${topEnabled}|${totalCount}`;
+}
+
+function getPublicMaintenanceState() {
+  return {
+    ...maintenanceState
+  };
+}
+
+function sanitizeMaintenanceBannerText(value, fallback = "", maxLength = 240) {
+  const normalized = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const safeFallback = String(fallback || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const nextValue = normalized || safeFallback;
+  if (!nextValue) return "";
+  if (nextValue.length <= maxLength) return nextValue;
+  return `${nextValue.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
+}
+
+function buildMaintenanceStateSignature(value = maintenanceState) {
+  const source = value && typeof value === "object" ? value : {};
+  return [
+    source.enabled === true ? "1" : "0",
+    String(source.title || "").trim(),
+    String(source.message || "").trim(),
+    String(source.updatedAt || source.updated_at || "").trim()
+  ].join("|");
+}
+
+function normalizeMaintenanceStatePayload(payload = {}, fallbackState = maintenanceState) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const nestedData = source.data && typeof source.data === "object" ? source.data : {};
+  const merged = {
+    ...nestedData,
+    ...source
+  };
+
+  const fallback = fallbackState && typeof fallbackState === "object" ? fallbackState : maintenanceState;
+  const enabled = parseBoolean(
+    pickFirstDefinedValue(merged, ["enabled", "is_enabled", "isEnabled", "maintenance", "maintenance_mode", "active"]),
+    fallback.enabled === true
+  );
+  const title =
+    sanitizeMaintenanceBannerText(
+      pickFirstDefinedValue(merged, ["title", "banner_title", "bannerTitle", "headline"]),
+      "",
+      96
+    ) ||
+    sanitizeMaintenanceBannerText(fallback.title, "Manutencao programada", 96) ||
+    "Manutencao programada";
+  const message =
+    sanitizeMaintenanceBannerText(
+      pickFirstDefinedValue(merged, ["message", "banner_message", "bannerMessage", "description", "text"]),
+      "",
+      280
+    ) ||
+    sanitizeMaintenanceBannerText(
+      fallback.message,
+      "Pode haver instabilidades temporarias durante este periodo.",
+      280
+    ) ||
+    "Pode haver instabilidades temporarias durante este periodo.";
+  const updatedAt = String(pickFirstDefinedValue(merged, ["updatedAt", "updated_at", "created_at", "createdAt"]) || "")
+    .trim();
+
+  return {
+    enabled,
+    title,
+    message,
+    updatedAt
+  };
+}
+
+function sendMaintenanceStateToWindow(targetWindow) {
+  if (!targetWindow || targetWindow.isDestroyed()) {
+    return;
+  }
+  try {
+    targetWindow.webContents.send(MAINTENANCE_STATE_CHANNEL, getPublicMaintenanceState());
+  } catch (_error) {
+    // Ignore send failures for windows being destroyed.
+  }
+}
+
+function broadcastMaintenanceState() {
+  sendMaintenanceStateToWindow(mainWindow);
+}
+
+function setMaintenanceState(nextState, shouldBroadcast = true) {
+  const normalized = normalizeMaintenanceStatePayload(nextState, maintenanceState);
+  const nextSignature = buildMaintenanceStateSignature(normalized);
+  if (nextSignature === maintenanceStateSignature) {
+    return false;
+  }
+  maintenanceStateSignature = nextSignature;
+  Object.assign(maintenanceState, normalized);
+  if (shouldBroadcast) {
+    broadcastMaintenanceState();
+  }
+  return true;
 }
 
 function emitCatalogChangedHint(payload = {}) {
@@ -6594,6 +6764,106 @@ async function getCatalogSourceConfigForMonitor() {
   return sourceConfig;
 }
 
+function getMaintenanceMonitorIntervalMs() {
+  return resolveHostLowSpecProfile() ? MAINTENANCE_MONITOR_INTERVAL_LOW_SPEC_MS : MAINTENANCE_MONITOR_INTERVAL_MS;
+}
+
+async function getMaintenanceSourceConfigForMonitor() {
+  const now = Date.now();
+  if (
+    maintenanceMonitorSourceConfigCache.sourceConfig &&
+    now - Number(maintenanceMonitorSourceConfigCache.loadedAt || 0) < 20 * 1000
+  ) {
+    return maintenanceMonitorSourceConfigCache.sourceConfig;
+  }
+
+  let settings = {};
+  try {
+    const parsedCatalogFile = await parseLocalCatalogFile();
+    settings = parsedCatalogFile?.settings && typeof parsedCatalogFile.settings === "object" ? parsedCatalogFile.settings : {};
+  } catch (_error) {
+    settings = {};
+  }
+
+  const sourceConfig = resolveMaintenanceSourceConfig(settings);
+  maintenanceMonitorSourceConfigCache = {
+    loadedAt: now,
+    sourceConfig
+  };
+  return sourceConfig;
+}
+
+async function fetchMaintenanceStateFromSupabase(sourceConfig) {
+  const authConfig = resolveAuthConfig();
+  if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
+    throw new Error("[MAINTENANCE_SUPABASE_AUTH] Supabase nao configurado para manutencao remota.");
+  }
+
+  const tableName = normalizeCatalogIdentifier(sourceConfig.table, MAINTENANCE_DEFAULT_SUPABASE_TABLE);
+  const schemaName = normalizeCatalogIdentifier(sourceConfig.schema, MAINTENANCE_DEFAULT_SUPABASE_SCHEMA);
+  const endpoint = `${authConfig.supabaseUrl}/rest/v1/${tableName}`;
+  const response = await axios.get(endpoint, {
+    headers: buildCatalogSupabaseHeaders(authConfig, schemaName),
+    params: {
+      select: "id,enabled,title,message,updated_at,data",
+      id: `eq.${sourceConfig.flagId}`,
+      limit: 1
+    },
+    timeout: 15_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(
+      `[MAINTENANCE_TABLE_NOT_FOUND] Tabela ${schemaName}.${tableName} nao encontrada no Supabase.`
+    );
+  }
+  if (response.status >= 400) {
+    throw new Error(
+      `[MAINTENANCE_HTTP_${response.status}] Falha ao consultar manutencao em ${schemaName}.${tableName}.`
+    );
+  }
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  const row = rows.length > 0 ? rows[0] : {};
+  return normalizeMaintenanceStatePayload(row, maintenanceState);
+}
+
+async function pollMaintenanceStateInBackground(silent = true) {
+  if (maintenanceRealtimeMonitorInFlight) {
+    return maintenanceRealtimeMonitorInFlight;
+  }
+
+  maintenanceRealtimeMonitorInFlight = (async () => {
+    const sourceConfig = await getMaintenanceSourceConfigForMonitor();
+    if (!sourceConfig.enabled) {
+      return setMaintenanceState(
+        {
+          enabled: false,
+          title: maintenanceState.title || "Manutencao programada",
+          message: maintenanceState.message || "Pode haver instabilidades temporarias durante este periodo.",
+          updatedAt: maintenanceState.updatedAt || ""
+        },
+        true
+      );
+    }
+
+    const nextState = await fetchMaintenanceStateFromSupabase(sourceConfig);
+    return setMaintenanceState(nextState, true);
+  })()
+    .catch((error) => {
+      if (!silent) {
+        appendStartupLog(`[MAINTENANCE_RT_ERROR] ${formatStartupErrorForLog(error)}`);
+      }
+      return false;
+    })
+    .finally(() => {
+      maintenanceRealtimeMonitorInFlight = null;
+    });
+
+  return maintenanceRealtimeMonitorInFlight;
+}
+
 async function pollCatalogChangesInBackground(silent = true) {
   if (catalogRealtimeMonitorInFlight) {
     return catalogRealtimeMonitorInFlight;
@@ -6660,6 +6930,25 @@ function stopCatalogRealtimeMonitor() {
   }
   clearInterval(catalogRealtimeMonitorTimer);
   catalogRealtimeMonitorTimer = null;
+}
+
+function ensureMaintenanceRealtimeMonitorStarted() {
+  if (maintenanceRealtimeMonitorTimer) {
+    return;
+  }
+  const intervalMs = getMaintenanceMonitorIntervalMs();
+  maintenanceRealtimeMonitorTimer = setInterval(() => {
+    void pollMaintenanceStateInBackground(true);
+  }, intervalMs);
+  void pollMaintenanceStateInBackground(false);
+}
+
+function stopMaintenanceRealtimeMonitor() {
+  if (!maintenanceRealtimeMonitorTimer) {
+    return;
+  }
+  clearInterval(maintenanceRealtimeMonitorTimer);
+  maintenanceRealtimeMonitorTimer = null;
 }
 
 function getCatalogSizeSyncIntervalMs() {
@@ -10290,6 +10579,7 @@ if (!hasSingleInstanceLock) {
     ensureCatalogSizeCacheLoadedSync();
     ensureSocialActivityBackgroundMonitorStarted();
     ensureCatalogRealtimeMonitorStarted();
+    ensureMaintenanceRealtimeMonitorStarted();
     ensureCatalogSizeSyncMonitorStarted();
     await recoverInterruptedInstallSessionsOnStartup().catch((error) => {
       appendStartupLog(`[INSTALL_RECOVERY_FATAL] ${formatStartupErrorForLog(error)}`);
@@ -10360,6 +10650,7 @@ if (!hasSingleInstanceLock) {
     }
 
     ipcMain.handle("launcher:get-active-installs", () => getActiveInstallProgressSnapshot());
+    ipcMain.handle("launcher:get-maintenance-state", () => getPublicMaintenanceState());
     ipcMain.handle("launcher:get-install-root", () => getInstallRootPath());
     ipcMain.handle("launcher:choose-install-base-directory", () => chooseInstallBaseDirectory());
     ipcMain.handle("launcher:get-launch-on-startup", () => getLaunchOnSystemStartupState());
@@ -10412,6 +10703,7 @@ if (!hasSingleInstanceLock) {
     clearAutoUpdaterInterval();
     stopSocialActivityBackgroundMonitor();
     stopCatalogRealtimeMonitor();
+    stopMaintenanceRealtimeMonitor();
     stopCatalogSizeSyncMonitor();
     if (catalogSizeCachePersistTimer) {
       clearTimeout(catalogSizeCachePersistTimer);
