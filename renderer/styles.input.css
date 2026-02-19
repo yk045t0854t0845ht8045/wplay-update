@@ -2445,9 +2445,18 @@
   }
 
   .library-grid {
-    @apply grid gap-5;
-    grid-template-columns: repeat(auto-fill, minmax(172px, 214px));
-    justify-content: flex-start;
+    @apply grid;
+    grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
+    justify-content: stretch;
+    align-items: start;
+    column-gap: 1rem;
+    row-gap: 1.85rem;
+  }
+
+  .library-grid > .library-card {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
   }
 
   .library-grid.is-empty {
