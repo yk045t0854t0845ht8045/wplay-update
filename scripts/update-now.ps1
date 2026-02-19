@@ -428,7 +428,7 @@ function New-DiscordUpdateEmbedPayload {
   $timestampUtc = (Get-Date).ToUniversalTime().ToString("o")
 
   return @{
-    username = "WPlay Update Service"
+    username = "Wanessa Dos Links"
     allowed_mentions = @{
       parse = @()
     }
@@ -588,7 +588,7 @@ function Send-DiscordUpdateFailureWebhook {
 
   $timestampUtc = (Get-Date).ToUniversalTime().ToString("o")
   $payload = @{
-    username = "WPlay Update Service"
+    username = "Wanessa Dos Links"
     allowed_mentions = @{
       parse = @()
     }
