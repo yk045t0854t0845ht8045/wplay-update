@@ -2067,8 +2067,8 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1520,
     height: 940,
-    minWidth: 980,
-    minHeight: 680,
+    minWidth: 1520,
+    minHeight: 940,
     frame: false,
     autoHideMenuBar: true,
     title: "WPlay Games",

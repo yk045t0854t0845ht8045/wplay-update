@@ -90,6 +90,7 @@ const authGate = document.getElementById("authGate");
 const authGateStatus = document.getElementById("authGateStatus");
 const authSteamLoginBtn = document.getElementById("authSteamLoginBtn");
 const authRetryBtn = document.getElementById("authRetryBtn");
+const stageSurface = document.querySelector(".stage-surface");
 
 const FALLBACK_CARD_IMAGE = "https://placehold.co/640x360/0f0f0f/f2f2f2?text=Game";
 const FALLBACK_BANNER_IMAGE = "https://placehold.co/1280x720/0f0f0f/f2f2f2?text=Game+Banner";
@@ -114,6 +115,10 @@ const FRIEND_ACTIVITY_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 10 * 1000 : 6 * 1000;
 const FRIEND_ACTIVITY_CURSOR_BACKTRACK_MS = 18 * 1000;
 const FRIEND_ACTIVITY_MAX_EVENT_AGE_MS = 30 * 60 * 1000;
 const FRIEND_ACTIVITY_SEEN_LIMIT = 320;
+const HEADER_SCROLL_MIN_OFFSET_PX = 0;
+const STAGE_SCROLLABLE_EPSILON_PX = 1;
+const CENTERED_LAYOUT_ENTER_WIDTH_PX = 1500;
+const CENTERED_LAYOUT_EXIT_WIDTH_PX = 1440;
 const ACTIVE_INSTALL_PHASES = new Set(["preparing", "downloading", "extracting"]);
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
@@ -226,6 +231,7 @@ const state = {
   storeAdvancedFiltersOpen: false,
   storeModeFilter: "all",
   storeGenreFilter: "all",
+  storeAdvancedFilterSearch: "",
   introPlayed: false,
   realtimeSyncStarted: false,
   autoUpdateRealtimeSyncStarted: false,
@@ -239,7 +245,8 @@ let notyfDeckBootstrapObserver = null;
 let progressRenderTimer = null;
 let progressRenderFrame = 0;
 let lastProgressRenderAt = 0;
-let previousStoreGridSignature = "";
+let previousStoreGridRenderSignature = "";
+let previousStoreGridAnimationSignature = "";
 let previousLibraryGridSignature = "";
 let autoUpdateBackgroundCheckTimer = null;
 let notificationRemoteQueue = Promise.resolve();
@@ -251,6 +258,9 @@ let friendActivityCurrentUserId = "";
 let friendActivityLifecycleBindingsReady = false;
 let uninstallConfirmModalResolver = null;
 let catalogChangedRefreshTimer = null;
+let headerScrolledState = false;
+let centeredLayoutState = false;
+let uiTransitionReleaseTimer = null;
 
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
@@ -670,6 +680,7 @@ async function bootstrapLauncherDataIfNeeded() {
   if (state.appBootstrapped) {
     await syncActiveInstallProgressSnapshot();
     await refreshGames();
+    releaseUiTransitionsAfterBoot(60);
     return;
   }
   state.appBootstrapped = true;
@@ -680,6 +691,7 @@ async function bootstrapLauncherDataIfNeeded() {
   updateNotificationBadge();
   renderNotificationHistory();
   playIntroAnimations();
+  releaseUiTransitionsAfterBoot(120);
   startRealtimeSync();
   setStatus(`${state.games.length} jogo(s) carregado(s).`);
 }
@@ -2144,6 +2156,88 @@ function getGenres(game) {
   return ["Action", "Adventure"];
 }
 
+const STORE_MODE_LIKE_GENRE_PHRASES = [
+  "multiplayer",
+  "multi player",
+  "multijogador",
+  "co op",
+  "coop",
+  "cooperative",
+  "co operative",
+  "online coop",
+  "online co op",
+  "local coop",
+  "local co op",
+  "pvp",
+  "mmo",
+  "solo",
+  "single player",
+  "singleplayer",
+  "um jogador",
+  "offline",
+  "online",
+  "party",
+  "split screen",
+  "crossplay",
+  "cross play",
+  "lan"
+];
+
+const STORE_MODE_LIKE_GENRE_TOKENS = new Set([
+  "multi",
+  "multiplayer",
+  "multijogador",
+  "co",
+  "op",
+  "coop",
+  "cooperative",
+  "online",
+  "offline",
+  "pvp",
+  "mmo",
+  "solo",
+  "single",
+  "player",
+  "players",
+  "jogador",
+  "jogadores",
+  "party",
+  "split",
+  "screen",
+  "crossplay",
+  "cross",
+  "play",
+  "lan",
+  "local"
+]);
+
+function isStoreModeLikeGenreLabel(rawLabel) {
+  const normalized = normalizeSearchText(rawLabel);
+  if (!normalized) return false;
+
+  const hasModePhrase = STORE_MODE_LIKE_GENRE_PHRASES.some((phrase) => normalized.includes(phrase));
+  if (!hasModePhrase) {
+    return false;
+  }
+
+  const tokens = normalized.split(" ").filter(Boolean);
+  const hasNonModeToken = tokens.some((token) => !STORE_MODE_LIKE_GENRE_TOKENS.has(token));
+
+  if (!hasNonModeToken) {
+    return true;
+  }
+
+  return (
+    normalized.includes("multiplayer") ||
+    normalized.includes("single player") ||
+    normalized.includes("singleplayer") ||
+    normalized.includes("co op") ||
+    normalized.includes("coop") ||
+    normalized.includes("solo") ||
+    normalized.includes("um jogador")
+  );
+}
+
 function getGameGenreFilterEntries(game) {
   const rawValues = [];
   if (Array.isArray(game?.genres)) {
@@ -2164,12 +2258,16 @@ function getGameGenreFilterEntries(game) {
   if (Array.isArray(game?.categories)) {
     rawValues.push(...game.categories);
   }
+  if (typeof game?.section === "string") {
+    rawValues.push(game.section);
+  }
 
   const entries = [];
   const used = new Set();
   for (const rawValue of rawValues) {
     const label = String(rawValue || "").trim();
     if (!label) continue;
+    if (isStoreModeLikeGenreLabel(label)) continue;
     const value = normalizeSearchText(label);
     if (!value || used.has(value)) continue;
     used.add(value);
@@ -2182,8 +2280,7 @@ function getStoreGenreFilterOptions() {
   const optionsByValue = new Map();
   for (const game of state.games) {
     const entries = getGameGenreFilterEntries(game);
-    const sourceEntries = entries.length > 0 ? entries : getGenres(game).map((genre) => ({ label: genre }));
-    for (const entry of sourceEntries) {
+    for (const entry of entries) {
       const label = String(entry?.label || "").trim();
       if (!label) continue;
       const value = String(entry?.value || normalizeSearchText(label)).trim();
@@ -2195,6 +2292,88 @@ function getStoreGenreFilterOptions() {
   return [...optionsByValue.entries()]
     .map(([value, label]) => ({ value, label }))
     .sort((a, b) => a.label.localeCompare(b.label, "pt-BR", { sensitivity: "base" }));
+}
+
+function getStoreModeFilterOptions() {
+  return [
+    {
+      value: "all",
+      label: "Todos",
+      searchText: "todos all qualquer qualquer modo"
+    },
+    {
+      value: "multiplayer",
+      label: "Multiplayer",
+      searchText: "multiplayer online coop cooperative co op pvp mmo squad party amigos"
+    },
+    {
+      value: "solo",
+      label: "Solo",
+      searchText: "solo single player singleplayer campanha historia story offline um jogador"
+    }
+  ];
+}
+
+function buildStoreFilterOptionSearchIndex(sourceValue) {
+  const normalizedText = normalizeSearchText(sourceValue);
+  const compactText = toCompactSearchText(normalizedText);
+  const compactCollapsed = collapseRepeatedChars(compactText);
+  const tokens = [...new Set(normalizedText.split(" ").filter(Boolean))];
+  const collapsedTokens = [...new Set(tokens.map((token) => collapseRepeatedChars(token)).filter(Boolean))];
+
+  return {
+    normalizedText,
+    compactText,
+    compactCollapsed,
+    tokens,
+    collapsedTokens
+  };
+}
+
+function isStoreFilterOptionMatchingQuery(optionSource, queryRaw) {
+  const query = normalizeSearchText(queryRaw);
+  if (!query) return true;
+
+  const source = String(optionSource || "").trim();
+  if (!source) return false;
+  const searchIndex = buildStoreFilterOptionSearchIndex(source);
+  const queryTokens = query.split(" ").filter(Boolean);
+  if (!queryTokens.length) return true;
+
+  return queryTokens.every((token) => doesSearchTokenMatchIndex(token, searchIndex));
+}
+
+function applyStoreAdvancedFilterSearchToMenu(rootElement = storeGrid) {
+  const root = rootElement instanceof Element ? rootElement : storeGrid;
+  if (!(root instanceof Element)) return;
+
+  const query = String(state.storeAdvancedFilterSearch || "").trim();
+  const optionButtons = root.querySelectorAll("[data-store-filter-option]");
+  let visibleOptionsCount = 0;
+
+  optionButtons.forEach((button) => {
+    const source = String(button.getAttribute("data-store-filter-search-source") || "").trim();
+    const isActive = button.classList.contains("is-active");
+    const matchesQuery = isActive || isStoreFilterOptionMatchingQuery(source, query);
+    button.classList.toggle("is-hidden-by-search", !matchesQuery);
+    if (matchesQuery) {
+      visibleOptionsCount += 1;
+    }
+  });
+
+  const groups = root.querySelectorAll("[data-store-filter-group]");
+  groups.forEach((group) => {
+    const visibleInGroup = group.querySelectorAll("[data-store-filter-option]:not(.is-hidden-by-search)").length;
+    const emptyNode = group.querySelector("[data-store-filter-empty]");
+    if (emptyNode) {
+      emptyNode.classList.toggle("is-hidden", visibleInGroup > 0);
+    }
+  });
+
+  const globalEmptyNode = root.querySelector("[data-store-filter-search-empty]");
+  if (globalEmptyNode) {
+    globalEmptyNode.classList.toggle("is-hidden", visibleOptionsCount > 0);
+  }
 }
 
 function getGameModeFlags(game) {
@@ -2816,6 +2995,112 @@ function updateHeaderForView() {
   viewTitle.textContent = selected?.name || "Game";
 }
 
+function isStageSurfaceScrollable() {
+  if (!(stageSurface instanceof HTMLElement)) {
+    return false;
+  }
+
+  const scrollDistance = Number(stageSurface.scrollHeight || 0) - Number(stageSurface.clientHeight || 0);
+  return Number.isFinite(scrollDistance) && scrollDistance > STAGE_SCROLLABLE_EPSILON_PX;
+}
+
+function syncScrolledHeaderState() {
+  if (!(stageSurface instanceof HTMLElement)) {
+    headerScrolledState = false;
+    document.body.classList.remove("header-scrolled");
+    return;
+  }
+
+  if (state.view === "details" || !isStageSurfaceScrollable()) {
+    if (!headerScrolledState) return;
+    headerScrolledState = false;
+    document.body.classList.remove("header-scrolled");
+    return;
+  }
+
+  const currentScrollTop = Math.max(0, Number(stageSurface.scrollTop || 0));
+  const nextState = currentScrollTop > HEADER_SCROLL_MIN_OFFSET_PX;
+
+  if (nextState === headerScrolledState) return;
+
+  headerScrolledState = nextState;
+  document.body.classList.toggle("header-scrolled", headerScrolledState);
+}
+
+function syncCenteredLayoutState() {
+  const viewportWidth =
+    stageSurface instanceof HTMLElement && Number.isFinite(stageSurface.clientWidth)
+      ? Number(stageSurface.clientWidth)
+      : Number(window.innerWidth || 0);
+
+  const nextCentered = centeredLayoutState
+    ? viewportWidth >= CENTERED_LAYOUT_EXIT_WIDTH_PX
+    : viewportWidth >= CENTERED_LAYOUT_ENTER_WIDTH_PX;
+
+  if (nextCentered === centeredLayoutState) {
+    return;
+  }
+
+  centeredLayoutState = nextCentered;
+  document.body.classList.toggle("layout-centered", centeredLayoutState);
+}
+
+function syncHeaderStateStable() {
+  syncCenteredLayoutState();
+  syncScrolledHeaderState();
+  window.requestAnimationFrame(() => {
+    syncCenteredLayoutState();
+    syncScrolledHeaderState();
+  });
+}
+
+function holdUiTransitionsForBoot() {
+  document.body.classList.add("ui-transitions-hold");
+}
+
+function releaseUiTransitionsAfterBoot(delayMs = 0) {
+  if (uiTransitionReleaseTimer) {
+    window.clearTimeout(uiTransitionReleaseTimer);
+    uiTransitionReleaseTimer = null;
+  }
+
+  const releaseNow = () => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        document.body.classList.remove("ui-transitions-hold");
+      });
+    });
+  };
+
+  if (delayMs > 0) {
+    uiTransitionReleaseTimer = window.setTimeout(() => {
+      uiTransitionReleaseTimer = null;
+      releaseNow();
+    }, delayMs);
+    return;
+  }
+
+  releaseNow();
+}
+
+function primeScrolledHeaderStateOnWheel(event) {
+  if (state.view === "details") return;
+  if (!(stageSurface instanceof HTMLElement)) return;
+  if (!isStageSurfaceScrollable()) {
+    if (!headerScrolledState) return;
+    headerScrolledState = false;
+    document.body.classList.remove("header-scrolled");
+    return;
+  }
+
+  const deltaY = Number(event?.deltaY || 0);
+  if (!Number.isFinite(deltaY) || deltaY <= 0) return;
+
+  window.requestAnimationFrame(() => {
+    syncScrolledHeaderState();
+  });
+}
+
 function syncSearchVisibility() {
   const canUseSearch = state.view === "store" || state.view === "library";
   const shouldOpen = canUseSearch && (state.searchOpen || state.search.trim().length > 0);
@@ -2842,6 +3127,7 @@ function setView(nextView) {
   if (!["store", "details", "library", "downloads"].includes(nextView)) {
     return;
   }
+  const previousView = state.view;
 
   if (nextView !== "details") {
     state.lastNonDetailView = nextView;
@@ -2857,8 +3143,16 @@ function setView(nextView) {
   if (nextView !== "store") {
     state.storeAdvancedFiltersOpen = false;
   }
+
+  if (previousView === "details" && nextView !== "details") {
+    headerScrolledState = false;
+    document.body.classList.remove("header-scrolled");
+  }
+
   document.body.classList.toggle("view-details", nextView === "details");
   document.body.classList.toggle("view-downloads", nextView === "downloads");
+  document.body.classList.toggle("view-store", nextView === "store");
+  document.body.classList.toggle("view-library", nextView === "library");
 
   storeView.classList.toggle("is-active", nextView === "store");
   detailsView.classList.toggle("is-active", nextView === "details");
@@ -2873,6 +3167,7 @@ function setView(nextView) {
   syncSearchVisibility();
 
   updateHeaderForView();
+  syncHeaderStateStable();
 }
 
 function getCoverDotStateClass(game) {
@@ -3340,6 +3635,49 @@ function renderDownloadsView() {
   downloadsActiveList.innerHTML = `${activeMarkup}${readyBlock}`;
 }
 
+function getStoreGridRenderSignature(storeGames, options = {}) {
+  const games = Array.isArray(storeGames) ? storeGames : [];
+  const searchKey = state.search.trim().toLowerCase();
+  const filterKey = String(state.storeFilter || "popular");
+  const modeKey = String(state.storeModeFilter || "all");
+  const genreKey = String(state.storeGenreFilter || "all");
+  const advancedOpenKey = state.storeAdvancedFiltersOpen ? "1" : "0";
+  const advancedActiveKey = options.hasAdvancedFilters ? "1" : "0";
+
+  if (!games.length) {
+    return `${filterKey}|${searchKey}|${modeKey}|${genreKey}|${advancedOpenKey}|${advancedActiveKey}|empty`;
+  }
+
+  const cardsKey = games
+    .map((game) => {
+      const progress = getInstallProgress(game.id);
+      const percentValue = Number(progress?.percent);
+      const percentRounded = Number.isFinite(percentValue) ? Math.round(percentValue) : -1;
+      const totalBytesKnown = Number.isFinite(progress?.totalBytes) && progress.totalBytes > 0 ? "1" : "0";
+      const currentPriceLabel = normalizePriceLabel(game.currentPrice || game.salePrice || game.price);
+      const originalPriceLabel = normalizePriceLabel(game.originalPrice || game.listPrice || game.basePrice);
+
+      return [
+        game.id,
+        getCardImage(game),
+        getCoverDotStateClass(game),
+        String(isGameBusy(game.id) ? 1 : 0),
+        String(progress?.phase || ""),
+        String(percentRounded),
+        totalBytesKnown,
+        String(game.comingSoon === true ? 1 : 0),
+        String(game.isFree === true || game.free === true ? 1 : 0),
+        getStoreCardKind(game),
+        getStoreFeatureTag(game),
+        currentPriceLabel,
+        originalPriceLabel
+      ].join("~");
+    })
+    .join("|");
+
+  return `${filterKey}|${searchKey}|${modeKey}|${genreKey}|${advancedOpenKey}|${advancedActiveKey}|${cardsKey}`;
+}
+
 function renderStoreGrid() {
   const genreOptions = getStoreGenreFilterOptions();
   if (state.storeGenreFilter !== "all" && !genreOptions.some((entry) => entry.value === state.storeGenreFilter)) {
@@ -3349,11 +3687,17 @@ function renderStoreGrid() {
   const trimmedSearch = state.search.trim();
   const hasSearch = trimmedSearch.length > 0;
   const hasAdvancedFilters = hasStoreAdvancedFiltersActive();
-  const currentStoreSignature = `${state.storeFilter}|${state.search.trim().toLowerCase()}|${games
+  const currentStoreRenderSignature = getStoreGridRenderSignature(games, { hasAdvancedFilters });
+  if (currentStoreRenderSignature === previousStoreGridRenderSignature) {
+    return;
+  }
+  previousStoreGridRenderSignature = currentStoreRenderSignature;
+
+  const currentStoreAnimationSignature = `${state.storeFilter}|${state.search.trim().toLowerCase()}|${state.storeModeFilter}|${state.storeGenreFilter}|${games
     .map((game) => game.id)
     .join("|")}`;
-  const shouldAnimateIn = currentStoreSignature !== previousStoreGridSignature;
-  previousStoreGridSignature = currentStoreSignature;
+  const shouldAnimateIn = currentStoreAnimationSignature !== previousStoreGridAnimationSignature;
+  previousStoreGridAnimationSignature = currentStoreAnimationSignature;
 
   if (games.length === 0) {
     const safeQuery = escapeHtml(trimmedSearch);
@@ -3373,19 +3717,21 @@ function renderStoreGrid() {
   }
 
   const shelfTitle = getStoreShelfTitle();
-  const modeOptions = [
-    { value: "all", label: "Todos" },
-    { value: "multiplayer", label: "Multiplayer" },
-    { value: "solo", label: "Solo" }
-  ];
+  const modeOptions = getStoreModeFilterOptions();
+  const hasFilterSearchQuery = String(state.storeAdvancedFilterSearch || "").trim().length > 0;
+  const filterSearchValue = escapeHtml(state.storeAdvancedFilterSearch || "");
+  const filterSearchClearClass = hasFilterSearchQuery ? "" : "is-hidden";
   const modeOptionsMarkup = modeOptions
     .map((option) => {
       const activeClass = state.storeModeFilter === option.value ? "is-active" : "";
+      const searchSource = escapeHtml(option.searchText || option.label || "");
       return `
         <button
           class="store-shelf-filter-chip ${activeClass}"
           type="button"
           data-store-mode-filter="${escapeHtml(option.value)}"
+          data-store-filter-option="mode"
+          data-store-filter-search-source="${searchSource}"
         >
           ${escapeHtml(option.label)}
         </button>
@@ -3395,11 +3741,14 @@ function renderStoreGrid() {
   const genreOptionsMarkup = [{ value: "all", label: "Todos" }, ...genreOptions]
     .map((option) => {
       const activeClass = state.storeGenreFilter === option.value ? "is-active" : "";
+      const searchSource = escapeHtml(option.label || "");
       return `
         <button
           class="store-shelf-filter-chip ${activeClass}"
           type="button"
           data-store-genre-filter="${escapeHtml(option.value)}"
+          data-store-filter-option="genre"
+          data-store-filter-search-source="${searchSource}"
         >
           ${escapeHtml(option.label)}
         </button>
@@ -3492,7 +3841,7 @@ function renderStoreGrid() {
           </span>
         </h2>
 
-        <div class="store-shelf-nav" aria-label="Navegar pela vitrine">
+        <div class="store-shelf-nav" aria-label="Filtros da vitrine">
           <div class="store-shelf-filter-wrap" data-store-advanced-filter-wrap>
             <button
               class="store-shelf-nav-btn store-shelf-filter-btn ${filterButtonOpenClass} ${filterButtonActiveClass}"
@@ -3514,36 +3863,56 @@ function renderStoreGrid() {
             </button>
 
             <section class="store-shelf-filter-menu ${filterMenuOpenClass}" data-store-advanced-filter-menu role="menu">
-              <div class="store-shelf-filter-group">
+              <label class="store-shelf-filter-search" aria-label="Buscar filtros">
+                <span class="store-shelf-filter-search-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none">
+                    <circle cx="11.2" cy="11.2" r="5.8" stroke="currentColor" stroke-width="1.8"></circle>
+                    <path d="M15.4 15.4L19 19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                  </svg>
+                </span>
+                <input
+                  type="search"
+                  class="store-shelf-filter-search-input"
+                  data-store-advanced-filter-search="true"
+                  placeholder="Buscar modo ou genero..."
+                  value="${filterSearchValue}"
+                  autocomplete="off"
+                />
+                <button
+                  type="button"
+                  class="store-shelf-filter-search-clear ${filterSearchClearClass}"
+                  data-store-advanced-filter-search-clear="true"
+                  aria-label="Limpar busca de filtros"
+                >
+                  Limpar
+                </button>
+              </label>
+
+              <div class="store-shelf-filter-group" data-store-filter-group="mode">
                 <p class="store-shelf-filter-group-title">Modo</p>
                 <div class="store-shelf-filter-options">
                   ${modeOptionsMarkup}
                 </div>
+                <p class="store-shelf-filter-empty is-hidden" data-store-filter-empty>Nenhum modo encontrado.</p>
               </div>
 
-              <div class="store-shelf-filter-group">
+              <div class="store-shelf-filter-group" data-store-filter-group="genre">
                 <p class="store-shelf-filter-group-title">Genero</p>
                 <div class="store-shelf-filter-options">
                   ${genreOptionsMarkup}
                 </div>
+                <p class="store-shelf-filter-empty is-hidden" data-store-filter-empty>Nenhum genero encontrado.</p>
               </div>
+
+              <p class="store-shelf-filter-search-empty is-hidden" data-store-filter-search-empty>
+                Nenhum filtro encontrado para essa busca.
+              </p>
 
               <button class="store-shelf-filter-reset" type="button" data-store-advanced-filter-reset="true">
                 Limpar filtros
               </button>
             </section>
           </div>
-
-          <button class="store-shelf-nav-btn" type="button" data-store-scroll="-1" aria-label="Scroll para esquerda">
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M14.8 6.6L9.4 12L14.8 17.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
-            </svg>
-          </button>
-          <button class="store-shelf-nav-btn" type="button" data-store-scroll="1" aria-label="Scroll para direita">
-            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M9.2 6.6L14.6 12L9.2 17.4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
-            </svg>
-          </button>
         </div>
       </header>
 
@@ -3554,6 +3923,7 @@ function renderStoreGrid() {
       </div>
     </section>
   `;
+  applyStoreAdvancedFilterSearchToMenu(storeGrid);
 
   if (animate && shouldAnimateIn) {
     const cards = storeGrid.querySelectorAll(".store-card");
@@ -4076,17 +4446,22 @@ function renderAll() {
   renderRailDownloads();
   updateHeaderForView();
 
-  if (!state.selectedGameId) return;
+  if (!state.selectedGameId) {
+    syncHeaderStateStable();
+    return;
+  }
   const selected = getGameById(state.selectedGameId);
   if (!selected) {
     state.selectedGameId = "";
     if (state.view === "details") {
       setView(state.lastNonDetailView || "store");
     }
+    syncHeaderStateStable();
     return;
   }
 
   renderDetails(selected);
+  syncHeaderStateStable();
 }
 
 function openDetails(gameId) {
@@ -4430,7 +4805,7 @@ function playIntroAnimations() {
   state.introPlayed = true;
 
   animate(".side-rail", { opacity: [0, 1], x: [-20, 0] }, { duration: 0.46, easing: [0.22, 1, 0.36, 1] });
-  animate(".top-header", { opacity: [0, 1], y: [-10, 0] }, { duration: 0.38, delay: 0.03, easing: [0.22, 1, 0.36, 1] });
+  animate(".top-header", { opacity: [0, 1] }, { duration: 0.32, delay: 0.03, easing: [0.22, 1, 0.36, 1] });
   animate(".stage-header", { opacity: [0, 1], y: [15, 0] }, { duration: 0.4, delay: 0.08, easing: [0.22, 1, 0.36, 1] });
 }
 
@@ -4474,12 +4849,60 @@ async function loadInitialData() {
 function installEventBindings() {
   setupSidebarLogo();
   applyWindowMaximizedState(false);
+  holdUiTransitionsForBoot();
   ensureNotyfDeckStack();
   renderTopAccountButton();
   renderAutoUpdateButton();
   void bootstrapAutoUpdateState();
   startAutoUpdateRealtimeSync();
   scheduleAutoUpdateBackgroundCheckSoon(2500);
+  setView(state.view);
+  syncHeaderStateStable();
+  releaseUiTransitionsAfterBoot(80);
+
+  if (stageSurface instanceof HTMLElement) {
+    stageSurface.addEventListener(
+      "scroll",
+      () => {
+        syncScrolledHeaderState();
+      },
+      { passive: true }
+    );
+    stageSurface.addEventListener(
+      "wheel",
+      (event) => {
+        primeScrolledHeaderStateOnWheel(event);
+      },
+      { passive: true }
+    );
+  }
+
+  // Prevent image/assets drag out of the launcher (e.g. to browser/desktop).
+  document.addEventListener("dragstart", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+
+    if (
+      target instanceof HTMLImageElement ||
+      target.closest("img") ||
+      target.closest(".store-card") ||
+      target.closest(".library-card") ||
+      target.closest(".gallery-thumb") ||
+      target.closest(".hero-panel")
+    ) {
+      event.preventDefault();
+    }
+  });
+
+  document.addEventListener("dragover", (event) => {
+    event.preventDefault();
+  });
+
+  document.addEventListener("drop", (event) => {
+    event.preventDefault();
+  });
 
   if (authSteamLoginBtn) {
     authSteamLoginBtn.addEventListener("click", () => {
@@ -4798,8 +5221,32 @@ function installEventBindings() {
     const advancedToggleButton = event.target.closest("[data-store-advanced-filter-toggle]");
     if (advancedToggleButton) {
       event.preventDefault();
-      state.storeAdvancedFiltersOpen = !state.storeAdvancedFiltersOpen;
+      const willOpen = !state.storeAdvancedFiltersOpen;
+      state.storeAdvancedFiltersOpen = willOpen;
       renderStoreGrid();
+      if (willOpen) {
+        const filterSearchInput = storeGrid.querySelector("[data-store-advanced-filter-search]");
+        if (filterSearchInput instanceof HTMLInputElement) {
+          filterSearchInput.focus();
+          if (filterSearchInput.value) {
+            filterSearchInput.setSelectionRange(filterSearchInput.value.length, filterSearchInput.value.length);
+          }
+        }
+      }
+      return;
+    }
+
+    const clearFilterSearchButton = event.target.closest("[data-store-advanced-filter-search-clear]");
+    if (clearFilterSearchButton) {
+      event.preventDefault();
+      state.storeAdvancedFilterSearch = "";
+      const filterSearchInput = storeGrid.querySelector("[data-store-advanced-filter-search]");
+      if (filterSearchInput instanceof HTMLInputElement) {
+        filterSearchInput.value = "";
+        filterSearchInput.focus();
+      }
+      clearFilterSearchButton.classList.add("is-hidden");
+      applyStoreAdvancedFilterSearchToMenu(storeGrid);
       return;
     }
 
@@ -4814,6 +5261,10 @@ function installEventBindings() {
       }
       state.storeModeFilter = nextMode;
       renderStoreGrid();
+      const filterSearchInput = storeGrid.querySelector("[data-store-advanced-filter-search]");
+      if (filterSearchInput instanceof HTMLInputElement) {
+        filterSearchInput.focus();
+      }
       return;
     }
 
@@ -4825,6 +5276,10 @@ function installEventBindings() {
         .toLowerCase();
       state.storeGenreFilter = nextGenre || "all";
       renderStoreGrid();
+      const filterSearchInput = storeGrid.querySelector("[data-store-advanced-filter-search]");
+      if (filterSearchInput instanceof HTMLInputElement) {
+        filterSearchInput.focus();
+      }
       return;
     }
 
@@ -4833,27 +5288,29 @@ function installEventBindings() {
       event.preventDefault();
       state.storeModeFilter = "all";
       state.storeGenreFilter = "all";
+      state.storeAdvancedFilterSearch = "";
       state.storeAdvancedFiltersOpen = false;
       renderStoreGrid();
-      return;
-    }
-
-    const scrollButton = event.target.closest("[data-store-scroll]");
-    if (scrollButton) {
-      const direction = Number(scrollButton.dataset.storeScroll || 0);
-      if (!Number.isFinite(direction) || direction === 0) return;
-      const track = storeGrid.querySelector("[data-store-track]");
-      if (!track) return;
-      track.scrollBy({
-        left: direction * 560,
-        behavior: "smooth"
-      });
       return;
     }
 
     const card = event.target.closest("[data-open-game]");
     if (!card) return;
     openDetails(card.dataset.openGame);
+  });
+
+  storeGrid.addEventListener("input", (event) => {
+    const filterSearchInput = event.target.closest("[data-store-advanced-filter-search]");
+    if (!(filterSearchInput instanceof HTMLInputElement)) {
+      return;
+    }
+
+    state.storeAdvancedFilterSearch = String(filterSearchInput.value || "");
+    const clearSearchButton = storeGrid.querySelector("[data-store-advanced-filter-search-clear]");
+    if (clearSearchButton) {
+      clearSearchButton.classList.toggle("is-hidden", !state.storeAdvancedFilterSearch.trim());
+    }
+    applyStoreAdvancedFilterSearchToMenu(storeGrid);
   });
 
   railGamesList.addEventListener("click", (event) => {
@@ -5258,6 +5715,7 @@ function installEventBindings() {
   if (typeof window.launcherApi.onWindowMaximized === "function") {
     window.launcherApi.onWindowMaximized((isMaximized) => {
       applyWindowMaximizedState(isMaximized);
+      syncHeaderStateStable();
     });
   }
 
@@ -5266,11 +5724,24 @@ function installEventBindings() {
       .isWindowMaximized()
       .then((isMaximized) => {
         applyWindowMaximizedState(isMaximized);
+        syncHeaderStateStable();
       })
       .catch(() => {
         applyWindowMaximizedState(false);
+        syncHeaderStateStable();
       });
   }
+
+  let resizeSyncRaf = 0;
+  window.addEventListener("resize", () => {
+    if (resizeSyncRaf) {
+      window.cancelAnimationFrame(resizeSyncRaf);
+    }
+    resizeSyncRaf = window.requestAnimationFrame(() => {
+      resizeSyncRaf = 0;
+      syncHeaderStateStable();
+    });
+  });
 }
 
 installEventBindings();

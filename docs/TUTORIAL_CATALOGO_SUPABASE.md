@@ -7,6 +7,7 @@ Este launcher agora consegue puxar jogos direto do Supabase em tempo real.
 No SQL Editor do Supabase, execute:
 
 - `docs/SUPABASE_SQL_CATALOGO_JOGOS.sql`
+- `docs/SUPABASE_SQL_STEAM_PRECO_AUTO.sql` (opcional, recomendado)
 
 Esse SQL:
 
@@ -14,6 +15,15 @@ Esse SQL:
 2. cria trigger de `updated_at`
 3. cria policy de leitura para `anon/authenticated`
 4. insere (ou atualiza) o jogo `repo` (Drive-only)
+
+O SQL opcional de preco Steam:
+
+1. habilita `extensions.http`
+2. habilita `pg_cron`
+3. cria funcao para consultar `store.steampowered.com/api/appdetails`
+4. atualiza `original_price` como numero (`10.99`) e mantem `current_price` fixo como `Gratuito`
+5. cria trigger para sincronizar automaticamente no `INSERT/UPDATE` de `steam_app_id`
+6. agenda sincronizacao automatica a cada 24h (`06:00 UTC`) para capturar promocoes e mudancas de preco
 
 ## 2) Confirmar auth do launcher
 
@@ -88,6 +98,26 @@ set
 ```
 
 Em ate ~5 segundos, o jogo aparece no launcher sem atualizar build.
+
+Se voce ativou o SQL de preco Steam, tambem pode forcar a atualizacao dos precos ja cadastrados:
+
+```sql
+select public.sync_all_launcher_game_prices_from_steam('br', 'brazilian');
+```
+
+Tambem pode extrair o App ID direto da URL da Steam:
+
+```sql
+select public.extract_steam_app_id('https://store.steampowered.com/app/3241660/REPO/');
+```
+
+Para conferir o agendamento diario:
+
+```sql
+select jobid, jobname, schedule, active
+from cron.job
+where jobname = 'wplay_sync_steam_prices_daily';
+```
 
 ## 6) Upsert pronto: REPO oficial (Google Drive)
 
