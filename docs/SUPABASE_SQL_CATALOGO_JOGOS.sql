@@ -34,7 +34,7 @@ create table if not exists public.launcher_games (
   genres jsonb not null default '[]'::jsonb,
   average_play_time text not null default '',
   average_achievement text not null default '',
-  size_bytes bigint not null default 0,
+  size_bytes text not null default '',
   size_label text not null default '',
   store_type text not null default '',
   store_tag text not null default '',

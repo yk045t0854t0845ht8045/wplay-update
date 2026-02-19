@@ -2146,6 +2146,14 @@ body.layout-centered.view-store .stage-header,
   margin-right: auto;
 }
 
+body.layout-centered.view-store:not(.view-details):not(.header-scrolled) .top-header,
+  body.layout-centered.view-library:not(.view-details):not(.header-scrolled) .top-header,
+  body.layout-centered.view-downloads:not(.view-details):not(.header-scrolled) .top-header {
+  width: min(var(--stage-centered-max-width), 100%);
+  margin-left: auto;
+  margin-right: auto;
+}
+
 body.layout-centered.header-scrolled.view-store:not(.view-details) .top-header,
   body.layout-centered.header-scrolled.view-library:not(.view-details) .top-header,
   body.layout-centered.header-scrolled.view-downloads:not(.view-details) .top-header {

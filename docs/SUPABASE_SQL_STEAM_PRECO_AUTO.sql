@@ -1,13 +1,16 @@
--- WPlay: sincronizacao automatica de preco via Steam App ID
+-- WPlay: sincronizacao automatica de preco + armazenamento via Steam App ID
 -- Objetivo: ao inserir/atualizar steam_app_id em public.launcher_games,
--- atualizar automaticamente original_price (e tambem current_price/discount_percent/free).
+-- atualizar automaticamente:
+-- - original_price / discount_percent / free
+-- - tamanho de armazenamento (size_bytes / size_label) a partir dos requisitos da Steam
 -- Regra de exibicao:
 -- - current_price fica sempre "Gratuito"
 -- - original_price recebe apenas numero (ex: 10.99), sem moeda/simbolo
+-- - size_bytes recebe texto como "512 MB", "1 GB", "25 GB" (quando a Steam informar)
 --
 -- Como usar:
 -- 1) Execute este arquivo no SQL Editor do Supabase.
--- 2) Ao fazer INSERT/UPDATE com steam_app_id > 0, o trigger atualiza os precos.
+-- 2) Ao fazer INSERT/UPDATE com steam_app_id > 0, o trigger atualiza preco + armazenamento.
 -- 3) Para jogos ja existentes, rode:
 --    select public.sync_all_launcher_game_prices_from_steam('br', 'brazilian');
 
@@ -15,6 +18,32 @@ begin;
 
 create extension if not exists http with schema extensions;
 create extension if not exists pg_cron;
+
+alter table public.launcher_games
+  add column if not exists size_bytes text not null default '';
+
+alter table public.launcher_games
+  add column if not exists size_label text not null default '';
+
+do $$
+declare
+  v_data_type text;
+begin
+  select c.data_type
+    into v_data_type
+  from information_schema.columns c
+  where c.table_schema = 'public'
+    and c.table_name = 'launcher_games'
+    and c.column_name = 'size_bytes'
+  limit 1;
+
+  if v_data_type is distinct from 'text' then
+    alter table public.launcher_games
+      alter column size_bytes type text
+      using coalesce(size_bytes::text, '');
+  end if;
+end;
+$$;
 
 create or replace function public.extract_steam_app_id(p_input text)
 returns bigint
@@ -46,6 +75,118 @@ exception
 end;
 $$;
 
+create or replace function public.normalize_steam_storage_value(
+  p_value text,
+  p_unit text
+)
+returns text
+language plpgsql
+immutable
+as $$
+declare
+  v_number_raw text;
+  v_number numeric;
+  v_number_text text;
+  v_unit text;
+begin
+  v_number_raw := replace(trim(coalesce(p_value, '')), ',', '.');
+  if v_number_raw = '' then
+    return null;
+  end if;
+
+  begin
+    v_number := v_number_raw::numeric;
+  exception
+    when others then
+      return null;
+  end;
+
+  if v_number <= 0 then
+    return null;
+  end if;
+
+  if v_number = trunc(v_number) then
+    v_number_text := trim(to_char(v_number, 'FM9999999990'));
+  else
+    v_number_text := trim(to_char(v_number, 'FM9999999990.##'));
+  end if;
+
+  v_unit := upper(trim(coalesce(p_unit, '')));
+  if v_unit not in ('KB', 'MB', 'GB', 'TB') then
+    return null;
+  end if;
+
+  return v_number_text || ' ' || v_unit;
+end;
+$$;
+
+create or replace function public.extract_steam_storage_requirement(
+  p_steam_data jsonb
+)
+returns text
+language plpgsql
+immutable
+as $$
+declare
+  v_pc_requirements jsonb;
+  v_blob text;
+  v_match text[];
+begin
+  if p_steam_data is null then
+    return null;
+  end if;
+
+  v_pc_requirements := p_steam_data -> 'pc_requirements';
+  if v_pc_requirements is null then
+    return null;
+  end if;
+
+  v_blob := coalesce(v_pc_requirements ->> 'minimum', '')
+    || E'\n'
+    || coalesce(v_pc_requirements ->> 'recommended', '');
+
+  if btrim(v_blob) = '' then
+    return null;
+  end if;
+
+  -- Remove HTML e compacta texto para regex.
+  v_blob := regexp_replace(v_blob, '<br[[:space:]]*/?>', E'\n', 'gi');
+  v_blob := regexp_replace(v_blob, '<li[^>]*>', E'\n', 'gi');
+  v_blob := regexp_replace(v_blob, '</li>', ' ', 'gi');
+  v_blob := regexp_replace(v_blob, '<[^>]+>', ' ', 'g');
+  v_blob := replace(v_blob, '&nbsp;', ' ');
+  v_blob := replace(v_blob, '&#160;', ' ');
+  v_blob := replace(v_blob, '&amp;', '&');
+  v_blob := replace(v_blob, '&quot;', '"');
+  v_blob := replace(v_blob, '&#39;', '''');
+  v_blob := regexp_replace(v_blob, '[[:space:]]+', ' ', 'g');
+  v_blob := lower(btrim(v_blob));
+
+  -- Prioriza linha/campo de armazenamento.
+  v_match := regexp_match(
+    v_blob,
+    '(armazenamento|storage|hard[[:space:]]*drive|disk[[:space:]]*space|espaco[[:space:]]*em[[:space:]]*disco|espaço[[:space:]]*em[[:space:]]*disco)[^0-9]{0,80}([0-9]+(?:[.,][0-9]+)?)[[:space:]]*(tb|gb|mb|kb)'
+  );
+  if v_match is not null and array_length(v_match, 1) >= 3 then
+    return public.normalize_steam_storage_value(v_match[2], v_match[3]);
+  end if;
+
+  -- Fallback: algum valor de armazenamento no texto.
+  v_match := regexp_match(
+    v_blob,
+    '([0-9]+(?:[.,][0-9]+)?)[[:space:]]*(tb|gb|mb|kb)[[:space:]]*(?:de[[:space:]]*)?(?:espaco|espaço|available)?'
+  );
+  if v_match is not null and array_length(v_match, 1) >= 2 then
+    return public.normalize_steam_storage_value(v_match[1], v_match[2]);
+  end if;
+
+  return null;
+exception
+  when others then
+    return null;
+end;
+$$;
+
 create or replace function public.sync_launcher_game_price_from_steam(
   p_game_id text,
   p_cc text default 'br',
@@ -71,6 +212,7 @@ declare
   v_original_price text;
   v_discount_percent text;
   v_discount_raw integer := 0;
+  v_storage_requirement text;
   v_cc text;
   v_lang text;
 begin
@@ -142,6 +284,7 @@ begin
 
   v_is_free := coalesce((v_data ->> 'is_free')::boolean, false);
   v_price_overview := v_data -> 'price_overview';
+  v_storage_requirement := public.extract_steam_storage_requirement(v_data);
 
   if v_is_free then
     v_original_price := '0.00';
@@ -181,7 +324,9 @@ begin
     current_price = v_current_price,
     original_price = coalesce(v_original_price, g.original_price),
     discount_percent = coalesce(v_discount_percent, g.discount_percent),
-    free = v_is_free
+    free = v_is_free,
+    size_bytes = coalesce(v_storage_requirement, g.size_bytes),
+    size_label = coalesce(v_storage_requirement, g.size_label)
   where g.id = p_game_id;
 
   return true;

@@ -76,6 +76,7 @@ const { app, BrowserWindow, ipcMain, shell, dialog, safeStorage, session, screen
 const fsp = require("fs/promises");
 const crypto = require("crypto");
 const http = require("http");
+const { Transform } = require("stream");
 const { pipeline } = require("stream/promises");
 const axios = require("axios");
 const { path7za } = require("7zip-bin");
@@ -198,7 +199,7 @@ const MAIN_WINDOW_MAX_LOAD_RETRIES = 2;
 const MAIN_WINDOW_LOAD_RETRY_DELAY_MS = 1200;
 const TRAY_TOOLTIP_TEXT = "WPlay Games Launcher";
 const RUNTIME_CONFIG_LAUNCH_ON_SYSTEM_STARTUP_KEY = "launchOnStartup";
-const ACTIVE_INSTALL_PHASES = new Set(["preparing", "downloading", "extracting"]);
+const ACTIVE_INSTALL_PHASES = new Set(["queued", "paused", "preparing", "downloading", "extracting"]);
 
 let mainWindow = null;
 let updateSplashWindow = null;
@@ -246,6 +247,14 @@ const catalogSizeSyncInFlightByGameId = new Map();
 const activeInstalls = new Map();
 const activeInstallProgressByGameId = new Map();
 const activeInstallSessionsByGameId = new Map();
+const queuedInstallRequestsByGameId = new Map();
+const installRunControlsByGameId = new Map();
+const installQueue = [];
+let installQueueRunnerInFlight = null;
+let installQueuePaused = false;
+let lastPausedInstallGameId = "";
+const installQueuePauseWaiters = [];
+let installRequestSequence = 0;
 const activeUninstalls = new Set();
 const installSizeCache = new Map();
 let installSessionPersistQueue = Promise.resolve();
@@ -4858,6 +4867,64 @@ function parseSizeNumberToken(rawValue) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+function normalizeCatalogSizeText(value) {
+  if (typeof value === "number") {
+    return "";
+  }
+
+  const normalized = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const compact = normalized.replace(/[,\.\s]/g, "");
+  if (compact && /^\d+$/.test(compact)) {
+    return "";
+  }
+
+  return normalized;
+}
+
+function parseSizeBytesStrict(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
+  }
+
+  const text = String(value || "").trim();
+  if (!text) {
+    return 0;
+  }
+
+  if (/^[\d.,\s]+$/.test(text)) {
+    const amount = parseSizeNumberToken(text);
+    return amount > 0 ? Math.round(amount) : 0;
+  }
+
+  const sizeMatch = text.match(/^([\d.,\s]+)\s*(b|bytes?|kb|kib|mb|mib|gb|gib|tb|tib)$/i);
+  if (!sizeMatch) {
+    return 0;
+  }
+
+  const amount = parseSizeNumberToken(sizeMatch[1]);
+  if (amount <= 0) {
+    return 0;
+  }
+
+  const normalizedUnit = String(sizeMatch[2] || "")
+    .trim()
+    .toLowerCase();
+  let multiplier = 1;
+  if (normalizedUnit === "kb" || normalizedUnit === "kib") multiplier = 1024;
+  else if (normalizedUnit === "mb" || normalizedUnit === "mib") multiplier = 1024 ** 2;
+  else if (normalizedUnit === "gb" || normalizedUnit === "gib") multiplier = 1024 ** 3;
+  else if (normalizedUnit === "tb" || normalizedUnit === "tib") multiplier = 1024 ** 4;
+
+  const resolved = amount * multiplier;
+  return Number.isFinite(resolved) && resolved > 0 ? Math.round(resolved) : 0;
+}
+
 function parseSizeBytes(value) {
   if (typeof value === "number") {
     return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
@@ -7313,15 +7380,18 @@ async function readCatalogBundle() {
       const installDirName = String(entry.installDirName || name).trim() || name;
       const section = String(entry.section || "Jogos gratis").trim() || "Jogos gratis";
       const sizeLabel = String(entry.size || "").trim();
-      const catalogSizeBytesField = parseSizeBytes(entry.sizeBytes);
-      const catalogSizeBytesLabel = parseSizeBytes(sizeLabel);
+      const sizeManualFromLabel = normalizeCatalogSizeText(sizeLabel);
+      const sizeManualFromBytesField = normalizeCatalogSizeText(entry.sizeBytes);
+      const sizeManual = sizeManualFromLabel || sizeManualFromBytesField;
+      const catalogSizeBytesField = parseSizeBytesStrict(entry.sizeBytes);
+      const catalogSizeBytesLabel = parseSizeBytesStrict(sizeLabel);
       const catalogSizeBytes = catalogSizeBytesField || catalogSizeBytesLabel;
       if (catalogSizeBytes > 0) {
         rememberCatalogSizeBytes(id, catalogSizeBytes, { persist: true });
       }
       const knownSizeBytes = getKnownCatalogSizeBytes(id);
       const sizeBytes = catalogSizeBytes || knownSizeBytes;
-      const size = sizeLabel || (sizeBytes > 0 ? formatBytesShort(sizeBytes) : "Tamanho nao informado");
+      const size = sizeManual || (sizeBytes > 0 ? formatBytesShort(sizeBytes) : "");
       const comingSoon = entry.comingSoon === true || !hasDownloadSource;
       const description = String(entry.description || "Sem descricao.");
       const longDescription = String(entry.longDescription || entry.fullDescription || description || "Sem descricao.");
@@ -7376,6 +7446,7 @@ async function readCatalogBundle() {
         comingSoon,
         hasDownloadSource,
         size,
+        sizeIsManual: Boolean(sizeManual),
         sizeBytes,
         catalogSizeBytes,
         catalogSizeBytesField,
@@ -8462,7 +8533,25 @@ async function verifyDownloadedChecksum(archivePath, expectedSha256 = "") {
   return computed;
 }
 
-async function downloadFile({ game, destinationPath, onProgress }) {
+function createPauseAwarePassThroughTransform(runControl, onChunk) {
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      Promise.resolve()
+        .then(async () => {
+          if (runControl && typeof runControl.waitIfPaused === "function") {
+            await runControl.waitIfPaused();
+          }
+          if (typeof onChunk === "function") {
+            onChunk(chunk);
+          }
+          callback(null, chunk);
+        })
+        .catch((error) => callback(error));
+    }
+  });
+}
+
+async function downloadFile({ game, destinationPath, onProgress, runControl }) {
   const allCandidates = normalizeDownloadCandidates(game);
   if (!allCandidates.length) {
     throw new Error("Jogo sem fonte de download configurada (downloadUrl/downloadUrls/downloadSources).");
@@ -8472,6 +8561,10 @@ async function downloadFile({ game, destinationPath, onProgress }) {
   const failures = [];
 
   while (triedCandidates.size < allCandidates.length) {
+    if (runControl && typeof runControl.waitIfPaused === "function") {
+      await runControl.waitIfPaused();
+    }
+
     let payload;
     try {
       payload = await createDownloadStream(game, {
@@ -8507,8 +8600,7 @@ async function downloadFile({ game, destinationPath, onProgress }) {
     let lastSampleAt = Date.now();
     let lastSampleBytes = 0;
     let lastSpeedBps = 0;
-
-    response.data.on("data", (chunk) => {
+    const progressTransform = createPauseAwarePassThroughTransform(runControl, (chunk) => {
       downloadedBytes += chunk.length;
       const now = Date.now();
       const elapsedMs = Math.max(1, now - lastSampleAt);
@@ -8520,15 +8612,17 @@ async function downloadFile({ game, destinationPath, onProgress }) {
       lastSampleAt = now;
       lastSampleBytes = downloadedBytes;
 
-      onProgress(downloadedBytes, totalBytes, {
-        speedBps: Math.max(0, lastSpeedBps),
-        sourceLabel: getDownloadCandidateLabel(candidate),
-        sourceUrl
-      });
+      if (typeof onProgress === "function") {
+        onProgress(downloadedBytes, totalBytes, {
+          speedBps: Math.max(0, lastSpeedBps),
+          sourceLabel: getDownloadCandidateLabel(candidate),
+          sourceUrl
+        });
+      }
     });
 
     try {
-      await pipeline(response.data, fs.createWriteStream(destinationPath));
+      await pipeline(response.data, progressTransform, fs.createWriteStream(destinationPath));
       if (totalBytes > 0 && downloadedBytes > 0 && downloadedBytes < totalBytes) {
         throw new Error(`Download incompleto (${downloadedBytes}/${totalBytes} bytes).`);
       }
@@ -8553,7 +8647,7 @@ async function downloadFile({ game, destinationPath, onProgress }) {
   throw new Error(`Falha ao baixar um arquivo valido. Detalhes: ${details}`);
 }
 
-async function copyLocalArchiveToPath({ sourcePath, destinationPath, onProgress }) {
+async function copyLocalArchiveToPath({ sourcePath, destinationPath, onProgress, runControl }) {
   const stat = await fsp.stat(sourcePath);
   if (!stat.isFile() || stat.size <= 0) {
     throw new Error(`Arquivo local invalido: ${sourcePath}`);
@@ -8563,8 +8657,12 @@ async function copyLocalArchiveToPath({ sourcePath, destinationPath, onProgress 
   let lastSampleAt = Date.now();
   let lastSampleBytes = 0;
   let lastSpeedBps = 0;
+  if (runControl && typeof runControl.waitIfPaused === "function") {
+    await runControl.waitIfPaused();
+  }
+
   const input = fs.createReadStream(sourcePath);
-  input.on("data", (chunk) => {
+  const progressTransform = createPauseAwarePassThroughTransform(runControl, (chunk) => {
     copiedBytes += chunk.length;
     const now = Date.now();
     const elapsedMs = Math.max(1, now - lastSampleAt);
@@ -8576,14 +8674,16 @@ async function copyLocalArchiveToPath({ sourcePath, destinationPath, onProgress 
     lastSampleAt = now;
     lastSampleBytes = copiedBytes;
 
-    onProgress(copiedBytes, stat.size, {
-      speedBps: Math.max(0, lastSpeedBps),
-      sourceLabel: "arquivo-local",
-      sourceUrl: sourcePath
-    });
+    if (typeof onProgress === "function") {
+      onProgress(copiedBytes, stat.size, {
+        speedBps: Math.max(0, lastSpeedBps),
+        sourceLabel: "arquivo-local",
+        sourceUrl: sourcePath
+      });
+    }
   });
 
-  await pipeline(input, fs.createWriteStream(destinationPath));
+  await pipeline(input, progressTransform, fs.createWriteStream(destinationPath));
   return {
     sourcePath,
     totalBytes: stat.size,
@@ -9308,7 +9408,274 @@ function emitInstallProgress(payload) {
   }
 }
 
-async function installGame(gameId) {
+function getInstallQueueIndex(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    return -1;
+  }
+  return installQueue.findIndex((entry) => String(entry || "").trim() === normalizedGameId);
+}
+
+function removeInstallFromQueue(gameId) {
+  const index = getInstallQueueIndex(gameId);
+  if (index < 0) {
+    return false;
+  }
+  installQueue.splice(index, 1);
+  return true;
+}
+
+function resolveInstallQueuePauseWaiters() {
+  while (installQueuePauseWaiters.length > 0) {
+    const resolve = installQueuePauseWaiters.shift();
+    try {
+      resolve?.();
+    } catch (_error) {
+      // Ignore waiter resolution errors.
+    }
+  }
+}
+
+function setInstallQueuePausedState(nextValue) {
+  const nextPaused = Boolean(nextValue);
+  if (installQueuePaused === nextPaused) {
+    return;
+  }
+  installQueuePaused = nextPaused;
+  if (!installQueuePaused) {
+    resolveInstallQueuePauseWaiters();
+  }
+}
+
+function waitForInstallQueueResume() {
+  if (!installQueuePaused) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    installQueuePauseWaiters.push(resolve);
+  });
+}
+
+function createQueuedInstallRequest(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  let resolvePromise;
+  let rejectPromise;
+  const promise = new Promise((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+
+  return {
+    gameId: normalizedGameId,
+    state: "queued",
+    sequence: ++installRequestSequence,
+    enqueuedAt: Date.now(),
+    promise,
+    resolve: resolvePromise,
+    reject: rejectPromise
+  };
+}
+
+function emitQueuedInstallProgress(gameId, request, options = {}) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    return;
+  }
+
+  const requestState = String(request?.state || "queued").toLowerCase();
+  const queueIndex = getInstallQueueIndex(normalizedGameId);
+  const queuePosition = queueIndex >= 0 ? queueIndex + 1 : 0;
+  const paused = requestState === "paused";
+  const cachedProgress = activeInstallProgressByGameId.get(normalizedGameId) || {};
+  const percentRaw = Number(cachedProgress.percent);
+  const percent = Number.isFinite(percentRaw) ? Math.max(0, Math.min(100, percentRaw)) : 0;
+  const message = normalizeOptionalString(options.message);
+
+  emitInstallProgress({
+    gameId: normalizedGameId,
+    phase: paused ? "paused" : "queued",
+    percent,
+    downloadedBytes: parseSizeBytes(cachedProgress.downloadedBytes) > 0 ? Number(cachedProgress.downloadedBytes) : 0,
+    totalBytes: parseSizeBytes(cachedProgress.totalBytes) > 0 ? Number(cachedProgress.totalBytes) : 0,
+    queuePosition,
+    message:
+      message ||
+      (paused
+        ? queuePosition > 0
+          ? `Download pausado (${queuePosition} na fila).`
+          : "Download pausado."
+        : queuePosition > 0
+          ? `Na fila de instalacao (${queuePosition} na fila).`
+          : "Na fila de instalacao.")
+  });
+}
+
+function refreshQueuedInstallProgress() {
+  for (const [gameId, request] of queuedInstallRequestsByGameId.entries()) {
+    const requestState = String(request?.state || "").toLowerCase();
+    if (requestState === "queued" || requestState === "paused") {
+      emitQueuedInstallProgress(gameId, request);
+    }
+  }
+}
+
+function createInstallRunControl(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  let paused = false;
+  let lastActivePhase = "preparing";
+  let lastActiveProgress = null;
+  const pauseWaiters = [];
+
+  const waitIfPaused = async () => {
+    while (paused) {
+      await new Promise((resolve) => {
+        pauseWaiters.push(resolve);
+      });
+    }
+  };
+
+  const captureProgress = (payload) => {
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+    const phase = String(payload.phase || "").trim().toLowerCase();
+    if (!phase || ["queued", "paused", "failed", "completed"].includes(phase)) {
+      return;
+    }
+    lastActivePhase = phase;
+    lastActiveProgress = {
+      ...payload,
+      gameId: normalizedGameId,
+      phase
+    };
+  };
+
+  const pause = (message = "Download pausado.") => {
+    if (paused) {
+      return false;
+    }
+    paused = true;
+    const baseProgress = lastActiveProgress || {};
+    const percentRaw = Number(baseProgress.percent);
+    const percent = Number.isFinite(percentRaw) ? Math.max(0, Math.min(100, percentRaw)) : 0;
+
+    emitInstallProgress({
+      gameId: normalizedGameId,
+      phase: "paused",
+      percent,
+      downloadedBytes: parseSizeBytes(baseProgress.downloadedBytes) > 0 ? Number(baseProgress.downloadedBytes) : 0,
+      totalBytes: parseSizeBytes(baseProgress.totalBytes) > 0 ? Number(baseProgress.totalBytes) : 0,
+      sourceLabel: normalizeOptionalString(baseProgress.sourceLabel),
+      message
+    });
+    return true;
+  };
+
+  const resume = (message = "Retomando download...") => {
+    if (!paused) {
+      return false;
+    }
+    paused = false;
+    while (pauseWaiters.length > 0) {
+      const resolve = pauseWaiters.shift();
+      try {
+        resolve?.();
+      } catch (_error) {
+        // Ignore waiter resolution errors.
+      }
+    }
+
+    const baseProgress = lastActiveProgress
+      ? {
+          ...lastActiveProgress,
+          gameId: normalizedGameId,
+          phase: String(lastActiveProgress.phase || lastActivePhase || "preparing").toLowerCase(),
+          message
+        }
+      : {
+          gameId: normalizedGameId,
+          phase: String(lastActivePhase || "preparing").toLowerCase(),
+          percent: 0,
+          message
+        };
+    emitInstallProgress(baseProgress);
+    return true;
+  };
+
+  return {
+    isPaused: () => paused,
+    waitIfPaused,
+    captureProgress,
+    pause,
+    resume,
+    getActivePhase: () => String(lastActivePhase || "preparing").toLowerCase()
+  };
+}
+
+async function runInstallQueue() {
+  while (true) {
+    await waitForInstallQueueResume();
+
+    const nextGameId = installQueue.shift();
+    if (!nextGameId) {
+      break;
+    }
+    refreshQueuedInstallProgress();
+
+    const request = queuedInstallRequestsByGameId.get(nextGameId);
+    if (!request || request.state !== "queued") {
+      continue;
+    }
+    request.state = "running";
+    if (installQueuePaused) {
+      request.state = "queued";
+      installQueue.unshift(nextGameId);
+      refreshQueuedInstallProgress();
+      continue;
+    }
+
+    try {
+      const result = await installGameNow(nextGameId);
+      request.resolve(result);
+    } catch (error) {
+      request.reject(error);
+    } finally {
+      if (queuedInstallRequestsByGameId.get(nextGameId) === request) {
+        queuedInstallRequestsByGameId.delete(nextGameId);
+      }
+      if (lastPausedInstallGameId === nextGameId) {
+        lastPausedInstallGameId = "";
+      }
+      refreshQueuedInstallProgress();
+    }
+  }
+}
+
+function ensureInstallQueueRunner() {
+  if (installQueueRunnerInFlight) {
+    return installQueueRunnerInFlight;
+  }
+
+  installQueueRunnerInFlight = (async () => {
+    try {
+      await runInstallQueue();
+    } finally {
+      installQueueRunnerInFlight = null;
+      if (installQueue.length > 0 && !installQueuePaused) {
+        void ensureInstallQueueRunner();
+      }
+    }
+  })();
+  return installQueueRunnerInFlight;
+}
+
+async function installGameNow(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    throw new Error("ID do jogo invalido para instalacao.");
+  }
+  gameId = normalizedGameId;
+
   if (isStartupUpdatePending()) {
     throw new Error(
       "Atualizacao do launcher em andamento. Aguarde concluir e o launcher reiniciar antes de instalar jogos."
@@ -9318,6 +9685,13 @@ async function installGame(gameId) {
   if (activeInstalls.has(gameId)) {
     throw new Error("Este jogo ja esta sendo instalado.");
   }
+
+  const runControl = createInstallRunControl(gameId);
+  installRunControlsByGameId.set(gameId, runControl);
+  const emitInstallTaskProgress = (payload) => {
+    runControl.captureProgress(payload);
+    emitInstallProgress(payload);
+  };
 
   const task = (async () => {
     const { games, settings } = await readCatalogBundle();
@@ -9353,8 +9727,9 @@ async function installGame(gameId) {
       await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
       await fsp.rm(installDir, { recursive: true, force: true }).catch(() => {});
       await fsp.mkdir(installDir, { recursive: true });
+      await runControl.waitIfPaused();
 
-      emitInstallProgress({
+      emitInstallTaskProgress({
         gameId,
         phase: "preparing",
         percent: 0,
@@ -9364,8 +9739,9 @@ async function installGame(gameId) {
       const usingLocalArchive = Boolean(localArchivePath);
       let transferResult = null;
 
+      await runControl.waitIfPaused();
       await updateActiveInstallSessionPhase(gameId, "downloading").catch(() => {});
-      emitInstallProgress({
+      emitInstallTaskProgress({
         gameId,
         phase: "downloading",
         percent: 0,
@@ -9376,10 +9752,11 @@ async function installGame(gameId) {
         transferResult = await copyLocalArchiveToPath({
           sourcePath: localArchivePath,
           destinationPath: tempArchivePath,
+          runControl,
           onProgress: (copiedBytes, totalBytes, meta = {}) => {
             const percent = totalBytes > 0 ? Math.min(100, Math.round((copiedBytes / totalBytes) * 100)) : 0;
             const speedText = formatTransferSpeedShort(meta.speedBps);
-            emitInstallProgress({
+            emitInstallTaskProgress({
               gameId,
               phase: "downloading",
               percent,
@@ -9397,11 +9774,12 @@ async function installGame(gameId) {
         transferResult = await downloadFile({
           game,
           destinationPath: tempArchivePath,
+          runControl,
           onProgress: (downloadedBytes, totalBytes, meta = {}) => {
             const percent = totalBytes > 0 ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)) : 0;
             const downloadedMb = (downloadedBytes / 1024 / 1024).toFixed(1);
             const speedText = formatTransferSpeedShort(meta.speedBps);
-            emitInstallProgress({
+            emitInstallTaskProgress({
               gameId,
               phase: "downloading",
               percent,
@@ -9417,13 +9795,14 @@ async function installGame(gameId) {
         });
       }
 
+      await runControl.waitIfPaused();
       if (
         transferResult &&
         parseSizeBytes(transferResult.totalBytes) <= 0 &&
         parseSizeBytes(transferResult.downloadedBytes || transferResult.copiedBytes) > 0
       ) {
         const finalBytes = parseSizeBytes(transferResult.downloadedBytes || transferResult.copiedBytes);
-        emitInstallProgress({
+        emitInstallTaskProgress({
           gameId,
           phase: "downloading",
           percent: 100,
@@ -9433,8 +9812,9 @@ async function installGame(gameId) {
         });
       }
 
+      await runControl.waitIfPaused();
       await updateActiveInstallSessionPhase(gameId, "preparing").catch(() => {});
-      emitInstallProgress({
+      emitInstallTaskProgress({
         gameId,
         phase: "preparing",
         percent: 86,
@@ -9443,7 +9823,7 @@ async function installGame(gameId) {
       await verifyDownloadedChecksum(tempArchivePath, game.checksumSha256);
       await inspectDownloadedArchiveFile(tempArchivePath, game.archiveType || "zip");
 
-      emitInstallProgress({
+      emitInstallTaskProgress({
         gameId,
         phase: "preparing",
         percent: 92,
@@ -9451,14 +9831,14 @@ async function installGame(gameId) {
       });
       const securityCheck = await scanArchiveWithWindowsDefender(tempArchivePath);
       if (securityCheck.scanned) {
-        emitInstallProgress({
+        emitInstallTaskProgress({
           gameId,
           phase: "preparing",
           percent: 94,
           message: "Verificacao de seguranca concluida. Preparando extracao..."
         });
       } else if (securityCheck.skipped) {
-        emitInstallProgress({
+        emitInstallTaskProgress({
           gameId,
           phase: "preparing",
           percent: 94,
@@ -9472,10 +9852,11 @@ async function installGame(gameId) {
         await fsp.mkdir(path.dirname(executableTarget), { recursive: true });
         await fsp.copyFile(tempArchivePath, executableTarget);
       } else {
+        await runControl.waitIfPaused();
         await updateActiveInstallSessionPhase(gameId, "extracting").catch(() => {});
         await testArchiveIntegrity(tempArchivePath, game);
         let extractionPercent = 96;
-        emitInstallProgress({
+        emitInstallTaskProgress({
           gameId,
           phase: "extracting",
           percent: extractionPercent,
@@ -9484,7 +9865,7 @@ async function installGame(gameId) {
 
         const extractionPulseTimer = setInterval(() => {
           extractionPercent = Math.min(99, extractionPercent + 0.5);
-          emitInstallProgress({
+          emitInstallTaskProgress({
             gameId,
             phase: "extracting",
             percent: extractionPercent,
@@ -9543,7 +9924,7 @@ async function installGame(gameId) {
       }).catch(() => {});
 
       await clearActiveInstallSession(gameId).catch(() => {});
-      emitInstallProgress({
+      emitInstallTaskProgress({
         gameId,
         phase: "completed",
         percent: 100,
@@ -9563,7 +9944,7 @@ async function installGame(gameId) {
       }
       await clearActiveInstallSession(gameId).catch(() => {});
       const normalizedErrorMessage = normalizeInstallFailureMessage(error);
-      emitInstallProgress({
+      emitInstallTaskProgress({
         gameId,
         phase: "failed",
         percent: 0,
@@ -9580,9 +9961,186 @@ async function installGame(gameId) {
     return await task;
   } finally {
     activeInstalls.delete(gameId);
+    installRunControlsByGameId.delete(gameId);
     activeInstallProgressByGameId.delete(String(gameId || "").trim());
     await clearActiveInstallSession(gameId).catch(() => {});
   }
+}
+
+async function pauseInstall(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    throw new Error("ID do jogo invalido para pausar download.");
+  }
+
+  const runControl = installRunControlsByGameId.get(normalizedGameId);
+  if (runControl) {
+    const currentProgress = activeInstallProgressByGameId.get(normalizedGameId);
+    const phase = String(currentProgress?.phase || "").toLowerCase();
+    if (phase && !["downloading", "preparing", "paused"].includes(phase)) {
+      throw new Error("Pausa disponivel apenas enquanto o download esta em andamento.");
+    }
+    if (runControl.pause("Download pausado.")) {
+      lastPausedInstallGameId = normalizedGameId;
+      await updateActiveInstallSessionPhase(normalizedGameId, "paused").catch(() => {});
+      return { ok: true, state: "paused-active" };
+    }
+    return { ok: true, state: "already-paused" };
+  }
+
+  const request = queuedInstallRequestsByGameId.get(normalizedGameId);
+  if (request && request.state === "queued") {
+    request.state = "paused";
+    removeInstallFromQueue(normalizedGameId);
+    emitQueuedInstallProgress(normalizedGameId, request, { message: "Download pausado na fila." });
+    refreshQueuedInstallProgress();
+    return { ok: true, state: "paused-queued" };
+  }
+  if (request && request.state === "paused") {
+    return { ok: true, state: "already-paused" };
+  }
+
+  throw new Error("Nao existe download ativo ou em fila para este jogo.");
+}
+
+async function resumeInstall(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    throw new Error("ID do jogo invalido para retomar download.");
+  }
+
+  const runControl = installRunControlsByGameId.get(normalizedGameId);
+  if (runControl) {
+    setInstallQueuePausedState(false);
+    if (runControl.resume("Retomando download...")) {
+      await updateActiveInstallSessionPhase(normalizedGameId, runControl.getActivePhase()).catch(() => {});
+      ensureInstallQueueRunner();
+      return { ok: true, state: "resumed-active" };
+    }
+    return { ok: true, state: "already-running" };
+  }
+
+  const request = queuedInstallRequestsByGameId.get(normalizedGameId);
+  if (request && request.state === "paused") {
+    request.state = "queued";
+    if (getInstallQueueIndex(normalizedGameId) < 0) {
+      installQueue.push(normalizedGameId);
+    }
+    emitQueuedInstallProgress(normalizedGameId, request, { message: "Retomando na fila..." });
+    refreshQueuedInstallProgress();
+    setInstallQueuePausedState(false);
+    ensureInstallQueueRunner();
+    return { ok: true, state: "resumed-queued" };
+  }
+  if (request && request.state === "queued") {
+    return { ok: true, state: "already-queued" };
+  }
+
+  throw new Error("Nao existe download pausado para este jogo.");
+}
+
+async function pauseAllInstalls() {
+  setInstallQueuePausedState(true);
+  let pausedActive = 0;
+  let pausedQueued = 0;
+
+  for (const [gameId, runControl] of installRunControlsByGameId.entries()) {
+    if (runControl.pause("Download pausado.")) {
+      pausedActive += 1;
+      lastPausedInstallGameId = gameId;
+      await updateActiveInstallSessionPhase(gameId, "paused").catch(() => {});
+    }
+  }
+
+  for (const [gameId, request] of queuedInstallRequestsByGameId.entries()) {
+    if (request.state !== "queued") {
+      continue;
+    }
+    request.state = "paused";
+    removeInstallFromQueue(gameId);
+    emitQueuedInstallProgress(gameId, request, { message: "Download pausado na fila." });
+    pausedQueued += 1;
+  }
+
+  refreshQueuedInstallProgress();
+  return { ok: true, pausedActive, pausedQueued };
+}
+
+async function resumeAllInstalls() {
+  setInstallQueuePausedState(false);
+  let resumedActive = 0;
+  let resumedQueued = 0;
+
+  let resumedActiveGameId = "";
+  const preferredControl = lastPausedInstallGameId ? installRunControlsByGameId.get(lastPausedInstallGameId) : null;
+  if (preferredControl && preferredControl.resume("Retomando download...")) {
+    resumedActive += 1;
+    resumedActiveGameId = lastPausedInstallGameId;
+    await updateActiveInstallSessionPhase(lastPausedInstallGameId, preferredControl.getActivePhase()).catch(() => {});
+  } else {
+    for (const [gameId, runControl] of installRunControlsByGameId.entries()) {
+      if (!runControl.resume("Retomando download...")) {
+        continue;
+      }
+      resumedActive += 1;
+      resumedActiveGameId = gameId;
+      await updateActiveInstallSessionPhase(gameId, runControl.getActivePhase()).catch(() => {});
+      break;
+    }
+  }
+
+  const queuedPausedRequests = [...queuedInstallRequestsByGameId.values()]
+    .filter((request) => request && request.state === "paused")
+    .sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
+  for (const request of queuedPausedRequests) {
+    request.state = "queued";
+    if (getInstallQueueIndex(request.gameId) < 0) {
+      installQueue.push(request.gameId);
+    }
+    resumedQueued += 1;
+  }
+
+  refreshQueuedInstallProgress();
+  ensureInstallQueueRunner();
+  if (resumedActiveGameId) {
+    lastPausedInstallGameId = resumedActiveGameId;
+  }
+  return { ok: true, resumedActive, resumedQueued };
+}
+
+async function installGame(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    throw new Error("ID do jogo invalido para instalacao.");
+  }
+  if (isStartupUpdatePending()) {
+    throw new Error(
+      "Atualizacao do launcher em andamento. Aguarde concluir e o launcher reiniciar antes de instalar jogos."
+    );
+  }
+
+  const activeTask = activeInstalls.get(normalizedGameId);
+  if (activeTask) {
+    return activeTask;
+  }
+
+  const existingRequest = queuedInstallRequestsByGameId.get(normalizedGameId);
+  if (existingRequest) {
+    if (existingRequest.state === "paused") {
+      await resumeInstall(normalizedGameId);
+    } else if (existingRequest.state === "queued") {
+      emitQueuedInstallProgress(normalizedGameId, existingRequest);
+    }
+    return existingRequest.promise;
+  }
+
+  const request = createQueuedInstallRequest(normalizedGameId);
+  queuedInstallRequestsByGameId.set(normalizedGameId, request);
+  installQueue.push(normalizedGameId);
+  emitQueuedInstallProgress(normalizedGameId, request);
+  refreshQueuedInstallProgress();
+  ensureInstallQueueRunner();
+  return request.promise;
 }
 
 function normalizeExecutableImageName(value) {
@@ -10316,10 +10874,17 @@ async function getGamesWithStatus(rawOptions = {}) {
         }
       }
 
-      const resolvedSize = resolvedSizeBytes > 0 ? formatBytesShort(resolvedSizeBytes) : game.size;
+      const fallbackSizeLabel = String(game.size || "").trim();
+      const keepManualSize = game.sizeIsManual === true && fallbackSizeLabel.length > 0;
+      const resolvedSize = keepManualSize
+        ? fallbackSizeLabel
+        : resolvedSizeBytes > 0
+          ? formatBytesShort(resolvedSizeBytes)
+          : fallbackSizeLabel;
       return {
         ...game,
         size: resolvedSize,
+        sizeIsManual: keepManualSize,
         sizeBytes: resolvedSizeBytes,
         installedSizeBytes: installed ? resolvedSizeBytes : 0,
         installed,
@@ -10721,6 +11286,10 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:get-launch-on-startup", () => getLaunchOnSystemStartupState());
     ipcMain.handle("launcher:set-launch-on-startup", (_event, enabled) => setLaunchOnSystemStartup(enabled));
     ipcMain.handle("launcher:install-game", (_event, gameId) => installGame(gameId));
+    ipcMain.handle("launcher:pause-install", (_event, gameId) => pauseInstall(gameId));
+    ipcMain.handle("launcher:resume-install", (_event, gameId) => resumeInstall(gameId));
+    ipcMain.handle("launcher:pause-all-installs", () => pauseAllInstalls());
+    ipcMain.handle("launcher:resume-all-installs", () => resumeAllInstalls());
     ipcMain.handle("launcher:uninstall-game", (_event, gameId) => uninstallGame(gameId));
     ipcMain.handle("launcher:play-game", (_event, gameId) => playGame(gameId));
     ipcMain.handle("launcher:close-game", (_event, gameId) => closeGame(gameId));

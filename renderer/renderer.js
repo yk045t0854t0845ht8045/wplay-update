@@ -123,7 +123,7 @@ const HEADER_SCROLL_DEACTIVATE_OFFSET_PX = 2;
 const STAGE_SCROLLABLE_EPSILON_PX = 1;
 const CENTERED_LAYOUT_ENTER_WIDTH_PX = 1500;
 const CENTERED_LAYOUT_EXIT_WIDTH_PX = 1440;
-const ACTIVE_INSTALL_PHASES = new Set(["preparing", "downloading", "extracting"]);
+const ACTIVE_INSTALL_PHASES = new Set(["queued", "paused", "preparing", "downloading", "extracting"]);
 const SIDEBAR_LOGO_FALLBACK_PATH = "./assets/logo-default.svg";
 const notificationTimeFormatter = new Intl.DateTimeFormat("pt-BR", {
   hour: "2-digit",
@@ -259,6 +259,7 @@ let lastProgressRenderAt = 0;
 let previousStoreGridRenderSignature = "";
 let previousStoreGridAnimationSignature = "";
 let previousLibraryGridSignature = "";
+let previousDownloadsRenderSignature = "";
 let autoUpdateBackgroundCheckTimer = null;
 let notificationRemoteQueue = Promise.resolve();
 let friendActivityPollTimer = null;
@@ -272,6 +273,9 @@ let catalogChangedRefreshTimer = null;
 let headerScrolledState = false;
 let centeredLayoutState = false;
 let uiTransitionReleaseTimer = null;
+let stageSurfaceResizeObserver = null;
+let stageSurfaceObservedWidth = 0;
+let stageSurfaceObservedHeight = 0;
 
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
@@ -2061,17 +2065,21 @@ function shortPath(pathValue) {
 }
 
 function formatGameSizeStat(game) {
+  const manualSize = String(game?.size || "").trim();
+  if (game?.sizeIsManual === true && manualSize) {
+    return manualSize;
+  }
+
   const sizeBytes = Number(game?.sizeBytes);
   if (Number.isFinite(sizeBytes) && sizeBytes > 0) {
     const sizeGb = sizeBytes / (1024 ** 3);
     return `${sizeGb.toFixed(sizeGb >= 10 ? 1 : 2).replace(/\.?0+$/, "")} GB`;
   }
 
-  const fallbackText = String(game?.size || "").trim();
-  if (!fallbackText || fallbackText.toLowerCase() === "tamanho nao informado") {
+  if (!manualSize) {
     return "--";
   }
-  return fallbackText;
+  return manualSize;
 }
 
 function formatReleaseDateStat(game) {
@@ -2243,6 +2251,8 @@ function getActionState(game) {
 
   if (busy) {
     let label = "Processing...";
+    if (progress?.phase === "queued") label = "Na fila";
+    if (progress?.phase === "paused") label = "Pausado";
     if (progress?.phase === "downloading") {
       const hasKnownPercent = Number.isFinite(progress.percent) && Number.isFinite(progress.totalBytes) && progress.totalBytes > 0;
       if (hasKnownPercent) {
@@ -3195,6 +3205,31 @@ function syncHeaderStateStable() {
   });
 }
 
+function ensureStageSurfaceResizeSync() {
+  if (!(stageSurface instanceof HTMLElement)) return;
+  if (typeof ResizeObserver !== "function") return;
+  if (stageSurfaceResizeObserver) return;
+
+  stageSurfaceResizeObserver = new ResizeObserver((entries) => {
+    const nextEntry = entries && entries.length > 0 ? entries[entries.length - 1] : null;
+    const nextWidth = Math.round(
+      Number(nextEntry?.contentRect?.width || stageSurface.clientWidth || 0)
+    );
+    const nextHeight = Math.round(
+      Number(nextEntry?.contentRect?.height || stageSurface.clientHeight || 0)
+    );
+    if (nextWidth === stageSurfaceObservedWidth && nextHeight === stageSurfaceObservedHeight) {
+      return;
+    }
+
+    stageSurfaceObservedWidth = nextWidth;
+    stageSurfaceObservedHeight = nextHeight;
+    syncHeaderStateStable();
+  });
+
+  stageSurfaceResizeObserver.observe(stageSurface);
+}
+
 function holdUiTransitionsForBoot() {
   document.body.classList.add("ui-transitions-hold");
 }
@@ -3489,6 +3524,8 @@ function getStorePriceMarkup(game) {
 
 function getDownloadPhaseLabel(progress) {
   if (!progress) return "Processando";
+  if (progress.phase === "queued") return "Na fila";
+  if (progress.phase === "paused") return "Pausado";
   if (progress.phase === "preparing") return "Preparando";
   if (progress.phase === "downloading") return "Baixando";
   if (progress.phase === "extracting") return "Extraindo";
@@ -3496,10 +3533,20 @@ function getDownloadPhaseLabel(progress) {
   return "Processando";
 }
 
+function getDownloadPhaseOrder(progress) {
+  const phase = String(progress?.phase || "").toLowerCase();
+  if (phase === "downloading") return 1;
+  if (phase === "preparing") return 2;
+  if (phase === "extracting") return 3;
+  if (phase === "paused") return 4;
+  if (phase === "queued") return 5;
+  return 9;
+}
+
 function getActiveDownloadEntries() {
   const entries = [];
   for (const [gameId, progress] of state.installProgressByGameId.entries()) {
-    if (!progress || !["preparing", "downloading", "extracting"].includes(progress.phase)) {
+    if (!progress || !ACTIVE_INSTALL_PHASES.has(String(progress.phase || "").toLowerCase())) {
       continue;
     }
 
@@ -3511,7 +3558,18 @@ function getActiveDownloadEntries() {
     });
   }
 
-  entries.sort((a, b) => String(a.name).localeCompare(String(b.name), "pt-BR", { sensitivity: "base" }));
+  entries.sort((a, b) => {
+    const orderDiff = getDownloadPhaseOrder(a.progress) - getDownloadPhaseOrder(b.progress);
+    if (orderDiff !== 0) {
+      return orderDiff;
+    }
+    const queuePosA = Number(a.progress?.queuePosition || 0);
+    const queuePosB = Number(b.progress?.queuePosition || 0);
+    if (queuePosA > 0 && queuePosB > 0 && queuePosA !== queuePosB) {
+      return queuePosA - queuePosB;
+    }
+    return String(a.name).localeCompare(String(b.name), "pt-BR", { sensitivity: "base" });
+  });
   return entries;
 }
 
@@ -3681,6 +3739,90 @@ function renderRailDownloads() {
   railDownloadsCount.textContent = String(Math.min(activeDownloads.length, 99));
 }
 
+function getDownloadsRenderSignature(activeDownloads, completedDownloads) {
+  const activeEntries = Array.isArray(activeDownloads) ? activeDownloads : [];
+  const completedEntries = Array.isArray(completedDownloads) ? completedDownloads : [];
+  const activeKey = activeEntries
+    .map(({ gameId, progress }) =>
+      [gameId, String(progress?.phase || ""), Number(progress?.queuePosition || 0), Number(progress?.totalBytes || 0) > 0 ? 1 : 0].join("~")
+    )
+    .join("|");
+  const completedKey = completedEntries
+    .map(({ gameId, action }) => [gameId, action].join("~"))
+    .join("|");
+  return `${state.downloadsSectionCollapsed ? 1 : 0}|${activeKey}|${completedKey}`;
+}
+
+function patchDownloadsRuntimeProgress(activeDownloads) {
+  if (!downloadsActiveList) return;
+  const entries = Array.isArray(activeDownloads) ? activeDownloads : [];
+  const itemByGameId = new Map();
+  downloadsActiveList.querySelectorAll(".downloads-item[data-open-game]:not(.is-completed)").forEach((node) => {
+    const gameId = String(node.getAttribute("data-open-game") || "").trim();
+    if (gameId) {
+      itemByGameId.set(gameId, node);
+    }
+  });
+
+  for (const { gameId, progress } of entries) {
+    const item = itemByGameId.get(String(gameId || "").trim());
+    if (!item) {
+      continue;
+    }
+
+    const hasKnownTotalBytes = Number.isFinite(progress?.totalBytes) && progress.totalBytes > 0;
+    const hasKnownPercent = Number.isFinite(progress?.percent);
+    const percent = hasKnownPercent
+      ? Math.max(0, Math.min(100, progress.percent))
+      : progress?.phase === "extracting"
+        ? 96
+        : progress?.phase === "preparing"
+          ? 72
+          : 0;
+    const isIndeterminate =
+      progress?.phase === "queued" ||
+      progress?.phase === "preparing" ||
+      progress?.phase === "extracting" ||
+      (progress?.phase === "downloading" && !hasKnownTotalBytes);
+    const phaseText = getDownloadPhaseLabel(progress);
+    const sourceLabel = String(progress?.sourceLabel || "").trim();
+    const queuePosition = Number(progress?.queuePosition || 0);
+    const speedText =
+      progress?.phase === "downloading"
+        ? formatBytesPerSecond(getDownloadSpeedForGame(gameId))
+        : progress?.phase === "paused"
+          ? "Pausado"
+          : "--";
+    const phaseLabel =
+      progress?.phase === "queued" && queuePosition > 0
+        ? `${phaseText} • #${queuePosition}`
+        : sourceLabel && progress?.phase === "downloading"
+          ? `${phaseText} • ${sourceLabel}`
+          : phaseText;
+
+    const speedNode = item.querySelector(".downloads-item-speed");
+    if (speedNode) {
+      speedNode.textContent = speedText;
+    }
+    const percentNode = item.querySelector(".downloads-item-percent");
+    if (percentNode) {
+      percentNode.textContent = `${Math.round(percent)}%`;
+    }
+    const phaseNode = item.querySelector(".downloads-item-phase");
+    if (phaseNode) {
+      phaseNode.textContent = phaseLabel;
+    }
+    const progressTrack = item.querySelector(".downloads-item-progress");
+    if (progressTrack) {
+      progressTrack.classList.toggle("is-indeterminate", isIndeterminate);
+    }
+    const progressFill = item.querySelector(".downloads-item-progress-fill");
+    if (progressFill) {
+      progressFill.style.width = `${percent}%`;
+    }
+  }
+}
+
 function renderDownloadsView() {
   if (!downloadsView || !downloadsActiveSection || !downloadsActiveList || !downloadsEmptyState) return;
 
@@ -3705,9 +3847,17 @@ function renderDownloadsView() {
 
   if (!hasEntries) {
     state.downloadsSectionCollapsed = false;
+    previousDownloadsRenderSignature = "";
     downloadsActiveList.innerHTML = "";
     return;
   }
+
+  const currentDownloadsRenderSignature = getDownloadsRenderSignature(activeDownloads, recentCompletedDownloads);
+  if (currentDownloadsRenderSignature === previousDownloadsRenderSignature) {
+    patchDownloadsRuntimeProgress(activeDownloads);
+    return;
+  }
+  previousDownloadsRenderSignature = currentDownloadsRenderSignature;
 
   const activeMarkup = activeDownloads
     .map(({ gameId, name, progress }) => {
@@ -3723,14 +3873,55 @@ function renderDownloadsView() {
             : 0;
       const percentText = `${Math.round(percent)}%`;
       const isIndeterminate =
+        progress?.phase === "queued" ||
         progress?.phase === "preparing" ||
         progress?.phase === "extracting" ||
         (progress?.phase === "downloading" && !hasKnownTotalBytes);
       const indeterminateClass = isIndeterminate ? "is-indeterminate" : "";
       const phaseText = getDownloadPhaseLabel(progress);
       const sourceLabel = String(progress?.sourceLabel || "").trim();
-      const speedText = progress?.phase === "downloading" ? formatBytesPerSecond(getDownloadSpeedForGame(gameId)) : "--";
-      const phaseLabel = sourceLabel ? `${phaseText} • ${sourceLabel}` : phaseText;
+      const queuePosition = Number(progress?.queuePosition || 0);
+      const speedText =
+        progress?.phase === "downloading"
+          ? formatBytesPerSecond(getDownloadSpeedForGame(gameId))
+          : progress?.phase === "paused"
+            ? "Pausado"
+            : "--";
+      const phaseLabel =
+        progress?.phase === "queued" && queuePosition > 0
+          ? `${phaseText} • #${queuePosition}`
+          : sourceLabel && progress?.phase === "downloading"
+            ? `${phaseText} • ${sourceLabel}`
+            : phaseText;
+      const canPause = ["queued", "preparing", "downloading"].includes(String(progress?.phase || "").toLowerCase());
+      const canResume = String(progress?.phase || "").toLowerCase() === "paused";
+      const actionMarkup = canPause
+        ? `
+            <div class="downloads-item-actions">
+              <button
+                type="button"
+                class="downloads-item-action-btn"
+                data-download-action="pause-download"
+                data-game-id="${escapeHtml(gameId)}"
+              >
+                PAUSAR
+              </button>
+            </div>
+          `
+        : canResume
+          ? `
+              <div class="downloads-item-actions">
+                <button
+                  type="button"
+                  class="downloads-item-action-btn"
+                  data-download-action="resume-download"
+                  data-game-id="${escapeHtml(gameId)}"
+                >
+                  RETOMAR
+                </button>
+              </div>
+            `
+          : "";
 
       return `
         <article class="downloads-item" data-open-game="${escapeHtml(gameId)}" aria-label="Download de ${escapeHtml(name)}">
@@ -3752,6 +3943,7 @@ function renderDownloadsView() {
             <div class="downloads-item-progress ${indeterminateClass}" aria-hidden="true">
               <div class="downloads-item-progress-fill" style="width: ${percent}%"></div>
             </div>
+            ${actionMarkup}
           </div>
         </article>
       `;
@@ -3823,9 +4015,6 @@ function getStoreGridRenderSignature(storeGames, options = {}) {
   const cardsKey = games
     .map((game) => {
       const progress = getInstallProgress(game.id);
-      const percentValue = Number(progress?.percent);
-      const percentRounded = Number.isFinite(percentValue) ? Math.round(percentValue) : -1;
-      const totalBytesKnown = Number.isFinite(progress?.totalBytes) && progress.totalBytes > 0 ? "1" : "0";
       const currentPriceLabel = normalizePriceLabel(game.currentPrice || game.salePrice || game.price);
       const originalPriceLabel = normalizePriceLabel(game.originalPrice || game.listPrice || game.basePrice);
 
@@ -3835,8 +4024,7 @@ function getStoreGridRenderSignature(storeGames, options = {}) {
         getCoverDotStateClass(game),
         String(isGameBusy(game.id) ? 1 : 0),
         String(progress?.phase || ""),
-        String(percentRounded),
-        totalBytesKnown,
+        String(progress?.queuePosition || 0),
         String(game.comingSoon === true ? 1 : 0),
         String(game.isFree === true || game.free === true ? 1 : 0),
         getStoreCardKind(game),
@@ -3850,6 +4038,58 @@ function getStoreGridRenderSignature(storeGames, options = {}) {
   return `${filterKey}|${searchKey}|${modeKey}|${genreKey}|${advancedOpenKey}|${advancedActiveKey}|${cardsKey}`;
 }
 
+function patchStoreGridRuntimeProgress() {
+  if (!storeGrid) return;
+  const cards = storeGrid.querySelectorAll(".store-card[data-open-game]");
+  cards.forEach((card) => {
+    const gameId = String(card.getAttribute("data-open-game") || "").trim();
+    if (!gameId) return;
+
+    const progress = getInstallProgress(gameId);
+    if (!progress || !ACTIVE_INSTALL_PHASES.has(String(progress.phase || "").toLowerCase())) {
+      return;
+    }
+
+    const hasKnownTotalBytes = Number.isFinite(progress.totalBytes) && progress.totalBytes > 0;
+    const progressPercent = Number.isFinite(progress.percent)
+      ? Math.max(0, Math.min(100, progress.percent))
+      : progress.phase === "extracting"
+        ? 96
+        : progress.phase === "preparing"
+          ? 72
+          : progress.phase === "queued"
+            ? 0
+            : 34;
+    const indeterminate =
+      progress.phase === "queued" ||
+      progress.phase === "preparing" ||
+      progress.phase === "extracting" ||
+      (progress.phase === "downloading" && !hasKnownTotalBytes);
+    const queuePosition = Number(progress.queuePosition || 0);
+    const phaseLabel =
+      progress.phase === "queued" && queuePosition > 0
+        ? `${getDownloadPhaseLabel(progress)} #${queuePosition}`
+        : getDownloadPhaseLabel(progress);
+    const canShowPercent =
+      Number.isFinite(progress.percent) &&
+      ((progress.phase === "downloading" && hasKnownTotalBytes) || progress.phase === "paused");
+
+    const progressTrack = card.querySelector(".store-card-progress-track");
+    const progressFill = card.querySelector(".store-card-progress-fill");
+    if (progressTrack) {
+      progressTrack.classList.toggle("is-indeterminate", indeterminate);
+    }
+    if (progressFill) {
+      progressFill.style.width = `${progressPercent}%`;
+    }
+
+    const statusText = card.querySelector(".store-card-download-state");
+    if (statusText) {
+      statusText.textContent = canShowPercent ? `${phaseLabel} ${Math.round(progress.percent)}%` : `${phaseLabel}...`;
+    }
+  });
+}
+
 function renderStoreGrid() {
   const genreOptions = getStoreGenreFilterOptions();
   if (state.storeGenreFilter !== "all" && !genreOptions.some((entry) => entry.value === state.storeGenreFilter)) {
@@ -3861,6 +4101,7 @@ function renderStoreGrid() {
   const hasAdvancedFilters = hasStoreAdvancedFiltersActive();
   const currentStoreRenderSignature = getStoreGridRenderSignature(games, { hasAdvancedFilters });
   if (currentStoreRenderSignature === previousStoreGridRenderSignature) {
+    patchStoreGridRuntimeProgress();
     return;
   }
   previousStoreGridRenderSignature = currentStoreRenderSignature;
@@ -3940,10 +4181,22 @@ function renderStoreGrid() {
       const cardKind = getStoreCardKind(game);
       const featureTag = getStoreFeatureTag(game);
       const hasKnownTotalBytes = Number.isFinite(progress?.totalBytes) && progress.totalBytes > 0;
-      const progressPercent =
-        Number.isFinite(progress?.percent) && hasKnownTotalBytes ? Math.max(0, Math.min(100, progress.percent)) : 34;
+      const progressPercent = Number.isFinite(progress?.percent)
+        ? Math.max(0, Math.min(100, progress.percent))
+        : progress?.phase === "extracting"
+          ? 96
+          : progress?.phase === "preparing"
+            ? 72
+            : progress?.phase === "queued"
+              ? 0
+              : 34;
       const indeterminateClass =
-        progress?.phase === "downloading" && !hasKnownTotalBytes ? "is-indeterminate" : "";
+        progress?.phase === "queued" ||
+        progress?.phase === "preparing" ||
+        progress?.phase === "extracting" ||
+        (progress?.phase === "downloading" && !hasKnownTotalBytes)
+          ? "is-indeterminate"
+          : "";
       const progressHtml = isGameBusy(game.id)
         ? `
           <span class="store-card-progress-track ${indeterminateClass}" aria-hidden="true">
@@ -3951,13 +4204,19 @@ function renderStoreGrid() {
           </span>
         `
         : "";
+      const queuePosition = Number(progress?.queuePosition || 0);
+      const phaseLabel =
+        progress?.phase === "queued" && queuePosition > 0
+          ? `${getDownloadPhaseLabel(progress)} #${queuePosition}`
+          : getDownloadPhaseLabel(progress);
+      const canShowPercent =
+        Number.isFinite(progress?.percent) &&
+        ((progress?.phase === "downloading" && hasKnownTotalBytes) || progress?.phase === "paused");
       const downloadStatusText = isGameBusy(game.id)
         ? `
           <span class="store-card-download-state">
             ${escapeHtml(
-              hasKnownTotalBytes && Number.isFinite(progress?.percent)
-                ? `${getDownloadPhaseLabel(progress)} ${Math.round(progress.percent)}%`
-                : `${getDownloadPhaseLabel(progress)}...`
+              canShowPercent ? `${phaseLabel} ${Math.round(progress.percent)}%` : `${phaseLabel}...`
             )}
           </span>
         `
@@ -4109,10 +4368,14 @@ function renderStoreGrid() {
 
 function getLibraryCardSubtitle(game) {
   if (isGameUninstalling(game.id)) return "Removendo...";
-  if (isGameBusy(game.id)) return `${getDownloadPhaseLabel(getInstallProgress(game.id))}...`;
+  if (isGameBusy(game.id)) {
+    const progress = getInstallProgress(game.id);
+    const phaseLabel = getDownloadPhaseLabel(progress);
+    return progress?.phase === "paused" ? phaseLabel : `${phaseLabel}...`;
+  }
   if (game.running) return "Em execucao";
   if (game.installed) {
-    return game.size && game.size !== "Tamanho nao informado" ? `Instalado • ${game.size}` : "Instalado";
+    return game.size ? `Instalado • ${game.size}` : "Instalado";
   }
   if (game.comingSoon) return "Em breve";
   return "Na biblioteca";
@@ -4507,12 +4770,15 @@ function renderDetailsProgress(game) {
   const hasKnownPercent = Number.isFinite(progress.percent);
   const percent = hasKnownPercent
     ? Math.max(0, Math.min(100, progress.percent))
+    : progress.phase === "queued"
+      ? 0
     : progress.phase === "extracting"
       ? 96
       : progress.phase === "preparing"
         ? 72
         : 34;
   const indeterminate =
+    progress.phase === "queued" ||
     progress.phase === "preparing" ||
     progress.phase === "extracting" ||
     (progress.phase === "downloading" && !hasKnownTotalBytes);
@@ -4527,7 +4793,7 @@ function getDetailsStatusLabel(game) {
   if (isGameBusy(game.id)) return getDownloadPhaseLabel(getInstallProgress(game.id));
   if (game.running) return "Em execucao";
   if (game.installed) {
-    return game.size && game.size !== "Tamanho nao informado" ? `Instalado • ${game.size}` : "Instalado";
+    return game.size ? `Instalado • ${game.size}` : "Instalado";
   }
   if (game.comingSoon) return "Em breve";
   if (isInLibrary(game.id)) return "Na biblioteca";
@@ -4910,6 +5176,26 @@ async function handleGameAction(gameId, action) {
       return;
     }
 
+    if (action === "pause-download") {
+      if (typeof window.launcherApi.pauseInstall !== "function") {
+        throw new Error("Pausa de download nao esta disponivel nesta versao do launcher.");
+      }
+      await window.launcherApi.pauseInstall(gameId);
+      setStatus(`Download pausado: ${game.name}.`);
+      notify("info", "Download pausado", `${game.name} foi pausado.`);
+      return;
+    }
+
+    if (action === "resume-download") {
+      if (typeof window.launcherApi.resumeInstall !== "function") {
+        throw new Error("Retomada de download nao esta disponivel nesta versao do launcher.");
+      }
+      await window.launcherApi.resumeInstall(gameId);
+      setStatus(`Download retomado: ${game.name}.`);
+      notify("success", "Download retomado", `${game.name} voltou para a fila de instalacao.`);
+      return;
+    }
+
     if (action === "install") {
       const installChoice = await askInstallPathChoice();
       if (installChoice === "cancel") {
@@ -5049,6 +5335,7 @@ function installEventBindings() {
       },
       { passive: true }
     );
+    ensureStageSurfaceResizeSync();
   }
 
   // Prevent image/assets drag out of the launcher (e.g. to browser/desktop).
@@ -5380,14 +5667,36 @@ function installEventBindings() {
   }
 
   if (downloadsPauseAllBtn) {
-    downloadsPauseAllBtn.addEventListener("click", () => {
-      notify("info", "Downloads", "Pausar todos sera disponibilizado em breve.");
+    downloadsPauseAllBtn.addEventListener("click", async () => {
+      try {
+        if (typeof window.launcherApi.pauseAllInstalls !== "function") {
+          throw new Error("Pausar todos nao esta disponivel nesta versao.");
+        }
+        await window.launcherApi.pauseAllInstalls();
+        setStatus("Downloads pausados.");
+        notify("info", "Downloads", "Todos os downloads foram pausados.");
+      } catch (error) {
+        const message = error?.message || "Nao foi possivel pausar os downloads.";
+        setStatus(message, true);
+        notify("error", "Downloads", message);
+      }
     });
   }
 
   if (downloadsResumeAllBtn) {
-    downloadsResumeAllBtn.addEventListener("click", () => {
-      notify("info", "Downloads", "Retomar todos sera disponibilizado em breve.");
+    downloadsResumeAllBtn.addEventListener("click", async () => {
+      try {
+        if (typeof window.launcherApi.resumeAllInstalls !== "function") {
+          throw new Error("Retomar todos nao esta disponivel nesta versao.");
+        }
+        await window.launcherApi.resumeAllInstalls();
+        setStatus("Downloads retomados.");
+        notify("success", "Downloads", "Fila de downloads retomada.");
+      } catch (error) {
+        const message = error?.message || "Nao foi possivel retomar os downloads.";
+        setStatus(message, true);
+        notify("error", "Downloads", message);
+      }
     });
   }
 
