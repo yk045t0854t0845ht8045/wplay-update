@@ -118,6 +118,8 @@ const FRIEND_ACTIVITY_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 10 * 1000 : 6 * 1000;
 const FRIEND_ACTIVITY_CURSOR_BACKTRACK_MS = 18 * 1000;
 const FRIEND_ACTIVITY_MAX_EVENT_AGE_MS = 30 * 60 * 1000;
 const FRIEND_ACTIVITY_SEEN_LIMIT = 320;
+const DRIVE_QUOTA_BLOCK_TTL_MS = 20 * 60 * 1000;
+const DRIVE_QUOTA_ERROR_CODE = "DRIVE_QUOTA";
 const HEADER_SCROLL_ACTIVATE_OFFSET_PX = 10;
 const HEADER_SCROLL_DEACTIVATE_OFFSET_PX = 2;
 const STAGE_SCROLLABLE_EPSILON_PX = 1;
@@ -181,6 +183,7 @@ const state = {
   selectedGalleryByGameId: new Map(),
   installRootPath: "",
   installProgressByGameId: new Map(),
+  driveQuotaBlockedByGameId: new Map(),
   uninstallingGameIds: new Set(),
   libraryGameIds: new Set(),
   openLibraryMenuGameId: "",
@@ -2190,6 +2193,112 @@ function getInstallProgress(gameId) {
   return state.installProgressByGameId.get(gameId);
 }
 
+function parseInstallFailureCode(rawMessage) {
+  const message = String(rawMessage || "").trim();
+  const codeMatch = message.match(/^\[([A-Z0-9_]+)\]/);
+  if (!codeMatch?.[1]) {
+    return "";
+  }
+  return String(codeMatch[1]).trim().toUpperCase();
+}
+
+function isDriveQuotaFailureMessage(rawMessage) {
+  const normalizedCode = parseInstallFailureCode(rawMessage);
+  if (normalizedCode === DRIVE_QUOTA_ERROR_CODE) {
+    return true;
+  }
+
+  const normalizedMessage = String(rawMessage || "").toLowerCase();
+  return (
+    normalizedMessage.includes("limite de downloads") ||
+    normalizedMessage.includes("download quota") ||
+    normalizedMessage.includes("quota exceeded") ||
+    normalizedMessage.includes("limite ultrapassado")
+  );
+}
+
+function pruneDriveQuotaBlockedGames() {
+  if (!(state.driveQuotaBlockedByGameId instanceof Map) || state.driveQuotaBlockedByGameId.size === 0) {
+    return;
+  }
+
+  const now = Date.now();
+  const knownGameIds = new Set(
+    state.games
+      .map((game) => String(game?.id || "").trim())
+      .filter(Boolean)
+  );
+
+  for (const [gameId, meta] of state.driveQuotaBlockedByGameId.entries()) {
+    const normalizedGameId = String(gameId || "").trim();
+    const blockedUntil = Number(meta?.blockedUntil || 0);
+    const expired = !Number.isFinite(blockedUntil) || blockedUntil <= now;
+    const unknownGame = knownGameIds.size > 0 && !knownGameIds.has(normalizedGameId);
+    const installed = Boolean(getGameById(normalizedGameId)?.installed);
+
+    if (!normalizedGameId || expired || unknownGame || installed) {
+      state.driveQuotaBlockedByGameId.delete(gameId);
+    }
+  }
+}
+
+function markGameAsDriveQuotaBlocked(gameId, rawMessage = "") {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    return;
+  }
+
+  const now = Date.now();
+  state.driveQuotaBlockedByGameId.set(normalizedGameId, {
+    blockedAt: now,
+    blockedUntil: now + DRIVE_QUOTA_BLOCK_TTL_MS,
+    message: String(rawMessage || "").trim()
+  });
+}
+
+function clearGameDriveQuotaBlocked(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    return;
+  }
+  state.driveQuotaBlockedByGameId.delete(normalizedGameId);
+}
+
+function getDriveQuotaBlockedMeta(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    return null;
+  }
+
+  const meta = state.driveQuotaBlockedByGameId.get(normalizedGameId);
+  if (!meta) {
+    return null;
+  }
+
+  const blockedUntil = Number(meta.blockedUntil || 0);
+  if (!Number.isFinite(blockedUntil) || blockedUntil <= Date.now()) {
+    state.driveQuotaBlockedByGameId.delete(normalizedGameId);
+    return null;
+  }
+
+  return meta;
+}
+
+function isGameDriveQuotaBlocked(gameId) {
+  return Boolean(getDriveQuotaBlockedMeta(gameId));
+}
+
+function getDriveQuotaBlockedHint(gameId) {
+  const meta = getDriveQuotaBlockedMeta(gameId);
+  if (!meta) {
+    return "Tente novamente mais tarde, que funcionara.";
+  }
+
+  const remainingMs = Math.max(0, Number(meta.blockedUntil || 0) - Date.now());
+  const remainingMinutes = Math.max(1, Math.ceil(remainingMs / (60 * 1000)));
+  return `Tente novamente mais tarde, que funcionara. Aguarde cerca de ${remainingMinutes} min.`;
+}
+
 function isGameUninstalling(gameId) {
   return state.uninstallingGameIds.has(gameId);
 }
@@ -2269,6 +2378,10 @@ function getActionState(game) {
 
   if (game.comingSoon) {
     return { action: "soon", label: "Coming Soon", disabled: true };
+  }
+
+  if (isGameDriveQuotaBlocked(game.id)) {
+    return { action: "drive-limited", label: "ARQUIVO LIMITADO PELO DRIVE", disabled: false };
   }
 
   return { action: "install", label: "Download Game", disabled: false };
@@ -3345,6 +3458,7 @@ function setView(nextView) {
 function getCoverDotStateClass(game) {
   if (isGameBusy(game.id)) return "state-busy";
   if (game.installed) return "state-installed";
+  if (isGameDriveQuotaBlocked(game.id)) return "state-soon";
   if (game.comingSoon) return "state-soon";
   return "";
 }
@@ -4114,6 +4228,7 @@ function getLibraryCardSubtitle(game) {
   if (game.installed) {
     return game.size && game.size !== "Tamanho nao informado" ? `Instalado • ${game.size}` : "Instalado";
   }
+  if (isGameDriveQuotaBlocked(game.id)) return "Arquivo limitado pelo Drive";
   if (game.comingSoon) return "Em breve";
   return "Na biblioteca";
 }
@@ -4123,6 +4238,7 @@ function getLibraryCardActionLabel(game) {
   if (isGameBusy(game.id)) return getDownloadPhaseLabel(getInstallProgress(game.id));
   if (game.running) return "Fechar jogo";
   if (game.installed) return "Jogar";
+  if (isGameDriveQuotaBlocked(game.id)) return "Arquivo limitado";
   return "Abrir jogo";
 }
 
@@ -4529,6 +4645,7 @@ function getDetailsStatusLabel(game) {
   if (game.installed) {
     return game.size && game.size !== "Tamanho nao informado" ? `Instalado • ${game.size}` : "Instalado";
   }
+  if (isGameDriveQuotaBlocked(game.id)) return "Arquivo limitado pelo Drive";
   if (game.comingSoon) return "Em breve";
   if (isInLibrary(game.id)) return "Na biblioteca";
   return "Nao instalado";
@@ -4687,6 +4804,7 @@ async function refreshGames(options = {}) {
     const selectedGameId = state.selectedGameId;
 
     state.games = await window.launcherApi.getGames(requestPayload);
+    pruneDriveQuotaBlockedGames();
     syncLibraryWithInstalled();
     pruneRecentCompletedDownloads();
     renderAll();
@@ -4910,7 +5028,23 @@ async function handleGameAction(gameId, action) {
       return;
     }
 
+    if (action === "drive-limited") {
+      const hint = getDriveQuotaBlockedHint(gameId);
+      const message = `${game.name}: arquivo temporariamente limitado pelo Google Drive. ${hint}`;
+      setStatus(message);
+      notify("info", "Arquivo limitado pelo Drive", message, 5200);
+      return;
+    }
+
     if (action === "install") {
+      if (isGameDriveQuotaBlocked(gameId)) {
+        const hint = getDriveQuotaBlockedHint(gameId);
+        const message = `${game.name}: arquivo temporariamente limitado pelo Google Drive. ${hint}`;
+        setStatus(message);
+        notify("info", "Arquivo limitado pelo Drive", message, 5200);
+        return;
+      }
+
       const installChoice = await askInstallPathChoice();
       if (installChoice === "cancel") {
         setStatus("Instalacao cancelada.");
@@ -4964,6 +5098,10 @@ async function handleGameAction(gameId, action) {
       }
     }
   } catch (error) {
+    if (action === "install" && isDriveQuotaFailureMessage(error?.message || "")) {
+      markGameAsDriveQuotaBlocked(gameId, error?.message || "");
+      renderAll();
+    }
     setStatus(`Erro: ${error.message}`, true);
     const installFailedByProgress = action === "install" && getInstallProgress(gameId)?.phase === "failed";
     if (!installFailedByProgress) {
@@ -5798,6 +5936,7 @@ function installEventBindings() {
     state.installProgressByGameId.set(payload.gameId, payload);
 
     if (ACTIVE_INSTALL_PHASES.has(payload.phase)) {
+      clearGameDriveQuotaBlocked(payload.gameId);
       clearRecentCompletedDownload(payload.gameId);
     }
 
@@ -5849,9 +5988,13 @@ function installEventBindings() {
     }
 
     if (payload.phase === "failed") {
+      if (isDriveQuotaFailureMessage(payload.message || "")) {
+        markGameAsDriveQuotaBlocked(payload.gameId, payload.message || "");
+      }
       clearRecentCompletedDownload(payload.gameId);
       setStatus(payload.message || "Falha na instalacao.", true);
       notify("error", "Falha na instalacao", payload.message || "O download nao foi concluido.");
+      renderAll();
       setTimeout(() => {
         state.installProgressByGameId.delete(payload.gameId);
         state.downloadSpeedByGameId.delete(payload.gameId);
@@ -5861,6 +6004,7 @@ function installEventBindings() {
     }
 
     if (payload.phase === "completed") {
+      clearGameDriveQuotaBlocked(payload.gameId);
       rememberRecentCompletedDownload(payload.gameId);
       addToLibrary(payload.gameId);
       await refreshGames();
