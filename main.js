@@ -8006,35 +8006,20 @@ function buildDriveConfirmUrlFromToken(sourceUrl, driveId, token) {
   return url.toString();
 }
 
-function normalizeTextForMatch(value) {
-  return String(value || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-}
-
 function detectDriveBlockingReason(bodyText, statusCode = 0) {
   const text = String(bodyText || "");
-  const lower = normalizeTextForMatch(text);
+  const lower = text.toLowerCase();
 
   if (
     statusCode === 404 ||
     lower.includes("file does not exist") ||
     lower.includes("requested file was not found") ||
-    lower.includes("o item solicitado nao foi encontrado") ||
-    lower.includes("arquivo nao encontrado") ||
     lower.includes("arquivo nao existe")
   ) {
     return "Arquivo do Google Drive nao encontrado ou sem permissao publica.";
   }
 
   if (
-    lower.includes("google drive: limite ultrapassado") ||
-    lower.includes("limite ultrapassado") ||
-    lower.includes("limite de downloads") ||
-    lower.includes("muitas pessoas visualizaram ou baixaram este arquivo recentemente") ||
-    lower.includes("muitas pessoas visualizaram ou transferiram este arquivo recentemente") ||
-    lower.includes("muitas pessoas acessaram este arquivo recentemente") ||
     lower.includes("too many users have viewed or downloaded this file recently") ||
     lower.includes("download quota is exceeded") ||
     lower.includes("quota exceeded") ||
@@ -8043,18 +8028,11 @@ function detectDriveBlockingReason(bodyText, statusCode = 0) {
     return "Google Drive atingiu o limite de downloads deste arquivo. Tente novamente mais tarde.";
   }
 
-  if (
-    lower.includes("google drive: aviso de verificacao de virus") ||
-    lower.includes("cant scan this file for viruses") ||
-    lower.includes("can't scan this file for viruses") ||
-    lower.includes("virus scan warning")
-  ) {
+  if (lower.includes("can't scan this file for viruses") || lower.includes("virus scan warning")) {
     return "Google Drive exibiu pagina de aviso de virus e nao liberou o download automaticamente.";
   }
 
   if (
-    lower.includes("quer fazer o download mesmo assim") ||
-    lower.includes("ainda quer fazer o download") ||
     lower.includes("google drive nao pode fazer a verificacao de virus neste arquivo") ||
     lower.includes("voce ainda quer fazer o download") ||
     lower.includes("fazer o download mesmo assim")
@@ -8062,13 +8040,7 @@ function detectDriveBlockingReason(bodyText, statusCode = 0) {
     return "Google Drive exibiu pagina de confirmacao de download (arquivo grande).";
   }
 
-  if (
-    statusCode === 403 ||
-    lower.includes("access denied") ||
-    lower.includes("you need access") ||
-    lower.includes("solicitar acesso") ||
-    lower.includes("solicite acesso")
-  ) {
+  if (statusCode === 403 || lower.includes("access denied")) {
     return "Google Drive negou acesso ao arquivo. Verifique compartilhamento publico e API key.";
   }
 
@@ -9124,9 +9096,9 @@ function normalizeInstallFailureMessage(error) {
     return raw;
   }
 
-  const lower = normalizeTextForMatch(raw);
+  const lower = raw.toLowerCase();
   const detailChunk = raw.match(/detalhes:\s*(.+)$/i)?.[1] || "";
-  const detailLower = normalizeTextForMatch(detailChunk);
+  const detailLower = detailChunk.toLowerCase();
 
   if (lower.includes("este jogo ainda nao esta disponivel para download")) {
     return formatInstallFailure("GAME_UNAVAILABLE", "Este jogo ainda nao esta disponivel para download.");
@@ -9139,10 +9111,7 @@ function normalizeInstallFailureMessage(error) {
     );
   }
   if (
-    lower.includes("limite ultrapassado") ||
     lower.includes("limite de downloads") ||
-    lower.includes("muitas pessoas visualizaram ou baixaram") ||
-    lower.includes("muitas pessoas visualizaram ou transferiram") ||
     lower.includes("download quota") ||
     lower.includes("quota exceeded")
   ) {
@@ -9274,75 +9243,7 @@ function emitInstallProgress(payload) {
   }
 }
 
-function normalizeInstallPhaseLabel(phase) {
-  const value = String(phase || "").trim().toLowerCase();
-  if (value === "downloading") return "download";
-  if (value === "extracting") return "extracao";
-  if (value === "preparing") return "preparacao";
-  return "instalacao";
-}
-
-function getActiveInstallLock(excludedGameId = "") {
-  const excluded = String(excludedGameId || "").trim();
-  const normalizeId = (value) => String(value || "").trim();
-  const normalizePhase = (value) => String(value || "").trim().toLowerCase();
-
-  for (const [runningGameId] of activeInstalls.entries()) {
-    const gameId = normalizeId(runningGameId);
-    if (!gameId || gameId === excluded) {
-      continue;
-    }
-    const session = activeInstallSessionsByGameId.get(gameId);
-    const progress = activeInstallProgressByGameId.get(gameId);
-    return {
-      gameId,
-      gameName: String(session?.gameName || "").trim(),
-      phase: normalizePhase(progress?.phase || session?.phase || "preparing")
-    };
-  }
-
-  for (const [sessionGameId, session] of activeInstallSessionsByGameId.entries()) {
-    const gameId = normalizeId(sessionGameId);
-    if (!gameId || gameId === excluded) {
-      continue;
-    }
-    const phase = normalizePhase(session?.phase);
-    if (!ACTIVE_INSTALL_PHASES.has(phase)) {
-      continue;
-    }
-    return {
-      gameId,
-      gameName: String(session?.gameName || "").trim(),
-      phase
-    };
-  }
-
-  for (const [progressGameId, progress] of activeInstallProgressByGameId.entries()) {
-    const gameId = normalizeId(progressGameId);
-    if (!gameId || gameId === excluded) {
-      continue;
-    }
-    const phase = normalizePhase(progress?.phase);
-    if (!ACTIVE_INSTALL_PHASES.has(phase)) {
-      continue;
-    }
-    const session = activeInstallSessionsByGameId.get(gameId);
-    return {
-      gameId,
-      gameName: String(session?.gameName || "").trim(),
-      phase
-    };
-  }
-
-  return null;
-}
-
-async function installGame(rawGameId) {
-  const gameId = String(rawGameId || "").trim();
-  if (!gameId) {
-    throw new Error("Identificador do jogo invalido.");
-  }
-
+async function installGame(gameId) {
   if (isStartupUpdatePending()) {
     throw new Error(
       "Atualizacao do launcher em andamento. Aguarde concluir e o launcher reiniciar antes de instalar jogos."
@@ -9351,15 +9252,6 @@ async function installGame(rawGameId) {
 
   if (activeInstalls.has(gameId)) {
     throw new Error("Este jogo ja esta sendo instalado.");
-  }
-
-  const activeLock = getActiveInstallLock(gameId);
-  if (activeLock) {
-    const activeName = activeLock.gameName || activeLock.gameId;
-    const phaseLabel = normalizeInstallPhaseLabel(activeLock.phase);
-    throw new Error(
-      `[INSTALL_IN_PROGRESS] Ja existe uma instalacao em andamento (${activeName} - ${phaseLabel}). Aguarde finalizar para iniciar outro jogo.`
-    );
   }
 
   const task = (async () => {
