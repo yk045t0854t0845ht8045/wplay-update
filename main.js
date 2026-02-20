@@ -184,8 +184,13 @@ const PLAYTIME_REMOTE_CACHE_TTL_MS = 3 * 60 * 1000;
 const PLAYTIME_STATE_MAX_RECORDS = 12000;
 const PLAYTIME_SYNC_BATCH_LIMIT = 80;
 const PLAYTIME_SYNC_DEBOUNCE_MS = 2400;
-const PLAYTIME_SESSION_MIN_SECONDS = 5;
+const PLAYTIME_SESSION_MIN_SECONDS = 1;
 const PLAYTIME_SESSION_RECOVERY_GAP_MS = 2 * 60 * 1000;
+const PLAYTIME_ACTIVE_CHECKPOINT_MIN_SECONDS = 30;
+const PROCESS_HINT_CACHE_TTL_MS = 15 * 60 * 1000;
+const PROCESS_HINT_SCAN_MAX_DEPTH = 5;
+const PROCESS_HINT_SCAN_MAX_ENTRIES = 4000;
+const PROCESS_HINT_SCAN_MAX_HINTS = 120;
 const STEAM_CLIENT_PROCESS_NAMES = new Set(["steam.exe", "steam"]);
 const GAME_START_TOAST_WIDTH = 398;
 const GAME_START_TOAST_HEIGHT = 88;
@@ -373,6 +378,7 @@ const playtimeRemoteCache = {
   rowsByGameId: new Map(),
   inFlight: null
 };
+const processHintsCacheByInstallDir = new Map();
 
 function isElectronBinaryPath(executablePath = process.execPath) {
   const execName = path.basename(String(executablePath || "")).trim().toLowerCase();
@@ -11087,6 +11093,148 @@ function normalizeProcessNameForMatch(value) {
   return String(normalized || "").trim().toLowerCase();
 }
 
+function shouldIgnoreProcessHintDirectoryName(name) {
+  const normalized = String(name || "").trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  return [
+    "_commonredist",
+    "commonredist",
+    "redist",
+    "redistributables",
+    "redistributable",
+    "prerequisites",
+    "prerequisite",
+    "prereq",
+    "installer",
+    "installers",
+    "support",
+    "thirdparty",
+    "third-party",
+    "easyanticheat",
+    "battleye",
+    "dotnet",
+    "__macosx"
+  ].includes(normalized);
+}
+
+async function scanExecutableProcessHintsFromInstallDir(installDir) {
+  const normalizedInstallDir = normalizeAbsolutePath(installDir);
+  if (!normalizedInstallDir) {
+    return [];
+  }
+  if (!(await isDirectory(normalizedInstallDir))) {
+    return [];
+  }
+
+  const discovered = new Set();
+  const queue = [{ dir: normalizedInstallDir, depth: 0 }];
+  let scannedEntries = 0;
+
+  while (queue.length > 0) {
+    if (scannedEntries >= PROCESS_HINT_SCAN_MAX_ENTRIES || discovered.size >= PROCESS_HINT_SCAN_MAX_HINTS) {
+      break;
+    }
+
+    const current = queue.shift();
+    if (!current) {
+      continue;
+    }
+
+    let entries = [];
+    try {
+      entries = await fsp.readdir(current.dir, { withFileTypes: true });
+    } catch (_error) {
+      continue;
+    }
+
+    for (const entry of entries) {
+      scannedEntries += 1;
+      if (scannedEntries >= PROCESS_HINT_SCAN_MAX_ENTRIES || discovered.size >= PROCESS_HINT_SCAN_MAX_HINTS) {
+        break;
+      }
+
+      const entryName = String(entry?.name || "").trim();
+      if (!entryName) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        if (current.depth >= PROCESS_HINT_SCAN_MAX_DEPTH) {
+          continue;
+        }
+        if (shouldIgnoreProcessHintDirectoryName(entryName)) {
+          continue;
+        }
+        const nextDir = path.join(current.dir, entryName);
+        queue.push({
+          dir: nextDir,
+          depth: current.depth + 1
+        });
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      const normalized = normalizeExecutableImageName(entryName);
+      if (!normalized) {
+        continue;
+      }
+      if (process.platform === "win32" && path.extname(normalized).toLowerCase() !== ".exe") {
+        continue;
+      }
+
+      if (!isGenericExecutableName(normalized)) {
+        discovered.add(normalized);
+      }
+    }
+  }
+
+  return [...discovered];
+}
+
+async function getCachedExecutableProcessHints(installDir, options = {}) {
+  const cacheKey = normalizePathForComparison(installDir);
+  if (!cacheKey) {
+    return [];
+  }
+
+  const forceRefresh = options?.force === true;
+  const current = processHintsCacheByInstallDir.get(cacheKey);
+  const now = Date.now();
+  if (
+    !forceRefresh &&
+    current &&
+    Array.isArray(current.names) &&
+    now - Number(current.fetchedAt || 0) >= 0 &&
+    now - Number(current.fetchedAt || 0) < PROCESS_HINT_CACHE_TTL_MS
+  ) {
+    return current.names;
+  }
+
+  let discovered = [];
+  try {
+    discovered = await scanExecutableProcessHintsFromInstallDir(installDir);
+  } catch (_error) {
+    discovered = [];
+  }
+
+  const merged = [...new Set([...(Array.isArray(current?.names) ? current.names : []), ...discovered])]
+    .filter(Boolean)
+    .slice(0, PROCESS_HINT_SCAN_MAX_HINTS);
+
+  processHintsCacheByInstallDir.set(cacheKey, {
+    fetchedAt: now,
+    names: merged
+  });
+
+  return merged;
+}
+
 function parseWindowsTasklistCsvOutput(outputText) {
   const names = new Set();
   const text = String(outputText || "");
@@ -11284,10 +11432,20 @@ async function collectExecutableImageNamesForGame(game, installRootCandidates) {
 
     const manifest = await readInstallManifest(installDir);
     addImageName(strictNames, manifest?.lastExecutableRelativePath);
+    if (Array.isArray(manifest?.processNameHints)) {
+      for (const processNameHint of manifest.processNameHints) {
+        addImageName(strictNames, processNameHint);
+      }
+    }
 
     const resolved = await resolveGameExecutable(game, installRoot, true);
     addImageName(strictNames, resolved.relativePath);
     addImageName(strictNames, resolved.absolutePath);
+
+    const processHints = await getCachedExecutableProcessHints(installDir).catch(() => []);
+    for (const processHint of processHints) {
+      addImageName(strictNames, processHint);
+    }
   }
 
   const ordered = [...strictNames];
@@ -11308,7 +11466,7 @@ async function collectExecutableImageNamesForGame(game, installRootCandidates) {
   return [...new Set(ordered)];
 }
 
-function getProcessCandidatesForInstalledGame(game, executable, manifest) {
+function getProcessCandidatesForInstalledGame(game, executable, manifest, extraCandidates = []) {
   const allCandidates = new Set();
   const add = (rawValue) => {
     const normalized = normalizeExecutableImageName(rawValue);
@@ -11316,17 +11474,49 @@ function getProcessCandidatesForInstalledGame(game, executable, manifest) {
       allCandidates.add(normalized);
     }
   };
+  const addMany = (values) => {
+    if (!Array.isArray(values)) return;
+    for (const value of values) {
+      add(value);
+    }
+  };
 
   add(game?.launchExecutable);
   add(manifest?.lastExecutableRelativePath);
   add(executable?.relativePath);
   add(executable?.absolutePath);
+  addMany(manifest?.processNameHints);
+  addMany(extraCandidates);
 
   const strictCandidates = [...allCandidates].filter((name) => !isGenericExecutableName(name));
   if (strictCandidates.length > 0) {
     return strictCandidates;
   }
   return [...allCandidates];
+}
+
+function shouldExpandProcessHintsForGameDetection(processCandidates = []) {
+  const candidates = Array.isArray(processCandidates) ? processCandidates : [];
+  if (candidates.length === 0) {
+    return true;
+  }
+
+  return candidates.some((candidate) => {
+    const normalized = String(candidate || "").trim().toLowerCase();
+    if (!normalized) {
+      return true;
+    }
+    if (isGenericExecutableName(normalized)) {
+      return true;
+    }
+    return (
+      normalized.includes("launcher") ||
+      normalized.includes("bootstrap") ||
+      normalized.startsWith("start.") ||
+      normalized.startsWith("start_") ||
+      normalized.startsWith("start-")
+    );
+  });
 }
 
 async function tryTerminateGameProcesses(game, installRootCandidates) {
@@ -11373,6 +11563,10 @@ async function uninstallGame(gameId) {
       const cacheKey = getInstallSizeCacheKey(installDir);
       if (cacheKey) {
         installSizeCache.delete(cacheKey);
+      }
+      const processHintsCacheKey = normalizePathForComparison(installDir);
+      if (processHintsCacheKey) {
+        processHintsCacheByInstallDir.delete(processHintsCacheKey);
       }
       removedDirs.push(installDir);
     }
@@ -11747,6 +11941,69 @@ function reconcilePlaytimeSessionsWithGames(userId, games = []) {
   }
 }
 
+function checkpointActivePlaytimeSessionsForUser(userId, atMs = Date.now()) {
+  const safeUserId = normalizeSteamId(userId);
+  if (!safeUserId) {
+    return 0;
+  }
+
+  ensurePlaytimeStateLoadedSync();
+  const nowMs = Math.max(1, toValidTimestampMs(atMs) || Date.now());
+  let changedRecords = 0;
+
+  for (const [key, session] of playtimeActiveSessionsByUserGameKey.entries()) {
+    if (!session || normalizeSteamId(session.userId) !== safeUserId) {
+      continue;
+    }
+
+    const startedAtMs = Math.max(1, Number(session.startedAtMs || 0));
+    if (startedAtMs <= 0) {
+      continue;
+    }
+
+    const lastSeenAtMs = Math.max(startedAtMs, Number(session.lastSeenAtMs || startedAtMs));
+    const checkpointEndMs = Math.max(startedAtMs, Math.min(nowMs, lastSeenAtMs));
+    const elapsedSeconds = Math.max(0, Math.floor((checkpointEndMs - startedAtMs) / 1000));
+    if (elapsedSeconds < PLAYTIME_ACTIVE_CHECKPOINT_MIN_SECONDS) {
+      continue;
+    }
+
+    const gameId = normalizePlaytimeGameId(session.gameId);
+    if (!gameId) {
+      continue;
+    }
+
+    const record = upsertPlaytimeRecord(safeUserId, gameId, session.gameName);
+    if (!record) {
+      continue;
+    }
+
+    const checkpointStartIso = new Date(startedAtMs).toISOString();
+    const checkpointEndIso = new Date(checkpointEndMs).toISOString();
+    record.totalSeconds = normalizePlaytimeSeconds(record.totalSeconds) + elapsedSeconds;
+    record.firstPlayedAt = chooseEarlierIso(record.firstPlayedAt, checkpointStartIso);
+    record.lastPlayedAt = chooseLaterIso(record.lastPlayedAt, checkpointEndIso) || checkpointEndIso;
+    record.updatedAt = new Date().toISOString();
+    record.dirty = true;
+    playtimeRecordsByUserGameKey.set(key, record);
+
+    playtimeActiveSessionsByUserGameKey.set(key, {
+      ...session,
+      gameName: String(session.gameName || record.gameName || "").trim(),
+      startedAtMs: checkpointEndMs,
+      lastSeenAtMs: Math.max(lastSeenAtMs, checkpointEndMs)
+    });
+    changedRecords += 1;
+  }
+
+  if (changedRecords > 0) {
+    schedulePersistPlaytimeState();
+    scheduleSyncDirtyPlaytimeRecords(1000);
+  }
+
+  return changedRecords;
+}
+
 function applyPlaytimeFieldsToGames(userId, games = []) {
   const safeUserId = normalizeSteamId(userId);
   if (!safeUserId || !Array.isArray(games) || games.length === 0) {
@@ -11828,6 +12085,7 @@ async function applyPersistedPlaytimeToCatalogGames(games = [], options = {}) {
   }
 
   reconcilePlaytimeSessionsWithGames(userId, games);
+  checkpointActivePlaytimeSessionsForUser(userId, Date.now());
   const withPlaytime = applyPlaytimeFieldsToGames(userId, games);
   if (getDirtyPlaytimeRecordsForUser(userId, 1).length > 0) {
     scheduleSyncDirtyPlaytimeRecords();
@@ -11844,7 +12102,7 @@ function resolveGamesStatusRequestOptions(rawOptions = {}) {
 
   return {
     lightweight,
-    includeSteamStats: options.includeSteamStats === true && !lightweight,
+    includeSteamStats: options.includeSteamStats !== false && !lightweight,
     includeRunningState: options.includeRunningState !== false,
     measureInstalledSize: options.measureInstalledSize === true || !lightweight,
     persistMeasuredSize: options.persistMeasuredSize !== false && !lightweight
@@ -11899,10 +12157,21 @@ async function getGamesWithStatus(rawOptions = {}) {
         }
 
         if (requestOptions.includeRunningState) {
-          const processCandidates = getProcessCandidatesForInstalledGame(game, executable, manifest)
+          const baseCandidates = getProcessCandidatesForInstalledGame(game, executable, manifest)
             .map((value) => normalizeProcessNameForMatch(value))
             .filter(Boolean);
+          let processCandidates = baseCandidates;
           running = processCandidates.some((candidate) => runningProcessNamesLower.has(candidate));
+
+          if (!running && shouldExpandProcessHintsForGameDetection(baseCandidates)) {
+            const processHints = await getCachedExecutableProcessHints(executable.installDir).catch(() => []);
+            if (processHints.length > 0) {
+              processCandidates = getProcessCandidatesForInstalledGame(game, executable, manifest, processHints)
+                .map((value) => normalizeProcessNameForMatch(value))
+                .filter(Boolean);
+              running = processCandidates.some((candidate) => runningProcessNamesLower.has(candidate));
+            }
+          }
         }
       }
 
@@ -12163,7 +12432,8 @@ async function playGame(gameId) {
   }
 
   const manifest = await readInstallManifest(installDir);
-  const processCandidates = getProcessCandidatesForInstalledGame(game, executable, manifest)
+  const processHints = await getCachedExecutableProcessHints(executable.installDir).catch(() => []);
+  const processCandidates = getProcessCandidatesForInstalledGame(game, executable, manifest, processHints)
     .map((value) => normalizeProcessNameForMatch(value))
     .filter(Boolean);
   if (processCandidates.length > 0) {

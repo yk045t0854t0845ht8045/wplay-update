@@ -103,6 +103,7 @@ const LOW_SPEC_DEVICE =
   (Number.isFinite(hardwareConcurrency) && hardwareConcurrency > 0 && hardwareConcurrency <= 4) ||
   (Number.isFinite(deviceMemoryGb) && deviceMemoryGb > 0 && deviceMemoryGb <= 8);
 const REALTIME_SYNC_INTERVAL_MS = LOW_SPEC_DEVICE ? 10 * 1000 : 5 * 1000;
+const REALTIME_STEAM_STATS_SYNC_INTERVAL_MS = LOW_SPEC_DEVICE ? 4 * 60 * 1000 : 2 * 60 * 1000;
 const RECENT_COMPLETED_DOWNLOAD_TTL_MS = 10 * 60 * 1000;
 const RECENT_COMPLETED_DOWNLOAD_MAX_ITEMS = 24;
 const NOTIFICATION_HISTORY_LIMIT = 15;
@@ -818,14 +819,27 @@ function setAuthButtonsState(loading) {
 async function bootstrapLauncherDataIfNeeded() {
   if (state.appBootstrapped) {
     await syncActiveInstallProgressSnapshot();
-    await refreshGames();
+    await refreshGames({
+      lightweight: false,
+      includeRunningState: true,
+      includeSteamStats: true
+    });
     releaseUiTransitionsAfterBoot(60);
     return;
   }
   state.appBootstrapped = true;
 
   state.libraryGameIds = loadLibraryFromStorage();
-  await Promise.all([refreshInstallRoot(), refreshGames(), syncActiveInstallProgressSnapshot(), refreshLaunchOnStartupState()]);
+  await Promise.all([
+    refreshInstallRoot(),
+    refreshGames({
+      lightweight: false,
+      includeRunningState: true,
+      includeSteamStats: true
+    }),
+    syncActiveInstallProgressSnapshot(),
+    refreshLaunchOnStartupState()
+  ]);
   syncSearchVisibility();
   updateNotificationBadge();
   renderNotificationHistory();
@@ -1427,7 +1441,6 @@ function pushNotificationHistory(type, title, message) {
         replaceNotificationHistory(payload.entries);
       }
     } catch (_error) {
-      // Keep optimistic local entry if remote write fails.
     }
   });
 }
@@ -5417,13 +5430,28 @@ function startRealtimeSync() {
   }
 
   state.realtimeSyncStarted = true;
+  let lastSteamStatsSyncAt = 0;
 
   const syncNow = async () => {
     if (document.hidden) {
       return;
     }
+
+    const now = Date.now();
+    const shouldRefreshSteamStats =
+      !lastSteamStatsSyncAt || now - lastSteamStatsSyncAt >= REALTIME_STEAM_STATS_SYNC_INTERVAL_MS;
+
     try {
-      await refreshGames({ lightweight: true, includeRunningState: true });
+      if (shouldRefreshSteamStats) {
+        await refreshGames({
+          lightweight: false,
+          includeRunningState: true,
+          includeSteamStats: true
+        });
+        lastSteamStatsSyncAt = Date.now();
+      } else {
+        await refreshGames({ lightweight: true, includeRunningState: true });
+      }
     } catch (_error) {
       // Silent background sync failure.
     }
