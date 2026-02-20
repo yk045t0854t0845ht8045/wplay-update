@@ -186,7 +186,7 @@
                     aria-checked="false"
                     data-account-action="startup"
                   >
-                    INICIALIZAR COM SISTEMA: DESATIVADO
+                    INICIALIZAR: DESATIVADO
                   </button>
                   <button class="account-menu-item is-danger" type="button" role="menuitem" data-account-action="logout">LOGOUT</button>
                 </section>
@@ -201,9 +201,9 @@
 
               <div class="stage-tools">
                 <div id="storeFilterRow" class="filter-row" role="tablist" aria-label="Filtros de jogos">
-                  <button class="filter-pill is-active" type="button" data-filter="popular">All Games</button>
-                  <button class="filter-pill" type="button" data-filter="downloaded">Most Downloaded</button>
-                  <button class="filter-pill" type="button" data-filter="top">Top Rated</button>
+                  <button class="filter-pill is-active" type="button" data-filter="popular">Todos</button>
+                  <button class="filter-pill" type="button" data-filter="downloaded">Mais baixados</button>
+                  <button class="filter-pill" type="button" data-filter="top">Favoritos</button>
                 </div>
               </div>
             </header>
@@ -236,21 +236,19 @@
                           </svg>
                         </span>
                       </div>
-                      <span class="stat-label">GAME SIZE</span>
+                      <span class="stat-label">Memória</span>
                     </article>
-                    <article class="stat-card is-hidden" aria-hidden="true">
+                    <article class="stat-card">
                       <div class="stat-value-row">
-                        <strong id="detailsStatAchievement">--</strong>
+                        <strong id="detailsStatHours">0 h</strong>
                         <span class="stat-icon" aria-hidden="true">
                           <svg viewBox="0 0 24 24" fill="none">
                             <circle cx="12" cy="12" r="8.3" stroke="currentColor" stroke-width="1.8"></circle>
-                            <path d="M9 15L15 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-                            <circle cx="9" cy="9" r="1.1" fill="currentColor"></circle>
-                            <circle cx="15" cy="15" r="1.1" fill="currentColor"></circle>
+                            <path d="M12 7.6V12.1L15.2 14.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
                           </svg>
                         </span>
                       </div>
-                      <span class="stat-label">RELEASE DATE</span>
+                      <span class="stat-label">HORAS JOGADAS</span>
                     </article>
                   </div>
 
@@ -261,7 +259,7 @@
 
                     <div class="hero-actions">
                       <button id="detailsAddLibraryBtn" class="hero-action-btn hero-action-btn-dark" type="button">
-                        <span class="hero-action-label" data-btn-label>Add to Library</span>
+                        <span class="hero-action-label" data-btn-label>Adicionar a Biblioteca</span>
                         <span class="hero-action-icon-box" aria-hidden="true">
                           <svg class="hero-action-icon icon-plus" viewBox="0 0 24 24" fill="none">
                             <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8"></circle>
@@ -273,19 +271,29 @@
                           </svg>
                         </span>
                       </button>
-                      <button id="detailsHeroUninstallBtn" class="hero-action-btn hero-action-btn-dark hero-action-btn-danger is-hidden" type="button">
-                        <span class="hero-action-label" data-btn-label>Desinstalar</span>
-                        <span class="hero-action-icon-box" aria-hidden="true">
-                          <svg class="hero-action-icon icon-trash" viewBox="0 0 24 24" fill="none">
-                            <path d="M8.8 8.6V17M12 8.6V17M15.2 8.6V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-                            <path d="M5.9 6.8H18.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-                            <path d="M9.2 6.8L9.7 5.4C9.9 4.9 10.4 4.6 10.9 4.6H13.1C13.6 4.6 14.1 4.9 14.3 5.4L14.8 6.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-                            <rect x="6.8" y="6.8" width="10.4" height="12.7" rx="1.8" stroke="currentColor" stroke-width="1.8"></rect>
+                      <div class="hero-manage-wrap">
+                        <button
+                          id="detailsManageBtn"
+                          class="hero-manage-btn is-hidden"
+                          type="button"
+                          aria-label="Gerenciamento do jogo"
+                          aria-haspopup="menu"
+                          aria-expanded="false"
+                          aria-controls="detailsManageMenu"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <path d="M10.2 4.7H13.8L14.2 6.9C14.6 7 15 7.2 15.4 7.4L17.3 6.3L19.8 8.8L18.7 10.7C18.9 11.1 19.1 11.5 19.2 11.9L21.4 12.3V15.9L19.2 16.3C19.1 16.7 18.9 17.1 18.7 17.5L19.8 19.4L17.3 21.9L15.4 20.8C15 21 14.6 21.2 14.2 21.3L13.8 23.5H10.2L9.8 21.3C9.4 21.2 9 21 8.6 20.8L6.7 21.9L4.2 19.4L5.3 17.5C5.1 17.1 4.9 16.7 4.8 16.3L2.6 15.9V12.3L4.8 11.9C4.9 11.5 5.1 11.1 5.3 10.7L4.2 8.8L6.7 6.3L8.6 7.4C9 7.2 9.4 7 9.8 6.9L10.2 4.7Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"></path>
+                            <circle cx="12" cy="14.1" r="2.35" stroke="currentColor" stroke-width="1.55"></circle>
                           </svg>
-                        </span>
-                      </button>
+                        </button>
+                        <div id="detailsManageMenu" class="details-manage-menu is-hidden" role="menu" aria-label="Gerenciamento">
+                          <button class="details-manage-item" type="button" role="menuitem" data-details-manage-action="open-folder">Ver na pasta</button>
+                          <button class="details-manage-item" type="button" role="menuitem" data-details-manage-action="add-shortcut">Adicionar atalho</button>
+                          <button class="details-manage-item is-danger" type="button" role="menuitem" data-details-manage-action="uninstall">Desinstalar</button>
+                        </div>
+                      </div>
                       <button id="detailsActionBtn" class="hero-action-btn hero-action-btn-light" type="button" data-action="install">
-                        <span class="hero-action-label" data-btn-label>Download Game</span>
+                        <span class="hero-action-label" data-btn-label>Instalar</span>
                         <span class="hero-action-icon-box" aria-hidden="true">
                           <svg class="hero-action-icon icon-download" viewBox="0 0 24 24" fill="none">
                             <path d="M12 4V13.8" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
@@ -332,11 +340,11 @@
                 <aside class="details-side-col">
                   <article class="meta-card">
                     <div class="meta-row">
-                      <span>Developed by</span>
+                      <span>Desenvolvido Por</span>
                       <strong id="detailsDevelopedBy">Nao informado</strong>
                     </div>
                     <div class="meta-row">
-                      <span>Published by</span>
+                      <span>Publicado Por</span>
                       <strong id="detailsPublishedBy">Nao informado</strong>
                     </div>
                     <div class="meta-row is-hidden" aria-hidden="true">
@@ -346,15 +354,13 @@
                   </article>
 
                   <article class="meta-card">
-                    <h4>Genres</h4>
+                    <h4>Gêneros</h4>
                     <div id="detailsGenres" class="genre-tags"></div>
                   </article>
 
                   <article class="meta-card">
                     <h4>Status</h4>
                     <p id="detailsStatus" class="status-chip">Nao instalado</p>
-                    <button id="detailsPlayBtn" class="meta-btn is-hidden" type="button">Play Game</button>
-                    <button id="detailsUninstallBtn" class="meta-btn meta-btn-danger is-hidden" type="button">Uninstall</button>
                   </article>
                 </aside>
               </section>

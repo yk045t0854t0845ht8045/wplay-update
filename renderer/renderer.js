@@ -56,7 +56,7 @@ const detailsProgress = document.getElementById("detailsProgress");
 const detailsProgressFill = document.getElementById("detailsProgressFill");
 const detailsProgressText = document.getElementById("detailsProgressText");
 const detailsStatPlayTime = document.getElementById("detailsStatPlayTime");
-const detailsStatAchievement = document.getElementById("detailsStatAchievement");
+const detailsStatHours = document.getElementById("detailsStatHours");
 
 const detailsVideoWrap = document.getElementById("detailsVideoWrap");
 const detailsGallery = document.getElementById("detailsGallery");
@@ -65,9 +65,8 @@ const detailsPublishedBy = document.getElementById("detailsPublishedBy");
 const detailsReleaseDate = document.getElementById("detailsReleaseDate");
 const detailsGenres = document.getElementById("detailsGenres");
 const detailsStatus = document.getElementById("detailsStatus");
-const detailsPlayBtn = document.getElementById("detailsPlayBtn");
-const detailsUninstallBtn = document.getElementById("detailsUninstallBtn");
-const detailsHeroUninstallBtn = document.getElementById("detailsHeroUninstallBtn");
+const detailsManageBtn = document.getElementById("detailsManageBtn");
+const detailsManageMenu = document.getElementById("detailsManageMenu");
 
 const installPathModal = document.getElementById("installPathModal");
 const installPathCurrent = document.getElementById("installPathCurrent");
@@ -133,12 +132,6 @@ const notificationDateFormatter = new Intl.DateTimeFormat("pt-BR", {
   day: "2-digit",
   month: "2-digit"
 });
-const releaseDateStatFormatter = new Intl.DateTimeFormat("pt-BR", {
-  day: "2-digit",
-  month: "2-digit",
-  year: "numeric"
-});
-
 const motionApi = window.Motion || null;
 const animate = motionApi && typeof motionApi.animate === "function" ? motionApi.animate : null;
 const stagger = motionApi && typeof motionApi.stagger === "function" ? motionApi.stagger : null;
@@ -233,6 +226,7 @@ const state = {
   updateRestartModalOpen: false,
   uninstallConfirmModalOpen: false,
   steamRequiredModalOpen: false,
+  detailsManageMenuOpen: false,
   lastAutoUpdateNotifiedVersion: "",
   startupSafeModeNoticeShown: false,
   appBootstrapped: false,
@@ -243,6 +237,7 @@ const state = {
   storeModeFilter: "all",
   storeGenreFilter: "all",
   storeAdvancedFilterSearch: "",
+  storeCatalogLoading: false,
   introPlayed: false,
   realtimeSyncStarted: false,
   autoUpdateRealtimeSyncStarted: false,
@@ -728,8 +723,8 @@ function renderLaunchOnStartupAccountMenuItem() {
   }
 
   accountStartupBtn.textContent = enabled
-    ? "INICIALIZAR COM SISTEMA: ATIVADO"
-    : "INICIALIZAR COM SISTEMA: DESATIVADO";
+    ? "INICIALIZAR: ATIVADO"
+    : "INICIALIZAR: DESATIVADO";
 }
 
 async function refreshLaunchOnStartupState() {
@@ -995,7 +990,7 @@ async function handleAccountMenuAction(action) {
     state.searchOpen = false;
     syncSearchVisibility();
     renderAll();
-    setStatus("Abrindo Library...");
+    setStatus("Abrindo Bilblioteca...");
     return;
   }
 
@@ -1679,6 +1674,18 @@ async function askUninstallConfirmation(game) {
   });
 }
 
+function setDetailsManageMenuOpen(open) {
+  if (!detailsManageBtn || !detailsManageMenu) {
+    state.detailsManageMenuOpen = false;
+    return;
+  }
+  const nextOpen = Boolean(open) && !detailsManageBtn.classList.contains("is-hidden");
+  state.detailsManageMenuOpen = nextOpen;
+  detailsManageBtn.classList.toggle("is-open", nextOpen);
+  detailsManageBtn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+  detailsManageMenu.classList.toggle("is-hidden", !nextOpen);
+}
+
 function parseLauncherError(message) {
   const raw = String(message || "").trim();
   if (!raw) return { code: "", message: "" };
@@ -2082,18 +2089,25 @@ function formatGameSizeStat(game) {
   return manualSize;
 }
 
-function formatReleaseDateStat(game) {
-  const releaseDateRaw = String(game?.releaseDate || "").trim();
-  if (!releaseDateRaw) {
-    return "--";
+function formatPlayedHoursStat(game) {
+  const launcherSeconds = Number(game?.launcherPlayTimeSeconds);
+  const launcherHours =
+    Number.isFinite(launcherSeconds) && launcherSeconds > 0
+      ? launcherSeconds / 3600
+      : parseLooseNumber(game?.launcherPlayTimeHours);
+  const userHours = parseLooseNumber(game?.userPlayTimeHours ?? game?.averagePlayTime ?? "");
+  const resolvedHours = Number.isFinite(launcherHours) && launcherHours > 0 ? launcherHours : userHours;
+
+  if (!Number.isFinite(resolvedHours) || resolvedHours < 0) {
+    return "0 h";
+  }
+  if (resolvedHours === 0) {
+    return "0 h";
   }
 
-  const parsed = Date.parse(releaseDateRaw);
-  if (!Number.isFinite(parsed)) {
-    return releaseDateRaw;
-  }
-
-  return releaseDateStatFormatter.format(new Date(parsed));
+  const decimals = resolvedHours >= 100 ? 0 : resolvedHours >= 10 ? 1 : resolvedHours >= 1 ? 1 : 2;
+  const formatted = resolvedHours.toFixed(decimals).replace(/\.?0+$/, "");
+  return `${formatted} h`;
 }
 
 function getInstallRootDisplayPath() {
@@ -2281,7 +2295,7 @@ function getActionState(game) {
     return { action: "soon", label: "Coming Soon", disabled: true };
   }
 
-  return { action: "install", label: "Download Game", disabled: false };
+  return { action: "install", label: "Instalar", disabled: false };
 }
 
 function getGalleryImages(game) {
@@ -3126,23 +3140,18 @@ function getLibraryGamesBySearchMode(applySearch = true) {
 function updateHeaderForView() {
   if (state.view === "store") {
     if (state.storeFilter === "popular") viewTitle.textContent = "Jogos";
-    if (state.storeFilter === "downloaded") viewTitle.textContent = "Most Downloaded";
-    if (state.storeFilter === "top") viewTitle.textContent = "Top Rated";
-    return;
-  }
-
-  if (state.view === "library") {
-    viewTitle.textContent = "Library";
-    return;
-  }
-
-  if (state.view === "downloads") {
+    if (state.storeFilter === "downloaded") viewTitle.textContent = "Mais baixados";
+    if (state.storeFilter === "top") viewTitle.textContent = "Favoritos";
+  } else if (state.view === "library") {
+    viewTitle.textContent = "Bilblioteca";
+  } else if (state.view === "downloads") {
     viewTitle.textContent = "Downloads";
-    return;
+  } else {
+    const selected = getGameById(state.selectedGameId);
+    viewTitle.textContent = selected?.name || "Game";
   }
 
-  const selected = getGameById(state.selectedGameId);
-  viewTitle.textContent = selected?.name || "Game";
+  syncStoreCatalogLoadingUi();
 }
 
 function isStageSurfaceScrollable() {
@@ -3344,6 +3353,9 @@ function setView(nextView) {
 
   state.view = nextView;
   setAccountMenuOpen(false);
+  if (nextView !== "details") {
+    setDetailsManageMenuOpen(false);
+  }
   if (nextView !== "library") {
     closeLibraryCardMenu();
   }
@@ -3386,8 +3398,20 @@ function getCoverDotStateClass(game) {
 
 function getStoreShelfTitle() {
   if (state.storeFilter === "downloaded") return "Mais baixados";
-  if (state.storeFilter === "top") return "Mais bem avaliados";
+  if (state.storeFilter === "top") return "Favoritos";
   return "Descubra algo novo";
+}
+
+function syncStoreCatalogLoadingUi() {
+  const isLoading = state.view === "store" && state.storeCatalogLoading === true;
+  if (storeFilterRow) {
+    storeFilterRow.classList.toggle("is-skeleton-loading", isLoading);
+    storeFilterRow.setAttribute("aria-busy", isLoading ? "true" : "false");
+  }
+  if (viewTitle) {
+    viewTitle.classList.toggle("is-skeleton-loading", isLoading);
+    viewTitle.setAttribute("aria-busy", isLoading ? "true" : "false");
+  }
 }
 
 function getStoreCardKind(game) {
@@ -4007,6 +4031,11 @@ function getStoreGridRenderSignature(storeGames, options = {}) {
   const genreKey = String(state.storeGenreFilter || "all");
   const advancedOpenKey = state.storeAdvancedFiltersOpen ? "1" : "0";
   const advancedActiveKey = options.hasAdvancedFilters ? "1" : "0";
+  const isLoading = state.storeCatalogLoading === true && state.games.length === 0;
+
+  if (isLoading) {
+    return `${filterKey}|${searchKey}|${modeKey}|${genreKey}|${advancedOpenKey}|${advancedActiveKey}|loading`;
+  }
 
   if (!games.length) {
     return `${filterKey}|${searchKey}|${modeKey}|${genreKey}|${advancedOpenKey}|${advancedActiveKey}|empty`;
@@ -4090,7 +4119,64 @@ function patchStoreGridRuntimeProgress() {
   });
 }
 
+function getStoreLoadingSkeletonMarkup() {
+  const filterChipWidths = [72, 104, 92, 84];
+  const filterChipsMarkup = filterChipWidths
+    .map(
+      (width, index) =>
+        `<span class="store-skeleton-filter-chip" aria-hidden="true" style="width: ${width}px; --skeleton-delay: ${index * 70}ms;"></span>`
+    )
+    .join("");
+
+  const cardsMarkup = Array.from({ length: 6 }, (_entry, index) => {
+    const opacity = Math.max(0.14, 0.82 - index * 0.1);
+    const delay = index * 85;
+    return `
+      <article class="store-card store-card-skeleton" aria-hidden="true" style="--skeleton-card-opacity: ${opacity.toFixed(3)}; --skeleton-delay: ${delay}ms;">
+        <span class="store-card-poster store-card-skeleton-poster"></span>
+        <span class="store-card-meta store-card-skeleton-meta">
+          <span class="store-skeleton-line store-skeleton-kind-line"></span>
+          <span class="store-skeleton-line store-skeleton-name-line"></span>
+          <span class="store-skeleton-line store-skeleton-name-line is-short"></span>
+          <span class="store-skeleton-line store-skeleton-price-line"></span>
+        </span>
+      </article>
+    `;
+  }).join("");
+
+  return `
+    <section class="store-shelf store-shelf-skeleton" aria-label="Carregando jogos" aria-busy="true">
+      <header class="store-shelf-head">
+        <div class="store-shelf-title-skeleton-wrap" aria-hidden="true">
+          <span class="store-skeleton-line store-skeleton-title-line"></span>
+        </div>
+        <div class="store-shelf-nav store-shelf-nav-skeleton" aria-hidden="true">
+          <span class="store-skeleton-circle"></span>
+        </div>
+      </header>
+
+      <div class="store-shelf-filter-skeleton">
+        ${filterChipsMarkup}
+      </div>
+
+      <div class="store-shelf-track-wrap">
+        <div class="store-shelf-track is-skeleton" data-store-track>
+          ${cardsMarkup}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function getRailLoadingSkeletonMarkup() {
+  return Array.from({ length: 3 }, (_entry, index) => {
+    const opacity = Math.max(0.16, 0.72 - index * 0.14);
+    return `<span class="rail-game-btn rail-game-skeleton" aria-hidden="true" style="--skeleton-card-opacity: ${opacity.toFixed(3)}; --skeleton-delay: ${index * 95}ms;"></span>`;
+  }).join("");
+}
+
 function renderStoreGrid() {
+  syncStoreCatalogLoadingUi();
   const genreOptions = getStoreGenreFilterOptions();
   if (state.storeGenreFilter !== "all" && !genreOptions.some((entry) => entry.value === state.storeGenreFilter)) {
     state.storeGenreFilter = "all";
@@ -4105,6 +4191,12 @@ function renderStoreGrid() {
     return;
   }
   previousStoreGridRenderSignature = currentStoreRenderSignature;
+
+  const shouldRenderLoadingSkeleton = state.storeCatalogLoading === true && state.games.length === 0;
+  if (shouldRenderLoadingSkeleton) {
+    storeGrid.innerHTML = getStoreLoadingSkeletonMarkup();
+    return;
+  }
 
   const currentStoreAnimationSignature = `${state.storeFilter}|${state.search.trim().toLowerCase()}|${state.storeModeFilter}|${state.storeGenreFilter}|${games
     .map((game) => game.id)
@@ -4497,7 +4589,7 @@ function renderLibraryGrid() {
             <path d="M8.4 14.2H13.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path>
           </svg>
         </div>
-        <p class="library-empty-text">Sua biblioteca esta vazia. Clique em Add to Library ou Download Game.</p>
+        <p class="library-empty-text">Sua biblioteca esta vazia. Clique em Adicionar a Biblioteca ou Instalar.</p>
         <button class="library-empty-btn" type="button" data-go-store="true">Ir para Jogos</button>
       </div>
     `;
@@ -4580,6 +4672,16 @@ function renderLibraryGrid() {
 }
 
 function renderRailGames() {
+  const shouldRenderSkeleton = state.storeCatalogLoading === true && state.games.length === 0;
+  if (shouldRenderSkeleton) {
+    railGamesList.classList.add("is-skeleton-loading");
+    railGamesList.setAttribute("aria-busy", "true");
+    railGamesList.innerHTML = getRailLoadingSkeletonMarkup();
+    return;
+  }
+
+  railGamesList.classList.remove("is-skeleton-loading");
+  railGamesList.setAttribute("aria-busy", "false");
   const games = state.games.filter((game) => game.installed);
   if (games.length === 0) {
     railGamesList.innerHTML = "";
@@ -4817,29 +4919,31 @@ function renderDetailsActions(game) {
   detailsAddLibraryBtn.dataset.gameId = game.id;
   detailsAddLibraryBtn.classList.toggle("is-active", inLibrary);
   detailsAddLibraryBtn.classList.toggle("is-hidden", !shouldShowLibraryToggle);
-  setButtonLabel(detailsAddLibraryBtn, inLibrary ? "Remove from Library" : "Add to Library");
+  setButtonLabel(detailsAddLibraryBtn, inLibrary ? "Remover da Biblioteca" : "Adicionar a Biblioteca");
   detailsAddLibraryBtn.disabled = !shouldShowLibraryToggle || !canToggleLibrary;
 
-  if (detailsHeroUninstallBtn) {
-    const showHeroUninstall = game.installed || isGameUninstalling(game.id);
-    detailsHeroUninstallBtn.classList.toggle("is-hidden", !showHeroUninstall);
-    detailsHeroUninstallBtn.dataset.gameId = showHeroUninstall ? game.id : "";
-    detailsHeroUninstallBtn.disabled = isGameBusy(game.id) || isGameUninstalling(game.id);
-    setButtonLabel(detailsHeroUninstallBtn, isGameUninstalling(game.id) ? "Removendo..." : "Desinstalar");
+  if (detailsManageBtn && detailsManageMenu) {
+    const showManage = game.installed || isGameUninstalling(game.id);
+    const disableManage = isGameBusy(game.id) || isGameUninstalling(game.id);
+    detailsManageBtn.classList.toggle("is-hidden", !showManage);
+    detailsManageBtn.disabled = disableManage;
+    detailsManageBtn.dataset.gameId = showManage ? game.id : "";
+
+    const manageItems = detailsManageMenu.querySelectorAll("[data-details-manage-action]");
+    manageItems.forEach((item) => {
+      const action = String(item.getAttribute("data-details-manage-action") || "").trim();
+      item.setAttribute("data-game-id", game.id);
+      if (action === "open-folder" || action === "add-shortcut") {
+        item.toggleAttribute("disabled", !game.installed || isGameUninstalling(game.id));
+      } else if (action === "uninstall") {
+        item.toggleAttribute("disabled", isGameBusy(game.id) || isGameUninstalling(game.id));
+      }
+    });
+
+    if (!showManage || disableManage) {
+      setDetailsManageMenuOpen(false);
+    }
   }
-
-  const showPlay = game.installed && !isGameBusy(game.id) && !isGameUninstalling(game.id);
-  const playAction = showPlay ? (game.running ? "close" : "play") : "";
-  detailsPlayBtn.classList.toggle("is-hidden", !showPlay);
-  detailsPlayBtn.dataset.gameId = showPlay ? game.id : "";
-  detailsPlayBtn.dataset.action = playAction;
-  detailsPlayBtn.textContent = playAction === "close" ? "PARAR JOGO" : "PLAY GAME";
-
-  const showUninstall = game.installed || isGameUninstalling(game.id);
-  detailsUninstallBtn.classList.toggle("is-hidden", !showUninstall);
-  detailsUninstallBtn.disabled = isGameBusy(game.id);
-  detailsUninstallBtn.dataset.gameId = showUninstall ? game.id : "";
-  detailsUninstallBtn.textContent = isGameUninstalling(game.id) ? "REMOVENDO..." : "DESINSTALAR";
 
   detailsStatus.textContent = getDetailsStatusLabel(game);
 }
@@ -4853,7 +4957,9 @@ function renderDetails(game) {
   detailsHeroBackdrop.style.backgroundImage = `url('${escapeCssUrl(getBannerImage(game))}')`;
 
   detailsStatPlayTime.textContent = formatGameSizeStat(game);
-  detailsStatAchievement.textContent = formatReleaseDateStat(game);
+  if (detailsStatHours) {
+    detailsStatHours.textContent = formatPlayedHoursStat(game);
+  }
 
   const logoUrl = getLogoImage(game);
   if (logoUrl) {
@@ -4905,6 +5011,7 @@ function renderAll() {
 function openDetails(gameId) {
   const game = getGameById(gameId);
   if (!game) return;
+  setDetailsManageMenuOpen(false);
   state.selectedGameId = gameId;
 
   if (state.view !== "details") {
@@ -4930,6 +5037,14 @@ async function refreshGames(options = {}) {
   }
 
   refreshGamesInFlight = (async () => {
+    const renderedLoadingSkeleton = state.games.length === 0;
+    if (renderedLoadingSkeleton) {
+      state.storeCatalogLoading = true;
+      previousStoreGridRenderSignature = "";
+      syncStoreCatalogLoadingUi();
+      renderStoreGrid();
+    }
+
     const hasExplicitLightweight = Object.prototype.hasOwnProperty.call(options, "lightweight");
     const hasExplicitRunningState = Object.prototype.hasOwnProperty.call(options, "includeRunningState");
     const hasExplicitSteamStats = Object.prototype.hasOwnProperty.call(options, "includeSteamStats");
@@ -4955,6 +5070,8 @@ async function refreshGames(options = {}) {
     state.games = await window.launcherApi.getGames(requestPayload);
     syncLibraryWithInstalled();
     pruneRecentCompletedDownloads();
+    state.storeCatalogLoading = false;
+    syncStoreCatalogLoadingUi();
     renderAll();
 
     if (!selectedGameId) {
@@ -4973,9 +5090,20 @@ async function refreshGames(options = {}) {
       !isGameBusy(selectedGameId) &&
       !isGameUninstalling(selectedGameId)
     ) {
-      setStatus(`${selectedGame.name} nao foi encontrado no disco. Clique em Download Game para instalar novamente.`);
+      setStatus(`${selectedGame.name} nao foi encontrado no disco. Clique em Instalar para instalar novamente.`);
     }
   })()
+    .finally(() => {
+      if (state.storeCatalogLoading) {
+        state.storeCatalogLoading = false;
+      }
+      syncStoreCatalogLoadingUi();
+      if (state.games.length === 0) {
+        previousStoreGridRenderSignature = "";
+        renderStoreGrid();
+        renderRailGames();
+      }
+    })
     .catch((error) => {
       throw error;
     })
@@ -5132,7 +5260,7 @@ async function handleGameAction(gameId, action) {
         await refreshGames();
         const refreshedGame = getGameById(gameId);
         if (!refreshedGame?.installed) {
-          setStatus(`${game.name} nao foi encontrado. Clique em Download Game para instalar novamente.`);
+          setStatus(`${game.name} nao foi encontrado. Clique em Instalar para instalar novamente.`);
           notify("error", "Arquivo nao encontrado", `${game.name} nao foi encontrado no disco.`);
           return;
         }
@@ -5173,6 +5301,22 @@ async function handleGameAction(gameId, action) {
       const openedPath = await window.launcherApi.openGameInstallFolder(gameId);
       setStatus(`Pasta do jogo aberta: ${shortPath(openedPath || game.installDir || game.name)}.`);
       notify("info", "Pasta aberta", `Abrindo arquivos instalados de ${game.name}.`);
+      return;
+    }
+
+    if (action === "add-shortcut") {
+      if (typeof window.launcherApi.createGameShortcut !== "function") {
+        throw new Error("Criacao de atalho nao esta disponivel nesta versao do launcher.");
+      }
+
+      const result = await window.launcherApi.createGameShortcut(gameId);
+      const shortcutPath = String(result?.shortcutPath || "").trim();
+      if (shortcutPath) {
+        setStatus(`Atalho criado: ${shortPath(shortcutPath)}.`);
+      } else {
+        setStatus(`Atalho de ${game.name} criado com sucesso.`);
+      }
+      notify("success", "Atalho criado", `Atalho de ${game.name} adicionado na area de trabalho.`);
       return;
     }
 
@@ -5562,6 +5706,9 @@ function installEventBindings() {
       if (state.accountMenuOpen) {
         setAccountMenuOpen(false);
       }
+      if (state.detailsManageMenuOpen) {
+        setDetailsManageMenuOpen(false);
+      }
       if (state.storeAdvancedFiltersOpen) {
         state.storeAdvancedFiltersOpen = false;
         renderStoreGrid();
@@ -5578,6 +5725,13 @@ function installEventBindings() {
     if (state.storeAdvancedFiltersOpen && !target.closest("[data-store-advanced-filter-wrap]")) {
       state.storeAdvancedFiltersOpen = false;
       renderStoreGrid();
+    }
+
+    const clickedInsideManageMenu =
+      (detailsManageBtn && detailsManageBtn.contains(target)) ||
+      (detailsManageMenu && detailsManageMenu.contains(target));
+    if (state.detailsManageMenuOpen && !clickedInsideManageMenu) {
+      setDetailsManageMenuOpen(false);
     }
 
     if (state.notificationsOpen) {
@@ -5598,6 +5752,7 @@ function installEventBindings() {
   });
 
   storeFilterRow.addEventListener("click", (event) => {
+    if (state.storeCatalogLoading) return;
     const filterBtn = event.target.closest("[data-filter]");
     if (!filterBtn) return;
 
@@ -5944,29 +6099,43 @@ function installEventBindings() {
     if (action === "install" || action === "play") {
       fireConfettiFromElement(detailsActionBtn, action === "play");
     }
+    setDetailsManageMenuOpen(false);
     await handleGameAction(gameId, action);
   });
 
-  if (detailsHeroUninstallBtn) {
-    detailsHeroUninstallBtn.addEventListener("click", async () => {
-      const gameId = detailsHeroUninstallBtn.dataset.gameId || "";
-      if (!gameId) return;
-      await handleGameAction(gameId, "uninstall");
+  if (detailsManageBtn) {
+    detailsManageBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (detailsManageBtn.disabled || detailsManageBtn.classList.contains("is-hidden")) {
+        setDetailsManageMenuOpen(false);
+        return;
+      }
+      setDetailsManageMenuOpen(!state.detailsManageMenuOpen);
     });
   }
 
-  detailsPlayBtn.addEventListener("click", async () => {
-    const gameId = detailsPlayBtn.dataset.gameId || "";
-    const action = detailsPlayBtn.dataset.action || "play";
-    if (!gameId) return;
-    await handleGameAction(gameId, action);
-  });
+  if (detailsManageMenu) {
+    detailsManageMenu.addEventListener("click", async (event) => {
+      const actionButton = event.target.closest("[data-details-manage-action]");
+      if (!(actionButton instanceof HTMLElement)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (actionButton.hasAttribute("disabled")) {
+        return;
+      }
 
-  detailsUninstallBtn.addEventListener("click", async () => {
-    const gameId = detailsUninstallBtn.dataset.gameId || "";
-    if (!gameId) return;
-    await handleGameAction(gameId, "uninstall");
-  });
+      const action = String(actionButton.dataset.detailsManageAction || "").trim();
+      const gameId = String(actionButton.dataset.gameId || detailsManageBtn?.dataset.gameId || "").trim();
+      setDetailsManageMenuOpen(false);
+      if (!action || !gameId) {
+        return;
+      }
+      await handleGameAction(gameId, action);
+    });
+  }
 
   installPathModal.addEventListener("click", (event) => {
     const closeTarget = event.target.closest("[data-close-install-path='true']");
@@ -6090,6 +6259,11 @@ function installEventBindings() {
     if (event.key === "Escape" && state.storeAdvancedFiltersOpen) {
       state.storeAdvancedFiltersOpen = false;
       renderStoreGrid();
+      return;
+    }
+
+    if (event.key === "Escape" && state.detailsManageMenuOpen) {
+      setDetailsManageMenuOpen(false);
       return;
     }
 

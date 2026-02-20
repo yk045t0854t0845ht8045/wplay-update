@@ -41,6 +41,8 @@ Execute `docs/SUPABASE_SQL_CATALOGO_JOGOS.sql` (a versao atual ja inclui `steam_
 Para notificacao social de amigos Steam iniciando jogo pelo launcher, execute tambem:
 
 - `docs/SUPABASE_SQL_AMIZADE_STEAM.sql`
+- Para persistencia de horas jogadas por usuario/jogo (mantem historico mesmo apos desinstalar):
+  - `docs/SUPABASE_SQL_HORAS_JOGADAS.sql`
 
 ## 5) Testar
 

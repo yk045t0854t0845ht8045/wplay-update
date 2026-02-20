@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   closeGame: (gameId) => ipcRenderer.invoke("launcher:close-game", gameId),
   openDownloadsFolder: () => ipcRenderer.invoke("launcher:open-downloads-folder"),
   openGameInstallFolder: (gameId) => ipcRenderer.invoke("launcher:open-game-install-folder", gameId),
+  createGameShortcut: (gameId) => ipcRenderer.invoke("launcher:create-game-shortcut", gameId),
   openExternalUrl: (urlValue) => ipcRenderer.invoke("launcher:open-external-url", urlValue),
   openSteamClient: () => ipcRenderer.invoke("launcher:open-steam-client"),
   showGameStartedToast: (payload) => ipcRenderer.invoke("launcher:show-game-start-toast", payload),

@@ -91,6 +91,7 @@ const INSTALL_ROOT_NAME = "wyzer_games";
 const TEMP_DIR_NAME = "_wyzer_temp";
 const MANIFEST_FILE_NAME = ".wyzer_manifest.json";
 const INSTALL_SESSION_STATE_FILE_NAME = "launcher.active-installs.json";
+const PLAYTIME_STATE_FILE_NAME = "launcher.playtime.json";
 const CATALOG_SIZE_CACHE_FILE_NAME = "launcher.catalog-size-cache.json";
 const RUNTIME_CONFIG_FILE_NAME = "launcher.runtime.json";
 const AUTH_CONFIG_FILE_NAME = "auth.json";
@@ -150,6 +151,8 @@ const NOTIFICATIONS_DEFAULT_SUPABASE_SCHEMA = "public";
 const NOTIFICATIONS_DEFAULT_SUPABASE_TABLE = "launcher_notifications";
 const SOCIAL_ACTIVITY_DEFAULT_SUPABASE_SCHEMA = "public";
 const SOCIAL_ACTIVITY_DEFAULT_SUPABASE_TABLE = "launcher_friend_game_activity";
+const PLAYTIME_DEFAULT_SUPABASE_SCHEMA = "public";
+const PLAYTIME_DEFAULT_SUPABASE_TABLE = "launcher_game_playtime";
 const NOTIFICATIONS_HISTORY_LIMIT = 15;
 const SOCIAL_ACTIVITY_FETCH_LIMIT = 60;
 const SOCIAL_ACTIVITY_EVENT_TTL_HOURS = 24;
@@ -177,6 +180,12 @@ const STEAM_FRIENDS_EMPTY_RETRY_MS = 90 * 1000;
 const STEAM_OWNED_GAMES_CACHE_TTL_MS = 5 * 60 * 1000;
 const STEAM_ACHIEVEMENTS_CACHE_TTL_MS = 15 * 60 * 1000;
 const STEAM_EMPTY_CACHE_RETRY_MS = 45 * 1000;
+const PLAYTIME_REMOTE_CACHE_TTL_MS = 3 * 60 * 1000;
+const PLAYTIME_STATE_MAX_RECORDS = 12000;
+const PLAYTIME_SYNC_BATCH_LIMIT = 80;
+const PLAYTIME_SYNC_DEBOUNCE_MS = 2400;
+const PLAYTIME_SESSION_MIN_SECONDS = 5;
+const PLAYTIME_SESSION_RECOVERY_GAP_MS = 2 * 60 * 1000;
 const STEAM_CLIENT_PROCESS_NAMES = new Set(["steam.exe", "steam"]);
 const GAME_START_TOAST_WIDTH = 398;
 const GAME_START_TOAST_HEIGHT = 88;
@@ -351,6 +360,19 @@ const catalogSizeSyncStateByGameId = new Map();
 let catalogSizeCacheLoaded = false;
 let catalogSizeCachePersistQueue = Promise.resolve();
 let catalogSizeCachePersistTimer = null;
+let playtimeStateLoaded = false;
+let playtimeStatePersistQueue = Promise.resolve();
+let playtimeStatePersistTimer = null;
+let playtimeSyncTimer = null;
+let playtimeSyncInFlight = null;
+const playtimeRecordsByUserGameKey = new Map();
+const playtimeActiveSessionsByUserGameKey = new Map();
+const playtimeRemoteCache = {
+  userId: "",
+  fetchedAt: 0,
+  rowsByGameId: new Map(),
+  inFlight: null
+};
 
 function isElectronBinaryPath(executablePath = process.execPath) {
   const execName = path.basename(String(executablePath || "")).trim().toLowerCase();
@@ -555,6 +577,465 @@ function getInstallSessionStateFilePath() {
     return "";
   }
   return path.join(baseDir, INSTALL_SESSION_STATE_FILE_NAME);
+}
+
+function getPlaytimeStateFilePath() {
+  const baseDir = resolveRuntimeStateDirectory();
+  if (!baseDir) {
+    return "";
+  }
+  return path.join(baseDir, PLAYTIME_STATE_FILE_NAME);
+}
+
+function normalizePlaytimeUserId(value) {
+  return String(value || "").trim();
+}
+
+function normalizePlaytimeGameId(value) {
+  return String(value || "").trim();
+}
+
+function buildPlaytimeRecordKey(userId, gameId) {
+  const safeUserId = normalizePlaytimeUserId(userId);
+  const safeGameId = normalizePlaytimeGameId(gameId);
+  if (!safeUserId || !safeGameId) {
+    return "";
+  }
+  return `${safeUserId}:${safeGameId}`;
+}
+
+function normalizeIsoTimestamp(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) {
+    return "";
+  }
+  return new Date(parsed).toISOString();
+}
+
+function toValidTimestampMs(value) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return Math.floor(numeric);
+  }
+  const parsed = Date.parse(String(value || "").trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return Math.floor(parsed);
+}
+
+function chooseEarlierIso(left, right) {
+  const leftIso = normalizeIsoTimestamp(left);
+  const rightIso = normalizeIsoTimestamp(right);
+  if (!leftIso) return rightIso;
+  if (!rightIso) return leftIso;
+  return Date.parse(leftIso) <= Date.parse(rightIso) ? leftIso : rightIso;
+}
+
+function chooseLaterIso(left, right) {
+  const leftIso = normalizeIsoTimestamp(left);
+  const rightIso = normalizeIsoTimestamp(right);
+  if (!leftIso) return rightIso;
+  if (!rightIso) return leftIso;
+  return Date.parse(leftIso) >= Date.parse(rightIso) ? leftIso : rightIso;
+}
+
+function normalizePlaytimeSeconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(numeric));
+}
+
+function normalizePlaytimeRecord(rawRecord) {
+  if (!rawRecord || typeof rawRecord !== "object") {
+    return null;
+  }
+
+  const userId = normalizePlaytimeUserId(rawRecord.userId || rawRecord.user_id);
+  const gameId = normalizePlaytimeGameId(rawRecord.gameId || rawRecord.game_id);
+  if (!userId || !gameId) {
+    return null;
+  }
+
+  const updatedAt =
+    normalizeIsoTimestamp(rawRecord.updatedAt || rawRecord.updated_at) || new Date().toISOString();
+  return {
+    userId,
+    gameId,
+    gameName: String(rawRecord.gameName || rawRecord.game_name || "").trim(),
+    totalSeconds: normalizePlaytimeSeconds(rawRecord.totalSeconds ?? rawRecord.total_seconds),
+    firstPlayedAt: normalizeIsoTimestamp(rawRecord.firstPlayedAt || rawRecord.first_played_at),
+    lastPlayedAt: normalizeIsoTimestamp(rawRecord.lastPlayedAt || rawRecord.last_played_at),
+    updatedAt,
+    dirty: rawRecord.dirty === true
+  };
+}
+
+function normalizePlaytimeActiveSession(rawSession) {
+  if (!rawSession || typeof rawSession !== "object") {
+    return null;
+  }
+
+  const userId = normalizePlaytimeUserId(rawSession.userId || rawSession.user_id);
+  const gameId = normalizePlaytimeGameId(rawSession.gameId || rawSession.game_id);
+  if (!userId || !gameId) {
+    return null;
+  }
+
+  const startedAtMs = toValidTimestampMs(rawSession.startedAtMs || rawSession.started_at_ms || rawSession.startedAt);
+  const lastSeenAtMs = toValidTimestampMs(rawSession.lastSeenAtMs || rawSession.last_seen_at_ms || rawSession.lastSeenAt);
+  if (startedAtMs <= 0) {
+    return null;
+  }
+
+  return {
+    userId,
+    gameId,
+    gameName: String(rawSession.gameName || rawSession.game_name || "").trim(),
+    startedAtMs,
+    lastSeenAtMs: Math.max(startedAtMs, lastSeenAtMs || startedAtMs)
+  };
+}
+
+function readPlaytimeStateSync() {
+  const filePath = getPlaytimeStateFilePath();
+  if (!filePath) {
+    return { records: [], activeSessions: [] };
+  }
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { records: [], activeSessions: [] };
+    }
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const recordsRaw = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.records)
+        ? parsed.records
+        : Array.isArray(parsed?.entries)
+          ? parsed.entries
+          : [];
+    const sessionsRaw = Array.isArray(parsed?.activeSessions)
+      ? parsed.activeSessions
+      : Array.isArray(parsed?.sessions)
+        ? parsed.sessions
+        : [];
+
+    return {
+      records: recordsRaw.map((record) => normalizePlaytimeRecord(record)).filter(Boolean),
+      activeSessions: sessionsRaw.map((session) => normalizePlaytimeActiveSession(session)).filter(Boolean)
+    };
+  } catch (error) {
+    appendStartupLog(`[PLAYTIME_STATE_READ_ERROR] ${formatStartupErrorForLog(error)}`);
+    return { records: [], activeSessions: [] };
+  }
+}
+
+function getPlaytimeStateSnapshotForPersistence() {
+  const records = [...playtimeRecordsByUserGameKey.values()]
+    .map((record) => normalizePlaytimeRecord(record))
+    .filter(Boolean)
+    .sort((left, right) => Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""))
+    .slice(0, PLAYTIME_STATE_MAX_RECORDS);
+
+  const activeSessions = [...playtimeActiveSessionsByUserGameKey.values()]
+    .map((session) => normalizePlaytimeActiveSession(session))
+    .filter(Boolean)
+    .sort((left, right) => Number(right.lastSeenAtMs || 0) - Number(left.lastSeenAtMs || 0))
+    .slice(0, PLAYTIME_STATE_MAX_RECORDS);
+
+  return {
+    records,
+    activeSessions
+  };
+}
+
+async function writePlaytimeStateToDisk() {
+  const filePath = getPlaytimeStateFilePath();
+  if (!filePath) {
+    return;
+  }
+
+  const snapshot = getPlaytimeStateSnapshotForPersistence();
+  if (snapshot.records.length === 0 && snapshot.activeSessions.length === 0) {
+    await fsp.rm(filePath, { force: true }).catch(() => {});
+    return;
+  }
+
+  try {
+    await fsp.mkdir(path.dirname(filePath), { recursive: true });
+    await fsp.writeFile(
+      filePath,
+      JSON.stringify(
+        {
+          updatedAt: new Date().toISOString(),
+          records: snapshot.records,
+          activeSessions: snapshot.activeSessions
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    appendStartupLog(`[PLAYTIME_STATE_WRITE_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function flushPlaytimeStateSync() {
+  const filePath = getPlaytimeStateFilePath();
+  if (!filePath) {
+    return;
+  }
+
+  const snapshot = getPlaytimeStateSnapshotForPersistence();
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    if (snapshot.records.length === 0 && snapshot.activeSessions.length === 0) {
+      fs.rmSync(filePath, { force: true });
+      return;
+    }
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          updatedAt: new Date().toISOString(),
+          records: snapshot.records,
+          activeSessions: snapshot.activeSessions
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    appendStartupLog(`[PLAYTIME_STATE_FLUSH_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function queuePersistPlaytimeState() {
+  playtimeStatePersistQueue = playtimeStatePersistQueue
+    .catch(() => {})
+    .then(async () => {
+      await writePlaytimeStateToDisk();
+    });
+  return playtimeStatePersistQueue;
+}
+
+function schedulePersistPlaytimeState() {
+  if (playtimeStatePersistTimer) {
+    return;
+  }
+
+  playtimeStatePersistTimer = setTimeout(() => {
+    playtimeStatePersistTimer = null;
+    void queuePersistPlaytimeState();
+  }, 420);
+}
+
+function ensurePlaytimeStateLoadedSync() {
+  if (playtimeStateLoaded) {
+    return;
+  }
+  playtimeStateLoaded = true;
+
+  const persisted = readPlaytimeStateSync();
+  for (const record of persisted.records) {
+    const key = buildPlaytimeRecordKey(record.userId, record.gameId);
+    if (!key) continue;
+    const current = playtimeRecordsByUserGameKey.get(key);
+    if (!current) {
+      playtimeRecordsByUserGameKey.set(key, {
+        ...record,
+        dirty: false
+      });
+      continue;
+    }
+
+    const nextTotalSeconds = Math.max(normalizePlaytimeSeconds(current.totalSeconds), normalizePlaytimeSeconds(record.totalSeconds));
+    playtimeRecordsByUserGameKey.set(key, {
+      ...current,
+      userId: record.userId,
+      gameId: record.gameId,
+      gameName: String(record.gameName || current.gameName || "").trim(),
+      totalSeconds: nextTotalSeconds,
+      firstPlayedAt: chooseEarlierIso(current.firstPlayedAt, record.firstPlayedAt),
+      lastPlayedAt: chooseLaterIso(current.lastPlayedAt, record.lastPlayedAt),
+      updatedAt: chooseLaterIso(current.updatedAt, record.updatedAt) || new Date().toISOString(),
+      dirty: current.dirty === true
+    });
+  }
+
+  for (const session of persisted.activeSessions) {
+    const key = buildPlaytimeRecordKey(session.userId, session.gameId);
+    if (!key) continue;
+    const current = playtimeActiveSessionsByUserGameKey.get(key);
+    if (!current || Number(current.lastSeenAtMs || 0) <= Number(session.lastSeenAtMs || 0)) {
+      playtimeActiveSessionsByUserGameKey.set(key, session);
+    }
+  }
+}
+
+function getPlaytimeRecordForUserGame(userId, gameId) {
+  ensurePlaytimeStateLoadedSync();
+  const key = buildPlaytimeRecordKey(userId, gameId);
+  if (!key) {
+    return null;
+  }
+  return playtimeRecordsByUserGameKey.get(key) || null;
+}
+
+function upsertPlaytimeRecord(userId, gameId, gameName = "") {
+  ensurePlaytimeStateLoadedSync();
+  const key = buildPlaytimeRecordKey(userId, gameId);
+  if (!key) {
+    return null;
+  }
+
+  const current = playtimeRecordsByUserGameKey.get(key);
+  const nowIso = new Date().toISOString();
+  const next = current
+    ? {
+        ...current,
+        gameName: String(gameName || current.gameName || "").trim(),
+        totalSeconds: normalizePlaytimeSeconds(current.totalSeconds),
+        updatedAt: chooseLaterIso(current.updatedAt, nowIso) || nowIso
+      }
+    : {
+        userId: normalizePlaytimeUserId(userId),
+        gameId: normalizePlaytimeGameId(gameId),
+        gameName: String(gameName || "").trim(),
+        totalSeconds: 0,
+        firstPlayedAt: "",
+        lastPlayedAt: "",
+        updatedAt: nowIso,
+        dirty: false
+      };
+
+  playtimeRecordsByUserGameKey.set(key, next);
+  return next;
+}
+
+function getLivePlaytimeSecondsForUserGame(userId, gameId) {
+  const key = buildPlaytimeRecordKey(userId, gameId);
+  if (!key) {
+    return 0;
+  }
+
+  const record = playtimeRecordsByUserGameKey.get(key);
+  const baseSeconds = normalizePlaytimeSeconds(record?.totalSeconds);
+  const activeSession = playtimeActiveSessionsByUserGameKey.get(key);
+  if (!activeSession) {
+    return baseSeconds;
+  }
+
+  const nowMs = Date.now();
+  const safeStartMs = Math.max(0, Number(activeSession.startedAtMs || 0));
+  const safeSeenMs = Math.max(safeStartMs, Number(activeSession.lastSeenAtMs || 0), nowMs);
+  const activeSeconds = Math.max(0, Math.floor((safeSeenMs - safeStartMs) / 1000));
+  return baseSeconds + activeSeconds;
+}
+
+function startOrRefreshPlaytimeSession(userId, gameId, gameName = "", atMs = Date.now()) {
+  ensurePlaytimeStateLoadedSync();
+  const key = buildPlaytimeRecordKey(userId, gameId);
+  if (!key) {
+    return null;
+  }
+
+  const nowMs = Math.max(1, toValidTimestampMs(atMs) || Date.now());
+  const existing = playtimeActiveSessionsByUserGameKey.get(key);
+  if (!existing) {
+    const created = {
+      userId: normalizePlaytimeUserId(userId),
+      gameId: normalizePlaytimeGameId(gameId),
+      gameName: String(gameName || "").trim(),
+      startedAtMs: nowMs,
+      lastSeenAtMs: nowMs
+    };
+    playtimeActiveSessionsByUserGameKey.set(key, created);
+    schedulePersistPlaytimeState();
+    return created;
+  }
+
+  const updated = {
+    ...existing,
+    gameName: String(gameName || existing.gameName || "").trim(),
+    lastSeenAtMs: Math.max(Number(existing.lastSeenAtMs || 0), nowMs)
+  };
+  playtimeActiveSessionsByUserGameKey.set(key, updated);
+  schedulePersistPlaytimeState();
+  return updated;
+}
+
+function finalizePlaytimeSession(userId, gameId, endedAtMs = Date.now()) {
+  ensurePlaytimeStateLoadedSync();
+  const key = buildPlaytimeRecordKey(userId, gameId);
+  if (!key) {
+    return null;
+  }
+
+  const session = playtimeActiveSessionsByUserGameKey.get(key);
+  if (!session) {
+    return null;
+  }
+
+  const nowMs = Math.max(1, toValidTimestampMs(endedAtMs) || Date.now());
+  const startedAtMs = Math.max(1, Number(session.startedAtMs || nowMs));
+  const lastSeenAtMs = Math.max(startedAtMs, Number(session.lastSeenAtMs || startedAtMs));
+  const useSeenCheckpoint = nowMs - lastSeenAtMs > PLAYTIME_SESSION_RECOVERY_GAP_MS;
+  const effectiveEndMs = Math.max(startedAtMs, useSeenCheckpoint ? lastSeenAtMs : nowMs);
+  const elapsedSeconds = Math.max(0, Math.floor((effectiveEndMs - startedAtMs) / 1000));
+  playtimeActiveSessionsByUserGameKey.delete(key);
+
+  let changedRecord = null;
+  if (elapsedSeconds >= PLAYTIME_SESSION_MIN_SECONDS) {
+    const record = upsertPlaytimeRecord(userId, gameId, session.gameName);
+    if (record) {
+      const effectiveEndIso = new Date(effectiveEndMs).toISOString();
+      record.totalSeconds = normalizePlaytimeSeconds(record.totalSeconds) + elapsedSeconds;
+      record.firstPlayedAt = chooseEarlierIso(record.firstPlayedAt, new Date(startedAtMs).toISOString());
+      record.lastPlayedAt = chooseLaterIso(record.lastPlayedAt, effectiveEndIso) || effectiveEndIso;
+      record.updatedAt = new Date().toISOString();
+      record.dirty = true;
+      playtimeRecordsByUserGameKey.set(key, record);
+      changedRecord = record;
+      scheduleSyncDirtyPlaytimeRecords();
+    }
+  }
+
+  schedulePersistPlaytimeState();
+  return {
+    elapsedSeconds,
+    effectiveEndMs,
+    record: changedRecord
+  };
+}
+
+function finalizeAllPlaytimeSessionsForUser(userId, endedAtMs = Date.now()) {
+  ensurePlaytimeStateLoadedSync();
+  const safeUserId = normalizePlaytimeUserId(userId);
+  if (!safeUserId) {
+    return;
+  }
+
+  const prefix = `${safeUserId}:`;
+  const keys = [...playtimeActiveSessionsByUserGameKey.keys()].filter((key) => key.startsWith(prefix));
+  for (const key of keys) {
+    const [, gameId = ""] = key.split(":");
+    if (!gameId) {
+      playtimeActiveSessionsByUserGameKey.delete(key);
+      continue;
+    }
+    finalizePlaytimeSession(safeUserId, gameId, endedAtMs);
+  }
 }
 
 function getCatalogSizeCachePath() {
@@ -3363,6 +3844,7 @@ function clearSteamUserDataCache() {
   steamUserDataCache.ownedGamesInFlight = null;
   steamUserDataCache.achievementsByAppId = new Map();
   steamUserDataCache.achievementsInFlight = new Map();
+  resetPlaytimeRemoteCache();
 }
 
 function parsePositiveInteger(value) {
@@ -4781,6 +5263,12 @@ async function loginWithSteam() {
 }
 
 async function logoutAuthSession() {
+  const steamSession = getSteamSessionSnapshot();
+  const userId = normalizeSteamId(steamSession?.steamId || steamSession?.user?.id);
+  if (userId) {
+    finalizeAllPlaytimeSessionsForUser(userId, Date.now());
+    await syncDirtyPlaytimeRecordsToSupabase(true).catch(() => {});
+  }
   await clearPersistedAuthSession();
   clearSteamUserDataCache();
   resetSocialActivityBackgroundTrackingState();
@@ -6072,6 +6560,403 @@ function resolveSocialActivityStorageConfig() {
       SOCIAL_ACTIVITY_DEFAULT_SUPABASE_TABLE
     )
   };
+}
+
+function resolvePlaytimeStorageConfig() {
+  const runtimeConfig = readRuntimeConfigSync();
+  const runtimePlaytime =
+    runtimeConfig?.playtime && typeof runtimeConfig.playtime === "object" ? runtimeConfig.playtime : {};
+
+  return {
+    schema: normalizeCatalogIdentifier(
+      process.env.WPLAY_PLAYTIME_SUPABASE_SCHEMA || runtimePlaytime.supabaseSchema || runtimePlaytime.schema,
+      PLAYTIME_DEFAULT_SUPABASE_SCHEMA
+    ),
+    table: normalizeCatalogIdentifier(
+      process.env.WPLAY_PLAYTIME_SUPABASE_TABLE || runtimePlaytime.supabaseTable || runtimePlaytime.table,
+      PLAYTIME_DEFAULT_SUPABASE_TABLE
+    )
+  };
+}
+
+function resolveSupabasePlaytimeContext() {
+  const authConfig = resolveAuthConfig();
+  if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
+    throw new Error("[PLAYTIME_SUPABASE_AUTH] Supabase nao configurado para horas jogadas.");
+  }
+
+  const steamSession = getSteamSessionSnapshot();
+  const userId = normalizeSteamId(steamSession?.steamId || steamSession?.user?.id);
+  if (!userId) {
+    throw new Error("[PLAYTIME_AUTH_REQUIRED] Faca login para sincronizar horas jogadas.");
+  }
+
+  const storageConfig = resolvePlaytimeStorageConfig();
+  return {
+    authConfig,
+    schema: storageConfig.schema,
+    table: storageConfig.table,
+    userId
+  };
+}
+
+function tryResolveSupabasePlaytimeContext() {
+  try {
+    return resolveSupabasePlaytimeContext();
+  } catch (_error) {
+    return null;
+  }
+}
+
+function getPlaytimeSupabaseEndpoint(context) {
+  return `${context.authConfig.supabaseUrl}/rest/v1/${context.table}`;
+}
+
+function mapSupabasePlaytimeRow(row, fallbackUserId = "") {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+  const userId = normalizeSteamId(row.user_id || row.userId || fallbackUserId);
+  const gameId = normalizePlaytimeGameId(row.game_id || row.gameId);
+  if (!userId || !gameId) {
+    return null;
+  }
+
+  return normalizePlaytimeRecord({
+    userId,
+    gameId,
+    gameName: row.game_name || row.gameName || "",
+    totalSeconds: row.total_seconds ?? row.totalSeconds,
+    firstPlayedAt: row.first_played_at || row.firstPlayedAt || "",
+    lastPlayedAt: row.last_played_at || row.lastPlayedAt || "",
+    updatedAt: row.updated_at || row.updatedAt || ""
+  });
+}
+
+function resetPlaytimeRemoteCache() {
+  playtimeRemoteCache.userId = "";
+  playtimeRemoteCache.fetchedAt = 0;
+  playtimeRemoteCache.rowsByGameId = new Map();
+  playtimeRemoteCache.inFlight = null;
+}
+
+async function fetchPlaytimeRowsFromSupabase(context, limit = 2200) {
+  const endpoint = getPlaytimeSupabaseEndpoint(context);
+  const response = await axios.get(endpoint, {
+    headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+    params: {
+      select: "user_id,game_id,game_name,total_seconds,first_played_at,last_played_at,updated_at",
+      user_id: `eq.${context.userId}`,
+      order: "updated_at.desc",
+      limit: Math.max(1, Math.min(5000, Number(limit) || 2200))
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(`[PLAYTIME_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`);
+  }
+  if (response.status >= 400) {
+    throw new Error(
+      `[PLAYTIME_HTTP_${response.status}] Falha ao carregar horas jogadas de ${context.schema}.${context.table}.`
+    );
+  }
+
+  const rows = Array.isArray(response.data) ? response.data : [];
+  return rows.map((row) => mapSupabasePlaytimeRow(row, context.userId)).filter(Boolean);
+}
+
+function mergeRemotePlaytimeRowsIntoLocalState(rows = []) {
+  ensurePlaytimeStateLoadedSync();
+  let changed = false;
+
+  for (const row of rows) {
+    const normalized = normalizePlaytimeRecord(row);
+    if (!normalized) {
+      continue;
+    }
+    const key = buildPlaytimeRecordKey(normalized.userId, normalized.gameId);
+    if (!key) {
+      continue;
+    }
+
+    const current = playtimeRecordsByUserGameKey.get(key);
+    if (!current) {
+      playtimeRecordsByUserGameKey.set(key, {
+        ...normalized,
+        dirty: false
+      });
+      changed = true;
+      continue;
+    }
+
+    const localTotalSeconds = normalizePlaytimeSeconds(current.totalSeconds);
+    const remoteTotalSeconds = normalizePlaytimeSeconds(normalized.totalSeconds);
+    const mergedTotalSeconds = Math.max(localTotalSeconds, remoteTotalSeconds);
+    const localAhead = localTotalSeconds > remoteTotalSeconds;
+    const next = {
+      ...current,
+      userId: normalized.userId,
+      gameId: normalized.gameId,
+      gameName: String(current.gameName || normalized.gameName || "").trim(),
+      totalSeconds: mergedTotalSeconds,
+      firstPlayedAt: chooseEarlierIso(current.firstPlayedAt, normalized.firstPlayedAt),
+      lastPlayedAt: chooseLaterIso(current.lastPlayedAt, normalized.lastPlayedAt),
+      updatedAt: chooseLaterIso(current.updatedAt, normalized.updatedAt) || new Date().toISOString(),
+      dirty: current.dirty === true || localAhead
+    };
+
+    const hasChanged =
+      normalizePlaytimeSeconds(current.totalSeconds) !== next.totalSeconds ||
+      String(current.gameName || "") !== String(next.gameName || "") ||
+      String(current.firstPlayedAt || "") !== String(next.firstPlayedAt || "") ||
+      String(current.lastPlayedAt || "") !== String(next.lastPlayedAt || "") ||
+      String(current.updatedAt || "") !== String(next.updatedAt || "") ||
+      Boolean(current.dirty) !== Boolean(next.dirty);
+    if (hasChanged) {
+      playtimeRecordsByUserGameKey.set(key, next);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    schedulePersistPlaytimeState();
+  }
+  return changed;
+}
+
+async function ensurePlaytimeRemoteSnapshotLoaded(userId, force = false) {
+  const safeUserId = normalizeSteamId(userId);
+  if (!safeUserId) {
+    return false;
+  }
+  ensurePlaytimeStateLoadedSync();
+
+  const context = tryResolveSupabasePlaytimeContext();
+  if (!context || context.userId !== safeUserId) {
+    return false;
+  }
+
+  if (playtimeRemoteCache.userId && playtimeRemoteCache.userId !== safeUserId) {
+    resetPlaytimeRemoteCache();
+  }
+
+  const cacheAge = Date.now() - Number(playtimeRemoteCache.fetchedAt || 0);
+  const hasFreshCache =
+    playtimeRemoteCache.userId === safeUserId &&
+    playtimeRemoteCache.rowsByGameId instanceof Map &&
+    cacheAge >= 0 &&
+    cacheAge < PLAYTIME_REMOTE_CACHE_TTL_MS;
+  if (!force && hasFreshCache) {
+    return false;
+  }
+
+  if (playtimeRemoteCache.inFlight) {
+    return playtimeRemoteCache.inFlight;
+  }
+
+  playtimeRemoteCache.inFlight = fetchPlaytimeRowsFromSupabase(context)
+    .then((rows) => {
+      const nextMap = new Map();
+      for (const row of rows) {
+        const normalized = normalizePlaytimeRecord(row);
+        if (!normalized) continue;
+        nextMap.set(normalized.gameId, normalized);
+      }
+
+      playtimeRemoteCache.userId = safeUserId;
+      playtimeRemoteCache.rowsByGameId = nextMap;
+      playtimeRemoteCache.fetchedAt = Date.now();
+      mergeRemotePlaytimeRowsIntoLocalState(rows);
+      return true;
+    })
+    .catch((error) => {
+      const message = String(error?.message || "");
+      if (!message.includes("PLAYTIME_TABLE_NOT_FOUND")) {
+        appendStartupLog(`[PLAYTIME_REMOTE_FETCH_ERROR] ${formatStartupErrorForLog(error)}`);
+      }
+      return false;
+    })
+    .finally(() => {
+      playtimeRemoteCache.inFlight = null;
+    });
+
+  return playtimeRemoteCache.inFlight;
+}
+
+async function upsertPlaytimeRecordViaRpc(context, record) {
+  const endpoint = `${context.authConfig.supabaseUrl}/rest/v1/rpc/bump_launcher_game_playtime`;
+  const response = await axios.post(
+    endpoint,
+    {
+      p_user_id: context.userId,
+      p_game_id: record.gameId,
+      p_game_name: String(record.gameName || "").trim(),
+      p_total_seconds: normalizePlaytimeSeconds(record.totalSeconds),
+      p_last_played_at: chooseLaterIso(record.lastPlayedAt, new Date().toISOString()) || new Date().toISOString()
+    },
+    {
+      headers: buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+      timeout: 20_000,
+      validateStatus: (status) => status >= 200 && status < 500
+    }
+  );
+
+  if (response.status === 404) {
+    return { ok: false, missingRpc: true };
+  }
+  if (response.status >= 400) {
+    throw new Error(`[PLAYTIME_RPC_HTTP_${response.status}] Falha ao persistir horas jogadas via RPC.`);
+  }
+
+  return { ok: true, missingRpc: false };
+}
+
+async function upsertPlaytimeRecordDirect(context, record) {
+  const endpoint = getPlaytimeSupabaseEndpoint(context);
+  const cachedRemote = playtimeRemoteCache.rowsByGameId.get(record.gameId);
+  const totalSeconds = Math.max(
+    normalizePlaytimeSeconds(record.totalSeconds),
+    normalizePlaytimeSeconds(cachedRemote?.totalSeconds)
+  );
+  const payload = {
+    user_id: context.userId,
+    game_id: record.gameId,
+    game_name: String(record.gameName || "").trim(),
+    total_seconds: totalSeconds,
+    first_played_at: normalizeIsoTimestamp(record.firstPlayedAt) || null,
+    last_played_at: chooseLaterIso(record.lastPlayedAt, new Date().toISOString()) || new Date().toISOString()
+  };
+
+  const response = await axios.post(endpoint, payload, {
+    headers: {
+      ...buildCatalogSupabaseHeaders(context.authConfig, context.schema),
+      Prefer: "resolution=merge-duplicates,return=representation"
+    },
+    params: {
+      on_conflict: "user_id,game_id"
+    },
+    timeout: 20_000,
+    validateStatus: (status) => status >= 200 && status < 500
+  });
+
+  if (response.status === 404) {
+    throw new Error(`[PLAYTIME_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`);
+  }
+  if (response.status >= 400) {
+    throw new Error(`[PLAYTIME_UPSERT_HTTP_${response.status}] Falha ao persistir horas jogadas.`);
+  }
+
+  const returned = Array.isArray(response.data) ? response.data[0] : null;
+  const mapped = mapSupabasePlaytimeRow(returned, context.userId);
+  return {
+    ok: true,
+    totalSeconds: Math.max(totalSeconds, normalizePlaytimeSeconds(mapped?.totalSeconds))
+  };
+}
+
+function getDirtyPlaytimeRecordsForUser(userId, limit = PLAYTIME_SYNC_BATCH_LIMIT) {
+  const safeUserId = normalizeSteamId(userId);
+  if (!safeUserId) {
+    return [];
+  }
+
+  return [...playtimeRecordsByUserGameKey.values()]
+    .filter((record) => {
+      if (!record || typeof record !== "object") return false;
+      if (record.dirty !== true) return false;
+      if (normalizeSteamId(record.userId) !== safeUserId) return false;
+      return normalizePlaytimeSeconds(record.totalSeconds) > 0;
+    })
+    .sort((left, right) => Date.parse(left.updatedAt || "") - Date.parse(right.updatedAt || ""))
+    .slice(0, Math.max(1, Math.min(400, Number(limit) || PLAYTIME_SYNC_BATCH_LIMIT)));
+}
+
+async function syncDirtyPlaytimeRecordsToSupabase(forceRemoteRefresh = false) {
+  if (playtimeSyncInFlight) {
+    return playtimeSyncInFlight;
+  }
+
+  playtimeSyncInFlight = (async () => {
+    const context = tryResolveSupabasePlaytimeContext();
+    if (!context) {
+      return { ok: false, synced: 0, skipped: true };
+    }
+
+    await ensurePlaytimeRemoteSnapshotLoaded(context.userId, forceRemoteRefresh).catch(() => false);
+
+    const dirtyRecords = getDirtyPlaytimeRecordsForUser(context.userId, PLAYTIME_SYNC_BATCH_LIMIT);
+    if (!dirtyRecords.length) {
+      return { ok: true, synced: 0 };
+    }
+
+    let syncedCount = 0;
+    for (const record of dirtyRecords) {
+      const key = buildPlaytimeRecordKey(context.userId, record.gameId);
+      if (!key) {
+        continue;
+      }
+
+      try {
+        const rpcResult = await upsertPlaytimeRecordViaRpc(context, record);
+        let persistedTotalSeconds = normalizePlaytimeSeconds(record.totalSeconds);
+        if (rpcResult?.missingRpc) {
+          const directResult = await upsertPlaytimeRecordDirect(context, record);
+          persistedTotalSeconds = normalizePlaytimeSeconds(directResult?.totalSeconds || persistedTotalSeconds);
+        }
+
+        const current = playtimeRecordsByUserGameKey.get(key);
+        if (current) {
+          current.totalSeconds = Math.max(normalizePlaytimeSeconds(current.totalSeconds), persistedTotalSeconds);
+          current.dirty = false;
+          current.updatedAt = new Date().toISOString();
+          playtimeRecordsByUserGameKey.set(key, current);
+
+          if (playtimeRemoteCache.userId === context.userId) {
+            playtimeRemoteCache.rowsByGameId.set(current.gameId, {
+              ...current,
+              dirty: false
+            });
+            playtimeRemoteCache.fetchedAt = Date.now();
+          }
+        }
+        syncedCount += 1;
+      } catch (error) {
+        const message = String(error?.message || "");
+        if (message.includes("PLAYTIME_TABLE_NOT_FOUND")) {
+          appendStartupLog("[PLAYTIME_SYNC] tabela de playtime nao encontrada no Supabase.");
+          break;
+        }
+        appendStartupLog(`[PLAYTIME_SYNC_ERROR] ${formatStartupErrorForLog(error)}`);
+      }
+    }
+
+    if (syncedCount > 0) {
+      schedulePersistPlaytimeState();
+    }
+
+    return {
+      ok: true,
+      synced: syncedCount
+    };
+  })().finally(() => {
+    playtimeSyncInFlight = null;
+  });
+
+  return playtimeSyncInFlight;
+}
+
+function scheduleSyncDirtyPlaytimeRecords(delayMs = PLAYTIME_SYNC_DEBOUNCE_MS) {
+  const safeDelayMs = Math.max(400, Number(delayMs) || PLAYTIME_SYNC_DEBOUNCE_MS);
+  if (playtimeSyncTimer) {
+    return;
+  }
+
+  playtimeSyncTimer = setTimeout(() => {
+    playtimeSyncTimer = null;
+    void syncDirtyPlaytimeRecordsToSupabase(false).catch(() => {});
+  }, safeDelayMs);
 }
 
 function resolveSupabaseSocialActivityContext() {
@@ -10803,6 +11688,120 @@ async function applySteamStatsToCatalogGames(games = []) {
   });
 }
 
+function reconcilePlaytimeSessionsWithGames(userId, games = []) {
+  const safeUserId = normalizeSteamId(userId);
+  if (!safeUserId || !Array.isArray(games)) {
+    return;
+  }
+
+  ensurePlaytimeStateLoadedSync();
+  const nowMs = Date.now();
+  for (const game of games) {
+    const gameId = normalizePlaytimeGameId(game?.id);
+    if (!gameId) {
+      continue;
+    }
+    const isRunning = game?.running === true;
+    if (isRunning) {
+      startOrRefreshPlaytimeSession(safeUserId, gameId, game?.name || "", nowMs);
+      continue;
+    }
+
+    const key = buildPlaytimeRecordKey(safeUserId, gameId);
+    if (key && playtimeActiveSessionsByUserGameKey.has(key)) {
+      finalizePlaytimeSession(safeUserId, gameId, nowMs);
+    }
+  }
+}
+
+function applyPlaytimeFieldsToGames(userId, games = []) {
+  const safeUserId = normalizeSteamId(userId);
+  if (!safeUserId || !Array.isArray(games) || games.length === 0) {
+    return Array.isArray(games) ? games : [];
+  }
+
+  return games.map((game) => {
+    const gameId = normalizePlaytimeGameId(game?.id);
+    if (!gameId) {
+      return game;
+    }
+
+    const liveTotalSeconds = getLivePlaytimeSecondsForUserGame(safeUserId, gameId);
+    const liveMinutes = liveTotalSeconds / 60;
+    const liveHours = liveTotalSeconds / 3600;
+    const existingUserMinutes = Number(game.userPlayTimeMinutes);
+    const existingUserHours = Number(game.userPlayTimeHours);
+
+    return {
+      ...game,
+      launcherPlayTimeSeconds: liveTotalSeconds,
+      launcherPlayTimeMinutes: liveMinutes,
+      launcherPlayTimeHours: liveHours,
+      userPlayTimeMinutes:
+        Number.isFinite(existingUserMinutes) && existingUserMinutes >= 0 ? existingUserMinutes : liveMinutes,
+      userPlayTimeHours: Number.isFinite(existingUserHours) && existingUserHours >= 0 ? existingUserHours : liveHours
+    };
+  });
+}
+
+function registerPlaytimeSessionStartForGame(game) {
+  const steamSession = getSteamSessionSnapshot();
+  const userId = normalizeSteamId(steamSession?.steamId || steamSession?.user?.id);
+  const gameId = normalizePlaytimeGameId(game?.id);
+  if (!userId || !gameId) {
+    return;
+  }
+  startOrRefreshPlaytimeSession(userId, gameId, game?.name || "", Date.now());
+}
+
+function registerPlaytimeSessionStopForGame(game) {
+  const steamSession = getSteamSessionSnapshot();
+  const userId = normalizeSteamId(steamSession?.steamId || steamSession?.user?.id);
+  const gameId = normalizePlaytimeGameId(game?.id);
+  if (!userId || !gameId) {
+    return;
+  }
+  finalizePlaytimeSession(userId, gameId, Date.now());
+}
+
+async function applyPersistedPlaytimeToCatalogGames(games = [], options = {}) {
+  if (!Array.isArray(games) || games.length === 0) {
+    return [];
+  }
+
+  const steamSession = getSteamSessionSnapshot();
+  const userId = normalizeSteamId(steamSession?.steamId || steamSession?.user?.id);
+  if (!userId) {
+    return games.map((game) => ({
+      ...game,
+      launcherPlayTimeSeconds: 0,
+      launcherPlayTimeMinutes: 0,
+      launcherPlayTimeHours: 0
+    }));
+  }
+
+  const refreshRemote = options?.refreshRemote === true;
+  const hasCacheForUser =
+    playtimeRemoteCache.userId === userId &&
+    playtimeRemoteCache.rowsByGameId instanceof Map &&
+    playtimeRemoteCache.rowsByGameId.size > 0;
+  if (refreshRemote || !hasCacheForUser) {
+    await ensurePlaytimeRemoteSnapshotLoaded(userId, false).catch(() => false);
+  } else {
+    const cacheAge = Date.now() - Number(playtimeRemoteCache.fetchedAt || 0);
+    if (cacheAge >= PLAYTIME_REMOTE_CACHE_TTL_MS && !playtimeRemoteCache.inFlight) {
+      void ensurePlaytimeRemoteSnapshotLoaded(userId, false).catch(() => false);
+    }
+  }
+
+  reconcilePlaytimeSessionsWithGames(userId, games);
+  const withPlaytime = applyPlaytimeFieldsToGames(userId, games);
+  if (getDirtyPlaytimeRecordsForUser(userId, 1).length > 0) {
+    scheduleSyncDirtyPlaytimeRecords();
+  }
+  return withPlaytime;
+}
+
 function resolveGamesStatusRequestOptions(rawOptions = {}) {
   const options = rawOptions && typeof rawOptions === "object" ? rawOptions : {};
   const lowSpecHost = resolveHostLowSpecProfile();
@@ -10895,12 +11894,15 @@ async function getGamesWithStatus(rawOptions = {}) {
     })
   );
 
-  if (!requestOptions.includeSteamStats) {
-    return gamesWithStatus;
+  let resolvedGames = gamesWithStatus;
+  if (requestOptions.includeSteamStats) {
+    resolvedGames = await applySteamStatsToCatalogGames(resolvedGames);
   }
 
-  const gamesWithSteamStats = await applySteamStatsToCatalogGames(gamesWithStatus);
-  return gamesWithSteamStats;
+  const gamesWithPlaytime = await applyPersistedPlaytimeToCatalogGames(resolvedGames, {
+    refreshRemote: requestOptions.lightweight !== true
+  });
+  return gamesWithPlaytime;
 }
 
 async function openInstallFolder() {
@@ -11045,6 +12047,67 @@ async function chooseInstallBaseDirectory() {
   };
 }
 
+async function createGameShortcut(gameId) {
+  if (process.platform !== "win32") {
+    throw new Error("Criacao de atalho disponivel apenas no Windows.");
+  }
+
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    throw new Error("ID do jogo invalido.");
+  }
+
+  const { games, settings } = await readCatalogBundle();
+  const game = games.find((entry) => entry.id === normalizedGameId);
+  if (!game) {
+    throw new Error("Jogo nao encontrado no catalogo.");
+  }
+
+  const installRoot = getCurrentInstallRoot(settings);
+  const installDir = getGameInstallDir(game, installRoot);
+  if (!(await isDirectory(installDir))) {
+    throw new Error("Este jogo ainda nao foi instalado.");
+  }
+
+  const executable = await resolveGameExecutable(game, installRoot, true);
+  if (!executable.absolutePath) {
+    throw new Error("Nao consegui localizar o executavel para criar o atalho.");
+  }
+
+  let desktopPath = "";
+  try {
+    desktopPath = String(app.getPath("desktop") || "").trim();
+  } catch (_error) {
+    desktopPath = "";
+  }
+  if (!desktopPath) {
+    throw new Error("Nao foi possivel localizar a area de trabalho.");
+  }
+
+  const shortcutName = `${sanitizeFolderName(game.name || "Jogo")}.lnk`;
+  const shortcutPath = path.join(desktopPath, shortcutName);
+  await fsp.mkdir(path.dirname(shortcutPath), { recursive: true });
+
+  const shortcutDetails = {
+    target: executable.absolutePath,
+    cwd: path.dirname(executable.absolutePath),
+    description: `Jogar ${String(game.name || "Jogo").trim()} via WPlay`,
+    icon: executable.absolutePath || resolveWindowIconPath() || process.execPath,
+    iconIndex: 0,
+    appUserModelId: WINDOWS_APP_USER_MODEL_ID
+  };
+  const mode = (await pathExists(shortcutPath)) ? "update" : "create";
+  const written = shell.writeShortcutLink(shortcutPath, mode, shortcutDetails);
+  if (!written) {
+    throw new Error("Nao foi possivel criar o atalho do jogo.");
+  }
+
+  return {
+    ok: true,
+    shortcutPath
+  };
+}
+
 async function playGame(gameId) {
   const { games, settings } = await readCatalogBundle();
   const game = games.find((entry) => entry.id === gameId);
@@ -11100,6 +12163,7 @@ async function playGame(gameId) {
   }
 
   invalidateRunningProcessCache();
+  registerPlaytimeSessionStartForGame(game);
 
   void publishSocialGameLaunchActivity({
     gameId: game.id,
@@ -11122,6 +12186,7 @@ async function closeGame(gameId) {
   const closedProcesses = await tryTerminateGameProcesses(game, installRootCandidates).catch(() => []);
   if (closedProcesses.length > 0) {
     invalidateRunningProcessCache();
+    registerPlaytimeSessionStopForGame(game);
     clearSocialActivityEmitDebounceForGame({
       gameId: game.id,
       gameName: game.name
@@ -11148,6 +12213,7 @@ async function closeGame(gameId) {
     gameId: game.id,
     gameName: game.name
   });
+  registerPlaytimeSessionStopForGame(game);
 
   return {
     ok: true,
@@ -11295,6 +12361,7 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:close-game", (_event, gameId) => closeGame(gameId));
     ipcMain.handle("launcher:open-downloads-folder", () => openInstallFolder());
     ipcMain.handle("launcher:open-game-install-folder", (_event, gameId) => openGameInstallFolder(gameId));
+    ipcMain.handle("launcher:create-game-shortcut", (_event, gameId) => createGameShortcut(gameId));
     ipcMain.handle("launcher:open-external-url", (_event, rawUrl) => openExternalUrl(rawUrl));
     ipcMain.handle("launcher:open-steam-client", () => openSteamClient());
     ipcMain.handle("launcher:show-game-start-toast", (_event, payload) => showGameStartedDesktopToast(payload));
@@ -11343,8 +12410,22 @@ if (!hasSingleInstanceLock) {
       clearTimeout(catalogSizeCachePersistTimer);
       catalogSizeCachePersistTimer = null;
     }
+    if (playtimeStatePersistTimer) {
+      clearTimeout(playtimeStatePersistTimer);
+      playtimeStatePersistTimer = null;
+    }
+    if (playtimeSyncTimer) {
+      clearTimeout(playtimeSyncTimer);
+      playtimeSyncTimer = null;
+    }
+    const steamSession = getSteamSessionSnapshot();
+    const userId = normalizeSteamId(steamSession?.steamId || steamSession?.user?.id);
+    if (userId) {
+      finalizeAllPlaytimeSessionsForUser(userId, Date.now());
+    }
     flushCatalogSizeCacheSync();
     flushActiveInstallSessionsSync();
+    flushPlaytimeStateSync();
     destroyUpdateSplashWindow();
     destroyTray();
     appendStartupLog("[APP] encerrando launcher.");
