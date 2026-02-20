@@ -2635,11 +2635,14 @@ async function resolveStartupUpdateSplashDecision() {
   ]);
 
   if (precheckResult.status === "timeout") {
+    const timeoutState = precheckResult.state || getPublicAutoUpdateState();
+    const shouldShowSplashOnTimeout = shouldShowStartupUpdateSplashForState(timeoutState);
     appendStartupLog(
-      `[AUTO_UPDATE] precheck startup excedeu ${AUTO_UPDATE_STARTUP_PRECHECK_TIMEOUT_MS}ms; launcher abrira sem splash.`
+      `[AUTO_UPDATE] precheck startup excedeu ${AUTO_UPDATE_STARTUP_PRECHECK_TIMEOUT_MS}ms; ` +
+        `status=${String(timeoutState.status || "unknown")} splash=${shouldShowSplashOnTimeout}.`
     );
     return {
-      shouldShowSplash: false,
+      shouldShowSplash: shouldShowSplashOnTimeout,
       precheckStarted: true
     };
   }
