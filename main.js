@@ -130,6 +130,7 @@ const AUTO_UPDATE_WINDOW_READY_CHECK_DELAY_MS = 3500;
 const AUTO_UPDATE_SPLASH_MAX_WAIT_MS = 90 * 1000;
 const AUTO_UPDATE_SPLASH_POLL_INTERVAL_MS = 250;
 const AUTO_UPDATE_SPLASH_PREFIX_DELAY_MS = 7500;
+const AUTO_UPDATE_INSTALL_SPLASH_MIN_VISIBLE_MS = 7000;
 const RUNNING_PROCESS_CACHE_TTL_MS = 10 * 1000;
 const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 6;
 const CATALOG_MIN_POLL_INTERVAL_SECONDS = 2;
@@ -2076,7 +2077,7 @@ function refreshTrayContextMenu() {
   }
 }
 
-function runAutoUpdateInstallFlow(source = "manual", delayMs = 140) {
+function runAutoUpdateInstallFlow(source = "manual", delayMs = 140, options = {}) {
   if (!autoUpdater) {
     throw new Error("Atualizador nao esta disponivel nesta build.");
   }
@@ -2093,6 +2094,9 @@ function runAutoUpdateInstallFlow(source = "manual", delayMs = 140) {
   }
 
   const safeDelayMs = Math.max(0, Math.min(10_000, Number(delayMs) || 0));
+  const skipMinimumSplash = Boolean(options?.skipMinimumSplash);
+  const minimumSplashVisibleMs = skipMinimumSplash ? 0 : AUTO_UPDATE_INSTALL_SPLASH_MIN_VISIBLE_MS;
+  const installDelayMs = Math.max(safeDelayMs, minimumSplashVisibleMs);
   const silentInstall = parseBoolean(autoUpdateConfigSnapshot?.autoInstallSilent, true);
   const forceRunAfterInstall = parseBoolean(autoUpdateConfigSnapshot?.autoRunAfterInstall, true);
 
@@ -2103,10 +2107,27 @@ function runAutoUpdateInstallFlow(source = "manual", delayMs = 140) {
     error: ""
   });
 
+  const splashWindow = createUpdateSplashWindow();
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    try {
+      splashWindow.show();
+      splashWindow.focus();
+    } catch (_error) {
+      // Best effort focus/show.
+    }
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.hide();
+    } catch (_error) {
+      // Best effort hide.
+    }
+  }
+
   setTimeout(() => {
     try {
       appendStartupLog(
-        `[AUTO_UPDATE] quitAndInstall source=${source} silent=${silentInstall} runAfter=${forceRunAfterInstall}`
+        `[AUTO_UPDATE] quitAndInstall source=${source} silent=${silentInstall} runAfter=${forceRunAfterInstall} delayMs=${installDelayMs}`
       );
       allowUpdateSplashWindowClose = true;
       destroyUpdateSplashWindow();
@@ -2124,13 +2145,15 @@ function runAutoUpdateInstallFlow(source = "manual", delayMs = 140) {
         lastCheckedAt: new Date().toISOString()
       });
     }
-  }, safeDelayMs);
+  }, installDelayMs);
 
   return {
     ok: true,
     source,
     silentInstall,
-    forceRunAfterInstall
+    forceRunAfterInstall,
+    installDelayMs,
+    skipMinimumSplash
   };
 }
 
@@ -4724,7 +4747,9 @@ function wireAutoUpdaterEventsOnce() {
       });
 
       try {
-        runAutoUpdateInstallFlow("startup-auto", 900);
+        runAutoUpdateInstallFlow("startup-auto", 900, {
+          skipMinimumSplash: startupAutoUpdateFlowActive
+        });
       } catch (error) {
         appendStartupLog(`[AUTO_UPDATE] falha ao iniciar instalacao automatica: ${formatStartupErrorForLog(error)}`);
         setAutoUpdateState({
