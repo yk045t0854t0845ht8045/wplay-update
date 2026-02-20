@@ -1468,7 +1468,6 @@ function removeNotificationHistoryEntry(notificationId) {
         replaceNotificationHistory(payload.entries);
       }
     } catch (_error) {
-      // Keep local remove even if remote delete fails.
     }
   });
 }
@@ -1493,7 +1492,6 @@ function clearNotificationHistory() {
         resetNotificationState();
       }
     } catch (_error) {
-      // Keep local clear even if remote clear fails.
     }
   });
 }
@@ -1552,7 +1550,6 @@ function showToast(type, title, message, timeoutMs = 3600) {
       });
       return;
     } catch (_error) {
-      // Fallback below if library fails unexpectedly.
     }
   }
 

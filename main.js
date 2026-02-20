@@ -125,6 +125,7 @@ const AUTO_UPDATE_CHECK_COOLDOWN_MS = 45 * 1000;
 const AUTO_UPDATE_TARGET_RELEASE_CACHE_TTL_MS = 2 * 60 * 1000;
 const AUTO_UPDATE_RELEASE_SCAN_LIMIT = 25;
 const AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS = 15 * 1000;
+const AUTO_UPDATE_STARTUP_PRECHECK_TIMEOUT_MS = 2500;
 const AUTO_UPDATE_WINDOW_READY_CHECK_DELAY_MS = 3500;
 const AUTO_UPDATE_SPLASH_MAX_WAIT_MS = 90 * 1000;
 const AUTO_UPDATE_SPLASH_POLL_INTERVAL_MS = 250;
@@ -2562,6 +2563,9 @@ function isAutoUpdateStartupBlockingStatus(statusValue) {
   const normalizedStatus = String(statusValue || "")
     .trim()
     .toLowerCase();
+  if (normalizedStatus === "downloaded" && isStartupUpdatePending()) {
+    return true;
+  }
   return normalizedStatus === "checking" || normalizedStatus === "downloading" || normalizedStatus === "installing";
 }
 
@@ -2573,6 +2577,85 @@ function shouldUseStartupUpdateSplash() {
     return false;
   }
   return Boolean(autoUpdateConfigSnapshot?.updateOnLaunch);
+}
+
+function shouldShowStartupUpdateSplashForState(stateSnapshot = autoUpdateState) {
+  const normalizedStatus = String(stateSnapshot?.status || "")
+    .trim()
+    .toLowerCase();
+
+  if (normalizedStatus === "downloading" || normalizedStatus === "installing") {
+    return true;
+  }
+
+  if ((normalizedStatus === "downloaded" || Boolean(stateSnapshot?.updateDownloaded)) && isStartupUpdatePending()) {
+    return true;
+  }
+
+  return false;
+}
+
+async function resolveStartupUpdateSplashDecision() {
+  if (!shouldUseStartupUpdateSplash()) {
+    return {
+      shouldShowSplash: false,
+      precheckStarted: false
+    };
+  }
+
+  appendStartupLog(
+    `[AUTO_UPDATE] precheck de startup iniciado (timeout=${AUTO_UPDATE_STARTUP_PRECHECK_TIMEOUT_MS}ms).`
+  );
+
+  const startupPrecheckTask = checkForLauncherUpdate("startup")
+    .then(() => ({
+      status: "completed",
+      state: getPublicAutoUpdateState()
+    }))
+    .catch((error) => {
+      appendStartupLog(`[AUTO_UPDATE] precheck startup falhou: ${formatStartupErrorForLog(error)}`);
+      return {
+        status: "error",
+        state: getPublicAutoUpdateState()
+      };
+    });
+
+  const precheckResult = await Promise.race([
+    startupPrecheckTask,
+    new Promise((resolve) =>
+      setTimeout(
+        () =>
+          resolve({
+            status: "timeout",
+            state: getPublicAutoUpdateState()
+          }),
+        AUTO_UPDATE_STARTUP_PRECHECK_TIMEOUT_MS
+      )
+    )
+  ]);
+
+  if (precheckResult.status === "timeout") {
+    appendStartupLog(
+      `[AUTO_UPDATE] precheck startup excedeu ${AUTO_UPDATE_STARTUP_PRECHECK_TIMEOUT_MS}ms; launcher abrira sem splash.`
+    );
+    return {
+      shouldShowSplash: false,
+      precheckStarted: true
+    };
+  }
+
+  const stateSnapshot = precheckResult.state || getPublicAutoUpdateState();
+  const shouldShowSplash = shouldShowStartupUpdateSplashForState(stateSnapshot);
+  appendStartupLog(
+    `[AUTO_UPDATE] precheck startup concluido status=${String(stateSnapshot.status || "unknown")} downloaded=${Boolean(
+      stateSnapshot.updateDownloaded
+    )} splash=${shouldShowSplash}`
+  );
+
+  return {
+    shouldShowSplash,
+    precheckStarted: true
+  };
 }
 
 async function waitForStartupUpdateBlockingStateToFinish(maxWaitMs = AUTO_UPDATE_SPLASH_MAX_WAIT_MS) {
@@ -2592,43 +2675,50 @@ async function waitForStartupUpdateBlockingStateToFinish(maxWaitMs = AUTO_UPDATE
   return !isAutoUpdateStartupBlockingStatus(autoUpdateState.status);
 }
 
-async function runStartupAutoUpdateFlowWithSplash() {
+async function runStartupAutoUpdateFlowWithSplash(options = {}) {
   if (!shouldUseStartupUpdateSplash()) {
     return;
   }
 
+  const skipStartupCheck = Boolean(options?.skipStartupCheck);
   const splashFlowStartedAt = Date.now();
   startupAutoUpdateFlowActive = true;
-  appendStartupLog("[AUTO_UPDATE] fluxo de update no startup iniciado (modo splash).");
+  appendStartupLog(
+    `[AUTO_UPDATE] fluxo de update no startup iniciado (modo splash, skipCheck=${skipStartupCheck}).`
+  );
   createUpdateSplashWindow();
 
   try {
-    setAutoUpdateState({
-      status: "checking",
-      message: "Verificando atualizacoes...",
-      error: "",
-      progressPercent: 0,
-      bytesPerSecond: 0,
-      transferredBytes: 0,
-      totalBytes: 0
-    });
+    if (!skipStartupCheck) {
+      setAutoUpdateState({
+        status: "checking",
+        message: "Verificando atualizacoes...",
+        error: "",
+        progressPercent: 0,
+        bytesPerSecond: 0,
+        transferredBytes: 0,
+        totalBytes: 0
+      });
 
-    const startupCheckTask = checkForLauncherUpdate("startup").catch((error) => {
-      appendStartupLog(`[AUTO_UPDATE] startup check falhou: ${formatStartupErrorForLog(error)}`);
-      return getPublicAutoUpdateState();
-    });
+      const startupCheckTask = checkForLauncherUpdate("startup").catch((error) => {
+        appendStartupLog(`[AUTO_UPDATE] startup check falhou: ${formatStartupErrorForLog(error)}`);
+        return getPublicAutoUpdateState();
+      });
 
-    const startupCheckResult = await Promise.race([
-      startupCheckTask.then(() => "completed"),
-      new Promise((resolve) =>
-        setTimeout(() => resolve("timeout"), AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS)
-      )
-    ]);
+      const startupCheckResult = await Promise.race([
+        startupCheckTask.then(() => "completed"),
+        new Promise((resolve) =>
+          setTimeout(() => resolve("timeout"), AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS)
+        )
+      ]);
 
-    if (startupCheckResult === "timeout") {
-      appendStartupLog(
-        `[AUTO_UPDATE] startup check excedeu ${AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS}ms; aguardando estado bloqueante finalizar.`
-      );
+      if (startupCheckResult === "timeout") {
+        appendStartupLog(
+          `[AUTO_UPDATE] startup check excedeu ${AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS}ms; aguardando estado bloqueante finalizar.`
+        );
+      }
+    } else {
+      appendStartupLog("[AUTO_UPDATE] startup check reutilizado a partir do precheck.");
     }
 
     const startupBlockingFinished = await waitForStartupUpdateBlockingStateToFinish();
@@ -12639,10 +12729,19 @@ if (!hasSingleInstanceLock) {
         autoUpdateConfigSnapshot?.updateOnLaunch &&
         !runtimeStartupHealthState.safeMode
     );
-    const shouldRunStartupUpdateSplash = shouldCheckUpdateOnLaunch && shouldUseStartupUpdateSplash();
+    let shouldRunStartupUpdateSplash = false;
+    let startupUpdatePrecheckStarted = false;
+
+    if (shouldCheckUpdateOnLaunch && shouldUseStartupUpdateSplash()) {
+      const splashDecision = await resolveStartupUpdateSplashDecision();
+      shouldRunStartupUpdateSplash = Boolean(splashDecision?.shouldShowSplash);
+      startupUpdatePrecheckStarted = Boolean(splashDecision?.precheckStarted);
+    }
 
     if (shouldRunStartupUpdateSplash) {
-      await runStartupAutoUpdateFlowWithSplash();
+      await runStartupAutoUpdateFlowWithSplash({
+        skipStartupCheck: startupUpdatePrecheckStarted
+      });
       if (appQuitRequested) {
         appendStartupLog("[AUTO_UPDATE] reinicio solicitado apos update de startup; bootstrap encerrado.");
         return;
@@ -12666,7 +12765,7 @@ if (!hasSingleInstanceLock) {
       return;
     }
 
-    if (shouldCheckUpdateOnLaunch && !shouldRunStartupUpdateSplash) {
+    if (shouldCheckUpdateOnLaunch && !shouldRunStartupUpdateSplash && !startupUpdatePrecheckStarted) {
       const updateWarmupDelayMs = resolveHostLowSpecProfile() ? 7_000 : 2_500;
       setTimeout(() => {
         appendStartupLog("[AUTO_UPDATE] verificacao inicial em background.");
