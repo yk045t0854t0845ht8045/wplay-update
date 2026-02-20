@@ -289,6 +289,7 @@ const autoUpdateState = {
   currentVersion: app.getVersion(),
   latestVersion: "",
   updateDownloaded: false,
+  hasUpdateCandidate: false,
   progressPercent: 0,
   bytesPerSecond: 0,
   transferredBytes: 0,
@@ -2579,12 +2580,87 @@ function shouldUseStartupUpdateSplash() {
   return Boolean(autoUpdateConfigSnapshot?.updateOnLaunch);
 }
 
+function isStartupAutoUpdateOrigin(originValue) {
+  const normalizedOrigin = String(originValue || "")
+    .trim()
+    .toLowerCase();
+  if (!normalizedOrigin) {
+    return false;
+  }
+  return normalizedOrigin === "startup" || normalizedOrigin.startsWith("startup-");
+}
+
+function normalizeVersionForComparison(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^v/i, "");
+}
+
+function parseVersionSegments(value) {
+  const normalized = normalizeVersionForComparison(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const mainToken = normalized.split("-")[0].trim();
+  if (!mainToken) {
+    return null;
+  }
+
+  const segments = mainToken.split(".");
+  if (segments.length === 0) {
+    return null;
+  }
+
+  const parsed = [];
+  for (const segment of segments) {
+    if (!/^\d+$/.test(segment)) {
+      return null;
+    }
+    parsed.push(Number(segment));
+  }
+  return parsed;
+}
+
+function isVersionNewerThanCurrent(candidateVersion, currentVersion) {
+  const candidate = parseVersionSegments(candidateVersion);
+  const current = parseVersionSegments(currentVersion);
+
+  if (!candidate || !current) {
+    const normalizedCandidate = normalizeVersionForComparison(candidateVersion);
+    const normalizedCurrent = normalizeVersionForComparison(currentVersion);
+    return Boolean(normalizedCandidate) && normalizedCandidate !== normalizedCurrent;
+  }
+
+  const maxLength = Math.max(candidate.length, current.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const candidatePart = candidate[index] ?? 0;
+    const currentPart = current[index] ?? 0;
+    if (candidatePart > currentPart) {
+      return true;
+    }
+    if (candidatePart < currentPart) {
+      return false;
+    }
+  }
+  return false;
+}
+
 function shouldShowStartupUpdateSplashForState(stateSnapshot = autoUpdateState) {
   const normalizedStatus = String(stateSnapshot?.status || "")
     .trim()
     .toLowerCase();
+  const hasUpdateCandidate = stateSnapshot?.hasUpdateCandidate === true;
+
+  if (hasUpdateCandidate) {
+    return true;
+  }
 
   if (normalizedStatus === "downloading" || normalizedStatus === "installing") {
+    return true;
+  }
+
+  if (normalizedStatus === "available" && Boolean(autoUpdateConfigSnapshot?.autoDownload)) {
     return true;
   }
 
@@ -2608,9 +2684,9 @@ async function resolveStartupUpdateSplashDecision() {
   );
 
   const startupPrecheckTask = checkForLauncherUpdate("startup")
-    .then(() => ({
+    .then((checkState) => ({
       status: "completed",
-      state: getPublicAutoUpdateState()
+      state: checkState || getPublicAutoUpdateState()
     }))
     .catch((error) => {
       appendStartupLog(`[AUTO_UPDATE] precheck startup falhou: ${formatStartupErrorForLog(error)}`);
@@ -4275,6 +4351,7 @@ function disableAutoUpdaterForSession(reasonMessage, errorMessage = "") {
     status: "disabled",
     enabled: false,
     updateDownloaded: false,
+    hasUpdateCandidate: false,
     progressPercent: 0,
     bytesPerSecond: 0,
     transferredBytes: 0,
@@ -4288,6 +4365,7 @@ function setAutoUpdateNoReleaseState(message) {
   setAutoUpdateState({
     status: "idle",
     updateDownloaded: false,
+    hasUpdateCandidate: false,
     progressPercent: 0,
     bytesPerSecond: 0,
     transferredBytes: 0,
@@ -4578,6 +4656,7 @@ function wireAutoUpdaterEventsOnce() {
   autoUpdater.on("checking-for-update", () => {
     setAutoUpdateState({
       status: "checking",
+      hasUpdateCandidate: false,
       message: "Verificando atualizacoes...",
       error: "",
       progressPercent: 0,
@@ -4601,6 +4680,7 @@ function wireAutoUpdaterEventsOnce() {
       status: autoUpdater.autoDownload ? "downloading" : "available",
       latestVersion,
       updateDownloaded: false,
+      hasUpdateCandidate: true,
       message,
       error: "",
       lastCheckedAt: new Date().toISOString()
@@ -4612,6 +4692,7 @@ function wireAutoUpdaterEventsOnce() {
     const percentSafe = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
     setAutoUpdateState({
       status: "downloading",
+      hasUpdateCandidate: true,
       message: `Baixando atualizacao ${percentSafe.toFixed(1)}%...`,
       progressPercent: percentSafe,
       bytesPerSecond: Number(progress?.bytesPerSecond) || 0,
@@ -4625,7 +4706,7 @@ function wireAutoUpdaterEventsOnce() {
     const latestVersion = String(info?.version || "").trim();
     const shouldAutoRestartAfterStartup = Boolean(
       autoUpdateConfigSnapshot?.autoRestartOnStartup &&
-        (startupAutoUpdateFlowActive || autoUpdateLastCheckOrigin === "startup")
+        (startupAutoUpdateFlowActive || isStartupAutoUpdateOrigin(autoUpdateLastCheckOrigin))
     );
     appendStartupLog(
       `[AUTO_UPDATE] update-downloaded version=${latestVersion || "unknown"} origin=${autoUpdateLastCheckOrigin} autoRestart=${shouldAutoRestartAfterStartup}`
@@ -4635,6 +4716,7 @@ function wireAutoUpdaterEventsOnce() {
       setAutoUpdateState({
         latestVersion,
         updateDownloaded: true,
+        hasUpdateCandidate: true,
         progressPercent: 100,
         message: "Atualizacao pronta. Reiniciando launcher para aplicar automaticamente...",
         error: "",
@@ -4649,6 +4731,7 @@ function wireAutoUpdaterEventsOnce() {
           status: "downloaded",
           latestVersion,
           updateDownloaded: true,
+          hasUpdateCandidate: true,
           progressPercent: 100,
           message: "Atualizacao pronta. Reinicie o launcher para aplicar (menu da bandeja).",
           error: formatAutoUpdateError(error),
@@ -4662,6 +4745,7 @@ function wireAutoUpdaterEventsOnce() {
       status: "downloaded",
       latestVersion,
       updateDownloaded: true,
+      hasUpdateCandidate: true,
       progressPercent: 100,
       message: "Atualizacao pronta. Reinicie o launcher para aplicar (menu da bandeja).",
       error: "",
@@ -4675,6 +4759,7 @@ function wireAutoUpdaterEventsOnce() {
       status: "idle",
       latestVersion,
       updateDownloaded: false,
+      hasUpdateCandidate: false,
       progressPercent: 0,
       message: "Launcher atualizado.",
       error: "",
@@ -4693,6 +4778,7 @@ function wireAutoUpdaterEventsOnce() {
       setAutoUpdateState({
         status: "idle",
         updateDownloaded: false,
+        hasUpdateCandidate: false,
         message: "Atualizador temporariamente indisponivel. O launcher continuara tentando automaticamente.",
         error: "",
         lastCheckedAt: new Date().toISOString()
@@ -4703,6 +4789,7 @@ function wireAutoUpdaterEventsOnce() {
     setAutoUpdateState({
       status: "error",
       updateDownloaded: false,
+      hasUpdateCandidate: false,
       message: "Falha no atualizador.",
       error: formattedError,
       lastCheckedAt: new Date().toISOString()
@@ -4819,6 +4906,7 @@ function setupAutoUpdater() {
       status: "idle",
       latestVersion: "",
       updateDownloaded: false,
+      hasUpdateCandidate: false,
       preferLatestFullInstaller: config.preferLatestFullInstaller,
       progressPercent: 0,
       bytesPerSecond: 0,
@@ -4853,7 +4941,8 @@ async function checkForLauncherUpdate(origin = "manual") {
 
   const normalizedOrigin = String(origin || "").trim().toLowerCase() || "manual";
   const nowMs = Date.now();
-  if (normalizedOrigin !== "manual") {
+  const bypassCooldown = normalizedOrigin === "manual" || isStartupAutoUpdateOrigin(normalizedOrigin);
+  if (!bypassCooldown) {
     const elapsedSinceRequest = nowMs - autoUpdateLastRequestedAt;
     if (elapsedSinceRequest >= 0 && elapsedSinceRequest < AUTO_UPDATE_CHECK_COOLDOWN_MS) {
       return getPublicAutoUpdateState();
@@ -4888,7 +4977,40 @@ async function checkForLauncherUpdate(origin = "manual") {
   autoUpdateLastRequestedAt = nowMs;
   autoUpdateCheckInFlight = autoUpdater
     .checkForUpdates()
-    .then(() => getPublicAutoUpdateState())
+    .then((result) => {
+      const candidateVersion = String(result?.updateInfo?.version || "").trim();
+      const currentVersion = String(app.getVersion() || "").trim();
+      const hasUpdateCandidate = isVersionNewerThanCurrent(candidateVersion, currentVersion);
+
+      if (
+        hasUpdateCandidate &&
+        !autoUpdateState.updateDownloaded &&
+        (autoUpdateState.status === "idle" || autoUpdateState.status === "checking" || autoUpdateState.status === "available")
+      ) {
+        const latestLabel = candidateVersion ? `v${candidateVersion}` : "nova versao";
+        const directLatestMode = Boolean(autoUpdateConfigSnapshot?.preferLatestFullInstaller);
+        const message = autoUpdater.autoDownload
+          ? directLatestMode
+            ? `${latestLabel} encontrada. Baixando pacote completo mais recente...`
+            : `${latestLabel} encontrada. Baixando em segundo plano...`
+          : `${latestLabel} encontrada. Use a bandeja do WPlay para baixar.`;
+
+        setAutoUpdateState({
+          status: autoUpdater.autoDownload ? "downloading" : "available",
+          latestVersion: candidateVersion,
+          hasUpdateCandidate: true,
+          updateDownloaded: false,
+          message,
+          error: "",
+          lastCheckedAt: new Date().toISOString()
+        });
+      }
+
+      return {
+        ...getPublicAutoUpdateState(),
+        hasUpdateCandidate
+      };
+    })
     .catch((error) => {
       const formattedError = formatAutoUpdateError(error);
       if (isAutoUpdateFeedFatalError(formattedError)) {
@@ -4900,6 +5022,7 @@ async function checkForLauncherUpdate(origin = "manual") {
         setAutoUpdateState({
           status: "idle",
           message: "Servico de update indisponivel no momento. Tentando novamente em segundo plano...",
+          hasUpdateCandidate: false,
           error: "",
           lastCheckedAt: new Date().toISOString()
         });
@@ -4909,6 +5032,7 @@ async function checkForLauncherUpdate(origin = "manual") {
       setAutoUpdateState({
         status: "error",
         message: "Falha ao verificar atualizacao.",
+        hasUpdateCandidate: false,
         error: formattedError,
         lastCheckedAt: new Date().toISOString()
       });
@@ -4983,7 +5107,7 @@ function isStartupUpdatePending() {
   if (!autoUpdateConfigSnapshot?.autoRestartOnStartup) {
     return false;
   }
-  if (autoUpdateLastCheckOrigin !== "startup") {
+  if (!isStartupAutoUpdateOrigin(autoUpdateLastCheckOrigin)) {
     return false;
   }
   return (
@@ -12768,11 +12892,29 @@ if (!hasSingleInstanceLock) {
       return;
     }
 
-    if (shouldCheckUpdateOnLaunch && !shouldRunStartupUpdateSplash && !startupUpdatePrecheckStarted) {
+    if (shouldCheckUpdateOnLaunch && !shouldRunStartupUpdateSplash) {
       const updateWarmupDelayMs = resolveHostLowSpecProfile() ? 7_000 : 2_500;
       setTimeout(() => {
-        appendStartupLog("[AUTO_UPDATE] verificacao inicial em background.");
-        void checkForLauncherUpdate("startup");
+        const followupOrigin = startupUpdatePrecheckStarted ? "startup-followup" : "startup";
+        appendStartupLog(`[AUTO_UPDATE] verificacao inicial em background (origin=${followupOrigin}).`);
+        void checkForLauncherUpdate(followupOrigin)
+          .then((stateSnapshot) => {
+            if (appQuitRequested || startupAutoUpdateFlowActive) {
+              return;
+            }
+            const snapshot =
+              stateSnapshot && typeof stateSnapshot === "object" ? stateSnapshot : getPublicAutoUpdateState();
+            if (!shouldUseStartupUpdateSplash() || !shouldShowStartupUpdateSplashForState(snapshot)) {
+              return;
+            }
+            appendStartupLog("[AUTO_UPDATE] update pendente detectado apos abertura; exibindo splash de update.");
+            return runStartupAutoUpdateFlowWithSplash({
+              skipStartupCheck: true
+            });
+          })
+          .catch((error) => {
+            appendStartupLog(`[AUTO_UPDATE] startup follow-up check falhou: ${formatStartupErrorForLog(error)}`);
+          });
       }, updateWarmupDelayMs);
     }
 
