@@ -1762,17 +1762,17 @@ function renderAutoUpdateButton() {
   } else if (autoUpdate.status === "checking") {
     label = autoUpdate.message || "Verificando atualizacoes do launcher...";
   } else if (autoUpdate.status === "downloaded" || autoUpdate.updateDownloaded) {
-    label = "Atualizacao pronta. Clique para reiniciar e instalar.";
+    label = "Atualizacao pronta. Reinicie o launcher para aplicar.";
   } else if (autoUpdate.status === "installing") {
     label = autoUpdate.message || "Aplicando atualizacao do launcher...";
   } else if (autoUpdate.status === "available") {
     label = autoUpdate.message || "Nova atualizacao encontrada.";
   } else if (autoUpdate.status === "idle") {
-    label = autoUpdate.message || "Launcher atualizado. Clique para verificar novamente.";
+    label = autoUpdate.message || "Launcher atualizado.";
   } else if (autoUpdate.status === "disabled") {
     label = autoUpdate.error || autoUpdate.message || "Atualizador desativado ou nao configurado.";
   } else if (autoUpdate.status === "error") {
-    label = autoUpdate.error || autoUpdate.message || "Falha no atualizador. Clique para tentar novamente.";
+    label = autoUpdate.error || autoUpdate.message || "Falha no atualizador. Tentando novamente em segundo plano.";
   }
 
   topUpdateBtn.setAttribute("aria-label", label);
@@ -1806,8 +1806,8 @@ function applyAutoUpdatePayload(payload, fromEvent = false) {
       "info",
       "Atualizacao disponivel",
       latestVersionTag
-        ? `${latestVersionTag} encontrada. Clique no icone de update para baixar.`
-        : "Nova versao encontrada. Clique no icone de update para baixar."
+        ? `${latestVersionTag} encontrada. Use a bandeja do WPlay para baixar agora.`
+        : "Nova versao encontrada. Use a bandeja do WPlay para baixar agora."
     );
   }
 
@@ -1819,8 +1819,8 @@ function applyAutoUpdatePayload(payload, fromEvent = false) {
         "success",
         "Atualizacao pronta",
         latestVersionTag
-          ? `${latestVersionTag} foi baixada. Clique no icone verde para reiniciar e atualizar.`
-          : "Atualizacao baixada. Clique no icone verde para reiniciar e atualizar."
+          ? `${latestVersionTag} foi baixada. Reinicie o launcher para aplicar (menu da bandeja).`
+          : "Atualizacao baixada. Reinicie o launcher para aplicar (menu da bandeja)."
       );
     }
     return;
@@ -1986,7 +1986,7 @@ async function downloadAutoUpdateNow() {
     }
 
     if (status === "downloaded") {
-      notify("success", "Atualizacao pronta", "Clique no icone verde para reiniciar e aplicar.");
+      notify("success", "Atualizacao pronta", "Reinicie o launcher para aplicar a nova versao.");
       return;
     }
 

@@ -4413,7 +4413,7 @@ function wireAutoUpdaterEventsOnce() {
       ? directLatestMode
         ? `${latestLabel} encontrada. Baixando pacote completo mais recente...`
         : `${latestLabel} encontrada. Baixando em segundo plano...`
-      : `${latestLabel} encontrada. Clique para baixar.`;
+      : `${latestLabel} encontrada. Use a bandeja do WPlay para baixar.`;
 
     setAutoUpdateState({
       status: autoUpdater.autoDownload ? "downloading" : "available",
@@ -4472,7 +4472,7 @@ function wireAutoUpdaterEventsOnce() {
             latestVersion,
             updateDownloaded: true,
             progressPercent: 100,
-            message: "Atualizacao pronta. Clique no icone verde para reiniciar e aplicar.",
+            message: "Atualizacao pronta. Reinicie o launcher para aplicar (menu da bandeja).",
             error: formatAutoUpdateError(error),
             lastCheckedAt: new Date().toISOString()
           });
@@ -4486,7 +4486,7 @@ function wireAutoUpdaterEventsOnce() {
       latestVersion,
       updateDownloaded: true,
       progressPercent: 100,
-      message: "Atualizacao pronta. Clique no icone verde para reiniciar e aplicar.",
+      message: "Atualizacao pronta. Reinicie o launcher para aplicar (menu da bandeja).",
       error: "",
       lastCheckedAt: new Date().toISOString()
     });
@@ -4773,7 +4773,7 @@ async function downloadLauncherUpdate() {
       if (isAutoUpdateTransientError(formattedError)) {
         setAutoUpdateState({
           status: "available",
-          message: "Falha temporaria no download. Clique novamente para tentar.",
+          message: "Falha temporaria no download. Use a bandeja para tentar novamente.",
           error: "",
           lastCheckedAt: new Date().toISOString()
         });
