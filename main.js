@@ -1855,6 +1855,20 @@ function showAndFocusMainWindow() {
 }
 
 function requestLauncherRestart() {
+  const hasPendingUpdate = Boolean(
+    autoUpdater && (autoUpdateState.updateDownloaded || autoUpdateState.status === "downloaded")
+  );
+
+  if (hasPendingUpdate) {
+    appendStartupLog("[AUTO_UPDATE] reinicio solicitado com update pronto; aplicando update antes de reiniciar.");
+    try {
+      restartAndInstallLauncherUpdate();
+      return;
+    } catch (error) {
+      appendStartupLog(`[AUTO_UPDATE] falha ao iniciar instalacao no reinicio: ${formatStartupErrorForLog(error)}`);
+    }
+  }
+
   appQuitRequested = true;
   app.relaunch();
   app.quit();
@@ -4462,8 +4476,10 @@ function wireAutoUpdaterEventsOnce() {
 
       setTimeout(() => {
         try {
+          allowUpdateSplashWindowClose = true;
+          destroyUpdateSplashWindow();
           appQuitRequested = true;
-          autoUpdater.quitAndInstall(true, true);
+          autoUpdater.quitAndInstall(false, true);
         } catch (error) {
           appQuitRequested = false;
           appendStartupLog(`[AUTO_UPDATE] quitAndInstall falhou: ${formatStartupErrorForLog(error)}`);
@@ -4608,6 +4624,9 @@ function setupAutoUpdater() {
     wireAutoUpdaterEventsOnce();
     autoUpdater.autoDownload = config.autoDownload;
     autoUpdater.autoInstallOnAppQuit = true;
+    if (Object.prototype.hasOwnProperty.call(autoUpdater, "autoRunAppAfterInstall")) {
+      autoUpdater.autoRunAppAfterInstall = true;
+    }
     autoUpdater.allowPrerelease = config.allowPrerelease;
     autoUpdater.allowDowngrade = config.allowDowngrade;
     if (Object.prototype.hasOwnProperty.call(autoUpdater, "disableDifferentialDownload")) {
@@ -4810,8 +4829,22 @@ function restartAndInstallLauncherUpdate() {
   });
 
   setTimeout(() => {
-    appQuitRequested = true;
-    autoUpdater.quitAndInstall(true, true);
+    try {
+      allowUpdateSplashWindowClose = true;
+      destroyUpdateSplashWindow();
+      appQuitRequested = true;
+      autoUpdater.quitAndInstall(false, true);
+    } catch (error) {
+      appQuitRequested = false;
+      appendStartupLog(`[AUTO_UPDATE] quitAndInstall manual falhou: ${formatStartupErrorForLog(error)}`);
+      setAutoUpdateState({
+        status: "downloaded",
+        updateDownloaded: true,
+        message: "Atualizacao pronta. Reinicie o launcher para aplicar (menu da bandeja).",
+        error: formatAutoUpdateError(error),
+        lastCheckedAt: new Date().toISOString()
+      });
+    }
   }, 140);
 
   return { ok: true };

@@ -41,7 +41,7 @@ before update on public.launcher_game_playtime
 for each row
 execute function public.set_updated_at_launcher_game_playtime();
 
--- Upsert monotono: nunca reduz total_seconds (usa GREATEST no conflito).
+-- yoas 
 create or replace function public.bump_launcher_game_playtime(
   p_user_id text,
   p_game_id text,
