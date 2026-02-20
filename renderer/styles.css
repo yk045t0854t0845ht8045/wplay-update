@@ -3709,6 +3709,8 @@ body.layout-centered.view-details .details-bottom {
 .hero-manage-wrap{
   position: relative;
   display: inline-flex;
+  z-index: 85;
+  isolation: isolate;
 }
 
 .hero-manage-btn{
@@ -3755,9 +3757,9 @@ body.layout-centered.view-details .details-bottom {
 
 .details-manage-menu{
   position: absolute;
+  bottom: calc(100% + 0.55rem);
   right: 0px;
-  top: calc(100% + 0.55rem);
-  z-index: 24;
+  z-index: 160;
   min-width: 196px;
   border-radius: 0.75rem;
   border-width: 1px;

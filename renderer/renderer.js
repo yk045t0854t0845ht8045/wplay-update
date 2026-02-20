@@ -2288,7 +2288,7 @@ function getActionState(game) {
     if (game.running) {
       return { action: "close", label: "PARAR JOGO", disabled: false };
     }
-    return { action: "play", label: "PLAY GAME", disabled: false };
+    return { action: "play", label: "JOGAR", disabled: false };
   }
 
   if (game.comingSoon) {

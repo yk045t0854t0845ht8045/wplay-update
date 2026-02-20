@@ -2232,6 +2232,8 @@
 
   .hero-manage-wrap {
     @apply relative inline-flex;
+    z-index: 85;
+    isolation: isolate;
   }
 
   .hero-manage-btn {
@@ -2265,7 +2267,7 @@
   }
 
   .details-manage-menu {
-    @apply absolute right-0 top-[calc(100%+0.55rem)] z-[24] min-w-[196px] rounded-xl border p-1;
+    @apply absolute bottom-[calc(100%+0.55rem)] right-0 z-[160] min-w-[196px] rounded-xl border p-1;
     border-color: rgba(255, 255, 255, 0.14);
     background: rgba(12, 14, 20, 0.98);
     box-shadow: 0 20px 38px rgba(0, 0, 0, 0.4);
