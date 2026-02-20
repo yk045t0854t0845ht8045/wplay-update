@@ -237,6 +237,7 @@ let autoUpdateLastCheckOrigin = "";
 let autoUpdateLastRequestedAt = 0;
 let startupAutoUpdateFlowActive = false;
 let startupIpcHandlersRegistered = false;
+let autoUpdateInstallInFlight = false;
 const launchOnSystemStartupState = {
   supported: false,
   enabled: false
@@ -2071,6 +2072,64 @@ function refreshTrayContextMenu() {
   } catch (error) {
     appendStartupLog(`[TRAY_MENU_ERROR] ${formatStartupErrorForLog(error)}`);
   }
+}
+
+function runAutoUpdateInstallFlow(source = "manual", delayMs = 140) {
+  if (!autoUpdater) {
+    throw new Error("Atualizador nao esta disponivel nesta build.");
+  }
+  if (!autoUpdateState.updateDownloaded) {
+    throw new Error("Nenhuma atualizacao pronta para instalar.");
+  }
+  if (autoUpdateInstallInFlight) {
+    appendStartupLog(`[AUTO_UPDATE] instalacao ja em andamento (source=${source}).`);
+    return {
+      ok: true,
+      alreadyInFlight: true,
+      source
+    };
+  }
+
+  const safeDelayMs = Math.max(0, Math.min(10_000, Number(delayMs) || 0));
+  const silentInstall = parseBoolean(autoUpdateConfigSnapshot?.autoInstallSilent, true);
+  const forceRunAfterInstall = parseBoolean(autoUpdateConfigSnapshot?.autoRunAfterInstall, true);
+
+  autoUpdateInstallInFlight = true;
+  setAutoUpdateState({
+    status: "installing",
+    message: "Aplicando atualizacao do launcher...",
+    error: ""
+  });
+
+  setTimeout(() => {
+    try {
+      appendStartupLog(
+        `[AUTO_UPDATE] quitAndInstall source=${source} silent=${silentInstall} runAfter=${forceRunAfterInstall}`
+      );
+      allowUpdateSplashWindowClose = true;
+      destroyUpdateSplashWindow();
+      appQuitRequested = true;
+      autoUpdater.quitAndInstall(silentInstall, forceRunAfterInstall);
+    } catch (error) {
+      autoUpdateInstallInFlight = false;
+      appQuitRequested = false;
+      appendStartupLog(`[AUTO_UPDATE] quitAndInstall falhou (source=${source}): ${formatStartupErrorForLog(error)}`);
+      setAutoUpdateState({
+        status: "downloaded",
+        updateDownloaded: true,
+        message: "Atualizacao pronta. Reinicie o launcher para aplicar (menu da bandeja).",
+        error: formatAutoUpdateError(error),
+        lastCheckedAt: new Date().toISOString()
+      });
+    }
+  }, safeDelayMs);
+
+  return {
+    ok: true,
+    source,
+    silentInstall,
+    forceRunAfterInstall
+  };
 }
 
 function createTray() {
@@ -3976,6 +4035,14 @@ function resolveAutoUpdaterConfig() {
     process.env.WPLAY_UPDATER_AUTO_RESTART_ON_STARTUP ?? fileConfig.autoRestartOnStartup,
     true
   );
+  const autoInstallSilent = parseBoolean(
+    process.env.WPLAY_UPDATER_AUTO_INSTALL_SILENT ?? fileConfig.autoInstallSilent,
+    true
+  );
+  const autoRunAfterInstall = parseBoolean(
+    process.env.WPLAY_UPDATER_AUTO_RUN_AFTER_INSTALL ?? fileConfig.autoRunAfterInstall,
+    true
+  );
   const intervalMinutes = parsePositiveInteger(
     process.env.WPLAY_UPDATER_CHECK_INTERVAL_MINUTES ?? fileConfig.checkIntervalMinutes
   );
@@ -4000,6 +4067,8 @@ function resolveAutoUpdaterConfig() {
     autoDownload,
     updateOnLaunch,
     autoRestartOnStartup,
+    autoInstallSilent,
+    autoRunAfterInstall,
     checkIntervalMs
   };
 }
@@ -4471,7 +4540,6 @@ function wireAutoUpdaterEventsOnce() {
 
     if (shouldAutoRestartAfterStartup) {
       setAutoUpdateState({
-        status: "installing",
         latestVersion,
         updateDownloaded: true,
         progressPercent: 100,
@@ -4480,26 +4548,20 @@ function wireAutoUpdaterEventsOnce() {
         lastCheckedAt: new Date().toISOString()
       });
 
-      setTimeout(() => {
-        try {
-          allowUpdateSplashWindowClose = true;
-          destroyUpdateSplashWindow();
-          appQuitRequested = true;
-          autoUpdater.quitAndInstall(false, true);
-        } catch (error) {
-          appQuitRequested = false;
-          appendStartupLog(`[AUTO_UPDATE] quitAndInstall falhou: ${formatStartupErrorForLog(error)}`);
-          setAutoUpdateState({
-            status: "downloaded",
-            latestVersion,
-            updateDownloaded: true,
-            progressPercent: 100,
-            message: "Atualizacao pronta. Reinicie o launcher para aplicar (menu da bandeja).",
-            error: formatAutoUpdateError(error),
-            lastCheckedAt: new Date().toISOString()
-          });
-        }
-      }, 900);
+      try {
+        runAutoUpdateInstallFlow("startup-auto", 900);
+      } catch (error) {
+        appendStartupLog(`[AUTO_UPDATE] falha ao iniciar instalacao automatica: ${formatStartupErrorForLog(error)}`);
+        setAutoUpdateState({
+          status: "downloaded",
+          latestVersion,
+          updateDownloaded: true,
+          progressPercent: 100,
+          message: "Atualizacao pronta. Reinicie o launcher para aplicar (menu da bandeja).",
+          error: formatAutoUpdateError(error),
+          lastCheckedAt: new Date().toISOString()
+        });
+      }
       return;
     }
 
@@ -4821,39 +4883,7 @@ async function downloadLauncherUpdate() {
 }
 
 function restartAndInstallLauncherUpdate() {
-  if (!autoUpdater) {
-    throw new Error("Atualizador nao esta disponivel nesta build.");
-  }
-  if (!autoUpdateState.updateDownloaded) {
-    throw new Error("Nenhuma atualizacao pronta para instalar.");
-  }
-
-  setAutoUpdateState({
-    status: "installing",
-    message: "Aplicando atualizacao do launcher...",
-    error: ""
-  });
-
-  setTimeout(() => {
-    try {
-      allowUpdateSplashWindowClose = true;
-      destroyUpdateSplashWindow();
-      appQuitRequested = true;
-      autoUpdater.quitAndInstall(false, true);
-    } catch (error) {
-      appQuitRequested = false;
-      appendStartupLog(`[AUTO_UPDATE] quitAndInstall manual falhou: ${formatStartupErrorForLog(error)}`);
-      setAutoUpdateState({
-        status: "downloaded",
-        updateDownloaded: true,
-        message: "Atualizacao pronta. Reinicie o launcher para aplicar (menu da bandeja).",
-        error: formatAutoUpdateError(error),
-        lastCheckedAt: new Date().toISOString()
-      });
-    }
-  }, 140);
-
-  return { ok: true };
+  return runAutoUpdateInstallFlow("manual", 140);
 }
 
 function isStartupUpdatePending() {

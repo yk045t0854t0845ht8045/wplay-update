@@ -6,6 +6,8 @@
   "channel": "latest",
   "updateOnLaunch": true,
   "autoRestartOnStartup": true,
+  "autoInstallSilent": true,
+  "autoRunAfterInstall": true,
   "autoDownload": true,
   "preferLatestFullInstaller": true,
   "checkIntervalMinutes": 1,
