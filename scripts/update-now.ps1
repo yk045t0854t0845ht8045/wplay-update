@@ -500,7 +500,7 @@ function New-DiscordUpdateEmbedPayload {
   $timestampUtc = (Get-Date).ToUniversalTime().ToString("o")
   $discordRoleId = "1473924315991904334"
   $description = if ($UseDeepLinkMarkdown) {
-    "Nova atualizacao disponivel no Origin Launcher. Versao $Version com melhorias importantes.`n[Abrir Launcher]($openLauncherLink)`nSe nao abrir direto, use: [Abrir via navegador]($openLauncherLinkHttp)"
+    "Nova atualizacao disponivel no Origin Launcher. Versao $Version com melhorias importantes.`nSe nao abrir direto, use: [Abrir via navegador]($openLauncherLinkHttp)"
   } else {
     "Nova atualizacao disponivel no Origin Launcher. Versao $Version com melhorias importantes.`n[Abrir Launcher]($openLauncherLinkHttp)"
   }
