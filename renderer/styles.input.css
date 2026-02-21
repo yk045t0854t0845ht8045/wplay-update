@@ -129,8 +129,10 @@
   .window-chrome-brand {
     width: clamp(96px, 10vw, 146px);
     height: 20px;
+    display: block;
+    flex-shrink: 0;
     object-fit: contain;
-    object-position: right center;
+    object-position: left center;
     opacity: 0.94;
     pointer-events: none;
     filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.25));
