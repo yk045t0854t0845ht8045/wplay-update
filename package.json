@@ -1,6 +1,6 @@
 {
   "name": "origin",
-  "version": "1.0.90",
+  "version": "1.0.91",
   "description": "Launcher de jogos em Electron com download, instalacao e execucao.",
   "author": "Origin",
   "main": "main.js",
