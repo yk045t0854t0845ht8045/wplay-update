@@ -225,7 +225,7 @@ let allowUpdateSplashWindowClose = false;
 let startupBootWatchdogTimer = null;
 let mainWindowLoadRetryCount = 0;
 let youtubeRequestHeaderHookInstalled = false;
-let authDeepLinkUrlBuffer = "";
+let pendingDeepLinkUrlBuffer = "";
 let activeAuthLoginRequest = null;
 let authSessionCache = null;
 let autoUpdateInitialized = false;
@@ -5339,7 +5339,7 @@ async function handleAuthDeepLink(rawUrl) {
     return false;
   }
 
-  authDeepLinkUrlBuffer = "";
+  pendingDeepLinkUrlBuffer = "";
   focusMainWindowIfAvailable();
 
   if (!activeAuthLoginRequest) {
@@ -5415,11 +5415,95 @@ async function handleAuthDeepLink(rawUrl) {
   return true;
 }
 
+function resolveDeepLinkRouteSegments(parsedUrl) {
+  const route = [];
+  const hostSegment = String(parsedUrl?.host || "")
+    .trim()
+    .toLowerCase();
+  if (hostSegment) {
+    route.push(hostSegment);
+  }
+  const pathSegments = String(parsedUrl?.pathname || "")
+    .split("/")
+    .map((segment) => segment.trim().toLowerCase())
+    .filter(Boolean);
+  if (pathSegments.length > 0) {
+    route.push(...pathSegments);
+  }
+  return route;
+}
+
+async function handleLauncherOpenDeepLink(rawUrl) {
+  const urlValue = String(rawUrl || "").trim();
+  if (!urlValue) {
+    return false;
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(urlValue);
+  } catch (_error) {
+    return false;
+  }
+
+  if (parsedUrl.protocol.toLowerCase() !== `${AUTH_PROTOCOL_SCHEME}:`) {
+    return false;
+  }
+
+  const route = resolveDeepLinkRouteSegments(parsedUrl);
+  if (route.length < 2 || route[0] !== "launcher" || route[1] !== "open") {
+    return false;
+  }
+
+  pendingDeepLinkUrlBuffer = "";
+  focusMainWindowIfAvailable();
+
+  const source = String(parsedUrl.searchParams.get("source") || "")
+    .trim()
+    .toLowerCase();
+  const target = String(parsedUrl.searchParams.get("target") || "")
+    .trim()
+    .toLowerCase();
+  const tag = String(parsedUrl.searchParams.get("tag") || "").trim();
+  const version = String(parsedUrl.searchParams.get("version") || "").trim();
+  appendStartupLog(
+    `[DEEPLINK] launcher/open recebido source=${source || "unknown"} target=${target || "none"} ` +
+      `tag=${tag || "none"} version=${version || "none"}`
+  );
+
+  try {
+    const checkedState = await checkForLauncherUpdate("manual");
+    const snapshot = checkedState && typeof checkedState === "object" ? checkedState : getPublicAutoUpdateState();
+    if (String(snapshot.status || "").toLowerCase() === "available") {
+      await downloadLauncherUpdate();
+    }
+  } catch (error) {
+    appendStartupLog(`[DEEPLINK] launcher/open falhou ao iniciar update: ${formatStartupErrorForLog(error)}`);
+  }
+
+  return true;
+}
+
+async function handleIncomingDeepLink(rawUrl) {
+  const handledAuth = await handleAuthDeepLink(rawUrl);
+  if (handledAuth) {
+    return true;
+  }
+
+  const handledLauncher = await handleLauncherOpenDeepLink(rawUrl);
+  if (handledLauncher) {
+    return true;
+  }
+
+  pendingDeepLinkUrlBuffer = "";
+  return false;
+}
+
 function extractDeepLinkFromArgv(argv) {
   if (!Array.isArray(argv)) return "";
   for (const item of argv) {
     const value = String(item || "").trim();
-    if (value.toLowerCase().startsWith(`${AUTH_PROTOCOL_SCHEME}://`)) {
+    if (value.toLowerCase().startsWith(`${AUTH_PROTOCOL_SCHEME}:`)) {
       return value;
     }
   }
@@ -5562,11 +5646,11 @@ async function loginWithSteam() {
     throw error;
   }
 
-  if (authDeepLinkUrlBuffer) {
-    const buffered = authDeepLinkUrlBuffer;
-    authDeepLinkUrlBuffer = "";
+  if (pendingDeepLinkUrlBuffer) {
+    const buffered = pendingDeepLinkUrlBuffer;
+    pendingDeepLinkUrlBuffer = "";
     setTimeout(() => {
-      void handleAuthDeepLink(buffered);
+      void handleIncomingDeepLink(buffered);
     }, 0);
   }
 
@@ -12816,22 +12900,26 @@ if (!hasSingleInstanceLock) {
   markStartupLaunchHealthy("secondary-instance-exit");
   app.quit();
 } else {
-  authDeepLinkUrlBuffer = extractDeepLinkFromArgv(process.argv);
+  pendingDeepLinkUrlBuffer = extractDeepLinkFromArgv(process.argv);
 
   app.on("second-instance", (_event, argv) => {
     focusMainWindowIfAvailable();
 
     const deepLink = extractDeepLinkFromArgv(argv);
     if (!deepLink) return;
-    authDeepLinkUrlBuffer = deepLink;
-    void handleAuthDeepLink(deepLink);
+    pendingDeepLinkUrlBuffer = deepLink;
+    if (app.isReady()) {
+      void handleIncomingDeepLink(deepLink);
+    }
   });
 
   app.on("open-url", (event, urlValue) => {
     event.preventDefault();
     focusMainWindowIfAvailable();
-    authDeepLinkUrlBuffer = String(urlValue || "");
-    void handleAuthDeepLink(urlValue);
+    pendingDeepLinkUrlBuffer = String(urlValue || "");
+    if (app.isReady()) {
+      void handleIncomingDeepLink(urlValue);
+    }
   });
 
   app.on("child-process-gone", (_event, details) => {
@@ -12943,8 +13031,8 @@ if (!hasSingleInstanceLock) {
       }, updateWarmupDelayMs);
     }
 
-    if (authDeepLinkUrlBuffer) {
-      void handleAuthDeepLink(authDeepLinkUrlBuffer);
+    if (pendingDeepLinkUrlBuffer) {
+      void handleIncomingDeepLink(pendingDeepLinkUrlBuffer);
     }
 
     ipcMain.handle("launcher:get-active-installs", () => getActiveInstallProgressSnapshot());

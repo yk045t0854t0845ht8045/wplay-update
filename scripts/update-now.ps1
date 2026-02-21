@@ -499,6 +499,11 @@ function New-DiscordUpdateEmbedPayload {
 
   $timestampUtc = (Get-Date).ToUniversalTime().ToString("o")
   $discordRoleId = "1473924315991904334"
+  $description = if ($UseDeepLinkMarkdown) {
+    "Nova atualizacao disponivel no Origin Launcher. Versao $Version com melhorias importantes.`n[Abrir Launcher]($openLauncherLink)`nSe nao abrir direto, use: [Abrir via navegador]($openLauncherLinkHttp)"
+  } else {
+    "Nova atualizacao disponivel no Origin Launcher. Versao $Version com melhorias importantes.`n[Abrir Launcher]($openLauncherLinkHttp)"
+  }
 
   return @{
     username = "Wanessa Dos Links"
@@ -511,7 +516,7 @@ function New-DiscordUpdateEmbedPayload {
       @{
         title = "[Origin Launcher - Atualizacao $Tag]"
         url = $openLauncherLinkHttp
-        description = "Nova atualizacao disponivel no Origin Launcher. Versao $Version com melhorias importantes."
+        description = $description
         color = 3066993
         thumbnail = @{
           url = "https://imgur.com/KjOK7w4.png"
