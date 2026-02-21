@@ -179,6 +179,290 @@ function Set-ProjectVersionWithRollover {
   return $nextVersion
 }
 
+function Normalize-UpdaterToken {
+  param([Parameter(Mandatory = $false)][string]$Value = "")
+  $raw = [string]$Value
+  if (-not $raw) {
+    return ""
+  }
+  $normalized = $raw.Trim().Trim("/")
+  if (-not $normalized) {
+    return ""
+  }
+  return ([Regex]::Replace($normalized, "[^a-zA-Z0-9_.-]", ""))
+}
+
+function Test-UpdaterPlaceholderToken {
+  param([Parameter(Mandatory = $false)][string]$Value = "")
+  $normalized = (Normalize-UpdaterToken -Value $Value).ToLowerInvariant()
+  if (-not $normalized) {
+    return $true
+  }
+
+  $compact = ($normalized -replace "[^a-z0-9]", "")
+  if (-not $compact) {
+    return $true
+  }
+
+  $knownPlaceholders = @(
+    "seuusuarioouorg",
+    "seurepodolauncher",
+    "youruserororg",
+    "yourlauncherrepo"
+  )
+
+  if ($knownPlaceholders -contains $compact) {
+    return $true
+  }
+
+  return (
+    $compact.Contains("seuusuario") -or
+    $compact.Contains("seurepo") -or
+    $compact.Contains("youruser") -or
+    $compact.Contains("yourrepo")
+  )
+}
+
+function Assert-UpdaterOwnerRepoValid {
+  param(
+    [Parameter(Mandatory = $true)][string]$Owner,
+    [Parameter(Mandatory = $true)][string]$Repo,
+    [Parameter(Mandatory = $false)][string]$ConfigPathLabel = "config/updater.json"
+  )
+
+  $ownerNormalized = Normalize-UpdaterToken -Value $Owner
+  $repoNormalized = Normalize-UpdaterToken -Value $Repo
+
+  if (
+    -not $ownerNormalized -or
+    -not $repoNormalized -or
+    (Test-UpdaterPlaceholderToken -Value $ownerNormalized) -or
+    (Test-UpdaterPlaceholderToken -Value $repoNormalized)
+  ) {
+    throw (
+      "$ConfigPathLabel invalido. Defina owner/repo reais (sem placeholders). " +
+      "Exemplo: owner='yk045t0854t0845ht8045', repo='wplay-update'."
+    )
+  }
+
+  return [PSCustomObject]@{
+    Owner = $ownerNormalized
+    Repo  = $repoNormalized
+  }
+}
+
+function Set-Or-AddObjectProperty {
+  param(
+    [Parameter(Mandatory = $true)][psobject]$Target,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [Parameter(Mandatory = $false)]$Value
+  )
+
+  if ($Target.PSObject.Properties.Name -contains $Name) {
+    $Target.$Name = $Value
+  } else {
+    $Target | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+  }
+}
+
+function Assert-PackagePublishMatchesUpdaterRepo {
+  param(
+    [Parameter(Mandatory = $true)][string]$ExpectedOwner,
+    [Parameter(Mandatory = $true)][string]$ExpectedRepo
+  )
+
+  $packageRaw = Get-Content "package.json" -Raw
+  $package = $packageRaw | ConvertFrom-Json
+  $publishNode = $null
+  if ($package -and $package.build) {
+    $publishNode = $package.build.publish
+  }
+
+  if ($null -eq $publishNode) {
+    return
+  }
+
+  $publishItems = @()
+  if ($publishNode -is [Array]) {
+    $publishItems = @($publishNode)
+  } else {
+    $publishItems = @($publishNode)
+  }
+
+  $mismatchMessages = @()
+  foreach ($publishItem in $publishItems) {
+    if (-not $publishItem) {
+      continue
+    }
+    $provider = [string]$publishItem.provider
+    if ($provider -and $provider.Trim().ToLowerInvariant() -ne "github") {
+      continue
+    }
+
+    $owner = Normalize-UpdaterToken -Value ([string]$publishItem.owner)
+    $repo = Normalize-UpdaterToken -Value ([string]$publishItem.repo)
+    if (-not $owner -or -not $repo) {
+      continue
+    }
+
+    if ($owner -ne $ExpectedOwner -or $repo -ne $ExpectedRepo) {
+      $mismatchMessages += "package.json build.publish aponta para $owner/$repo, mas updater.json aponta para $ExpectedOwner/$ExpectedRepo."
+    }
+  }
+
+  if ($mismatchMessages.Count -gt 0) {
+    throw ($mismatchMessages -join " ")
+  }
+}
+
+function Get-UpdaterBooleanValue {
+  param(
+    [Parameter(Mandatory = $false)]$Value,
+    [Parameter(Mandatory = $false)][bool]$Fallback = $false
+  )
+
+  if ($Value -is [bool]) {
+    return [bool]$Value
+  }
+
+  $normalized = [string]$Value
+  if (-not $normalized) {
+    return [bool]$Fallback
+  }
+  $normalized = $normalized.Trim().ToLowerInvariant()
+  if (-not $normalized) {
+    return [bool]$Fallback
+  }
+  if ($normalized -in @("1", "true", "yes", "y", "on")) {
+    return $true
+  }
+  if ($normalized -in @("0", "false", "no", "n", "off")) {
+    return $false
+  }
+  return [bool]$Fallback
+}
+
+function Get-UpdaterIntValue {
+  param(
+    [Parameter(Mandatory = $false)]$Value,
+    [Parameter(Mandatory = $false)][int]$Fallback = 0
+  )
+
+  try {
+    $parsed = [int]$Value
+    if ($parsed -gt 0) {
+      return $parsed
+    }
+  } catch {
+    # Fallback below.
+  }
+  return [int]$Fallback
+}
+
+function Sync-UserUpdaterConfigProfile {
+  param(
+    [Parameter(Mandatory = $true)][string]$ProfileName,
+    [Parameter(Mandatory = $true)][psobject]$BundledConfig,
+    [Parameter(Mandatory = $true)][string]$Owner,
+    [Parameter(Mandatory = $true)][string]$Repo
+  )
+
+  $appDataDir = [string]$env:APPDATA
+  if (-not $appDataDir) {
+    return
+  }
+
+  $profileConfigDir = Join-Path (Join-Path $appDataDir $ProfileName) "config"
+  $profileConfigPath = Join-Path $profileConfigDir "updater.json"
+
+  $existingConfig = $null
+  if (Test-Path $profileConfigPath) {
+    try {
+      $existingConfig = Get-Content $profileConfigPath -Raw | ConvertFrom-Json
+    } catch {
+      $existingConfig = $null
+    }
+  }
+
+  if (-not $existingConfig -or $existingConfig -is [Array]) {
+    $existingConfig = [PSCustomObject]@{}
+  }
+
+  $existingOwner = Normalize-UpdaterToken -Value ([string]$existingConfig.owner)
+  $existingRepo = Normalize-UpdaterToken -Value ([string]$existingConfig.repo)
+  $existingConfigured =
+    ($existingOwner -and $existingRepo) -and
+    (-not (Test-UpdaterPlaceholderToken -Value $existingOwner)) -and
+    (-not (Test-UpdaterPlaceholderToken -Value $existingRepo))
+  $mismatchOwnerRepo = $existingOwner -ne $Owner -or $existingRepo -ne $Repo
+
+  $shouldWrite = (-not $existingConfigured) -or $mismatchOwnerRepo
+  if (-not $shouldWrite) {
+    return
+  }
+
+  $providerValue = [string]$BundledConfig.provider
+  if (-not $providerValue -or -not $providerValue.Trim()) {
+    $providerValue = "github"
+  } else {
+    $providerValue = $providerValue.Trim()
+  }
+  $channelValue = [string]$BundledConfig.channel
+  if (-not $channelValue -or -not $channelValue.Trim()) {
+    $channelValue = "latest"
+  } else {
+    $channelValue = $channelValue.Trim()
+  }
+
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "enabled" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.enabled -Fallback $true)
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "owner" -Value $Owner
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "repo" -Value $Repo
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "provider" -Value $providerValue
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "channel" -Value $channelValue
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "updateOnLaunch" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.updateOnLaunch -Fallback $true)
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "autoRestartOnStartup" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.autoRestartOnStartup -Fallback $true)
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "autoInstallSilent" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.autoInstallSilent -Fallback $true)
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "autoRunAfterInstall" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.autoRunAfterInstall -Fallback $true)
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "autoDownload" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.autoDownload -Fallback $true)
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "preferLatestFullInstaller" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.preferLatestFullInstaller -Fallback $true)
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "allowPrerelease" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.allowPrerelease -Fallback $false)
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "allowDowngrade" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.allowDowngrade -Fallback $false)
+
+  $checkIntervalSeconds = Get-UpdaterIntValue -Value $BundledConfig.checkIntervalSeconds -Fallback 0
+  if ($checkIntervalSeconds -gt 0) {
+    Set-Or-AddObjectProperty -Target $existingConfig -Name "checkIntervalSeconds" -Value $checkIntervalSeconds
+  } else {
+    $checkIntervalMinutes = Get-UpdaterIntValue -Value $BundledConfig.checkIntervalMinutes -Fallback 1
+    Set-Or-AddObjectProperty -Target $existingConfig -Name "checkIntervalMinutes" -Value $checkIntervalMinutes
+  }
+
+  New-Item -ItemType Directory -Path $profileConfigDir -Force | Out-Null
+  $serialized = $existingConfig | ConvertTo-Json -Depth 20
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($profileConfigPath, $serialized, $utf8NoBom)
+
+  $reason = if (-not $existingConfigured) { "owner/repo ausentes ou placeholder" } else { "owner/repo divergentes" }
+  Write-Host "Config de updater sincronizada em $profileConfigPath ($reason)." -ForegroundColor DarkGray
+}
+
+function Sync-LocalUserUpdaterConfigs {
+  param(
+    [Parameter(Mandatory = $true)][psobject]$BundledConfig,
+    [Parameter(Mandatory = $true)][string]$Owner,
+    [Parameter(Mandatory = $true)][string]$Repo
+  )
+
+  if (-not $env:APPDATA) {
+    Write-Host "APPDATA indisponivel; sincronizacao de updater local ignorada." -ForegroundColor DarkGray
+    return
+  }
+
+  $profiles = @("Origin", "Origin-Dev")
+  foreach ($profile in $profiles) {
+    Sync-UserUpdaterConfigProfile -ProfileName $profile -BundledConfig $BundledConfig -Owner $Owner -Repo $Repo
+  }
+}
+
 function Test-GitTrackedFile {
   param([Parameter(Mandatory = $true)][string]$RelativePath)
   try {
@@ -1118,11 +1402,15 @@ try {
   }
 
   $updaterConfig = Get-Content $updaterConfigPath -Raw | ConvertFrom-Json
-  $owner = [string]$updaterConfig.owner
-  $repo = [string]$updaterConfig.repo
-  if (-not $owner -or -not $repo) {
-    throw "config/updater.json sem owner/repo. Corrija antes de publicar."
-  }
+  $validatedUpdaterRepo = Assert-UpdaterOwnerRepoValid `
+    -Owner ([string]$updaterConfig.owner) `
+    -Repo ([string]$updaterConfig.repo) `
+    -ConfigPathLabel "config/updater.json"
+  $owner = [string]$validatedUpdaterRepo.Owner
+  $repo = [string]$validatedUpdaterRepo.Repo
+
+  Assert-PackagePublishMatchesUpdaterRepo -ExpectedOwner $owner -ExpectedRepo $repo
+  Sync-LocalUserUpdaterConfigs -BundledConfig $updaterConfig -Owner $owner -Repo $repo
 
   if ($WebhookTest) {
     $testVersion = Get-VersionFromPackageJson
