@@ -126,6 +126,16 @@
     font-family: "Space Grotesk", "Sora", sans-serif;
   }
 
+  .window-chrome-brand {
+    width: clamp(96px, 10vw, 146px);
+    height: 20px;
+    object-fit: contain;
+    object-position: right center;
+    opacity: 0.94;
+    pointer-events: none;
+    filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.25));
+  }
+
   .window-controls {
     @apply flex h-full items-center gap-1.5 pr-2;
     -webkit-app-region: no-drag;
@@ -3596,6 +3606,11 @@
 
   .window-chrome-title {
     display: none;
+  }
+
+  .window-chrome-brand {
+    width: clamp(86px, 22vw, 118px);
+    height: 18px;
   }
 
   .launcher-shell {

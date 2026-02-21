@@ -2,7 +2,7 @@ import "notyf/notyf.min.css";
 import "../renderer/styles.input.css";
 
 export const metadata = {
-  title: "WPlay"
+  title: "Origin"
 };
 
 export default function RootLayout({ children }) {

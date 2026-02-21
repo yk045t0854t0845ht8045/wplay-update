@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WPlay Updater</title>
+    <title>Origin Updater</title>
     <style>
       :root {
         color-scheme: dark;
@@ -290,8 +290,8 @@
     <main class="updater-window" role="status" aria-live="polite">
       <header class="titlebar">
         <div class="titlebar-left">
-          <img src="./assets/logo.png" alt="" class="titlebar-logo" />
-          <strong class="titlebar-text">WPlay</strong>
+          <img src="./assets/isotipo.png" alt="" class="titlebar-logo" />
+          <strong class="titlebar-text">Origin</strong>
         </div>
         <div class="window-controls">
           <button class="window-button" id="minimizeButton" type="button" aria-label="Minimizar">
@@ -317,7 +317,7 @@
       </section>
 
       <section class="status-panel">
-        <h1 class="panel-title">WPlay Launcher</h1>
+        <h1 class="panel-title">Origin Launcher</h1>
         <p class="panel-version" id="versionLabel">Versao atual: --</p>
         <p class="panel-status" id="statusDescription">Inicializando atualizador...</p>
         <div class="progress-root">
@@ -406,8 +406,8 @@
         const showFallbackBanner = () => {
           heroBanner.classList.add("is-fallback");
           heroBanner.classList.remove("visible");
-          heroBanner.src = "./assets/logo.png";
-          heroBanner.dataset.bannerSrc = "./assets/logo.png";
+          heroBanner.src = "./assets/imagotipo.png";
+          heroBanner.dataset.bannerSrc = "./assets/imagotipo.png";
           heroDots.innerHTML = "";
         };
 

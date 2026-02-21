@@ -107,7 +107,7 @@ function Get-VersionFromPackageJson {
   return $version
 }
 
-function Parse-WPlayVersion {
+function Parse-OriginVersion {
   param([Parameter(Mandatory = $true)][string]$Version)
 
   $safeVersion = ([string]$Version).Trim()
@@ -128,7 +128,7 @@ function Get-NextVersionWithRollover {
     [Parameter(Mandatory = $true)][ValidateSet("patch", "minor", "major")][string]$BumpType
   )
 
-  $parts = Parse-WPlayVersion -Version $CurrentVersion
+  $parts = Parse-OriginVersion -Version $CurrentVersion
   $major = [int]$parts.Major
   $minor = [int]$parts.Minor
   $patch = [int]$parts.Patch
@@ -356,7 +356,7 @@ function Get-SafeWebhookEndpointLabel {
   }
 }
 
-function New-WPlayDeepLink {
+function New-OriginDeepLink {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
     [hashtable]$Query = @{}
@@ -380,7 +380,7 @@ function New-WPlayDeepLink {
   }
 
   $queryText = if ($pairs.Count -gt 0) { "?" + ($pairs -join "&") } else { "" }
-  return "wplay://$sanitizedPath$queryText"
+  return "origin://$sanitizedPath$queryText"
 }
 
 function Convert-DeepLinkToFriendlyHttpUrl {
@@ -392,7 +392,7 @@ function Convert-DeepLinkToFriendlyHttpUrl {
   }
 
   $encoded = [Uri]::EscapeDataString($raw)
-  # Redirecionamento HTTP 302 simples para o protocolo wplay:// sem pagina intermediaria.
+  # Redirecionamento HTTP 302 simples para o protocolo origin:// sem pagina intermediaria.
   return "https://httpbin.org/redirect-to?url=$encoded"
 }
 
@@ -489,7 +489,7 @@ function New-DiscordUpdateEmbedPayload {
     [Parameter(Mandatory = $false)][bool]$UseDeepLinkMarkdown = $true
   )
 
-  $openLauncherLink = New-WPlayDeepLink -Path "launcher/open" -Query @{
+  $openLauncherLink = New-OriginDeepLink -Path "launcher/open" -Query @{
     source = "discord"
     target = "updates"
     version = $Version
@@ -509,15 +509,15 @@ function New-DiscordUpdateEmbedPayload {
     }
     embeds = @(
       @{
-        title = "[WPlay Launcher - Atualizacao $Tag]"
+        title = "[Origin Launcher - Atualizacao $Tag]"
         url = $openLauncherLinkHttp
-        description = "Nova atualizacao disponivel no WPlay Launcher. Versao $Version com melhorias importantes."
+        description = "Nova atualizacao disponivel no Origin Launcher. Versao $Version com melhorias importantes."
         color = 3066993
         thumbnail = @{
           url = "https://imgur.com/KjOK7w4.png"
         }
         footer = @{
-          text = "WPlay Launcher"
+          text = "Origin Launcher"
         }
         timestamp = $timestampUtc
       }
@@ -654,7 +654,7 @@ function Send-DiscordUpdateFailureWebhook {
     $safeError = $safeError.Substring(0, 350)
   }
 
-  $openLauncherLink = New-WPlayDeepLink -Path "launcher/open" -Query @{
+  $openLauncherLink = New-OriginDeepLink -Path "launcher/open" -Query @{
     source = "discord"
     target = "updates"
     version = $Version
@@ -669,11 +669,11 @@ function Send-DiscordUpdateFailureWebhook {
     }
     embeds = @(
       @{
-        title = "WPlay Launcher - Falha na atualizacao $Tag"
+        title = "Origin Launcher - Falha na atualizacao $Tag"
         description = "A publicacao da atualizacao falhou.`n[Abrir Launcher]($openLauncherLink)`nErro: ``$safeError``"
         color = 15158332
         footer = @{
-          text = "WPlay Update"
+          text = "Origin Update"
         }
         timestamp = $timestampUtc
       }
@@ -743,7 +743,7 @@ function Get-LatestWorkflowRunSummary {
 function New-GitHubApiHeaders {
   param([string]$Token = "")
   $headers = @{
-    "User-Agent" = "WPlay-UpdateNow"
+    "User-Agent" = "Origin-UpdateNow"
     "Accept"     = "application/vnd.github+json"
   }
   if ($Token) {
@@ -755,7 +755,7 @@ function New-GitHubApiHeaders {
 function New-GitHubWebHeaders {
   param([string]$Token = "")
   $headers = @{
-    "User-Agent" = "WPlay-UpdateNow"
+    "User-Agent" = "Origin-UpdateNow"
   }
   if ($Token) {
     $headers["Authorization"] = "Bearer $Token"
@@ -828,10 +828,10 @@ function Test-HttpUrlExists {
 function Get-ExpectedReleaseAssetNames {
   param([Parameter(Mandatory = $true)][string]$Tag)
   $exeCandidates = @(
-    "WPlaySetup.exe"
+    "OriginSetup.exe"
   ) | Where-Object { $_ } | Select-Object -Unique
   $blockmapCandidates = @($exeCandidates | ForEach-Object { "$_.blockmap" } | Where-Object { $_ } | Select-Object -Unique)
-  $exeName = if ($exeCandidates.Count -gt 0) { [string]$exeCandidates[0] } else { "WPlaySetup.exe" }
+  $exeName = if ($exeCandidates.Count -gt 0) { [string]$exeCandidates[0] } else { "OriginSetup.exe" }
   $blockmapName = if ($blockmapCandidates.Count -gt 0) { [string]$blockmapCandidates[0] } else { "$exeName.blockmap" }
   return [pscustomobject]@{
     Manifest            = "latest.yml"
@@ -1162,7 +1162,7 @@ try {
     Invoke-Step -Title "Validando token no repo $owner/$repo" -Action {
       $headers = @{
         "Authorization" = "Bearer $($env:GH_TOKEN)"
-        "User-Agent"    = "WPlay-UpdateNow"
+        "User-Agent"    = "Origin-UpdateNow"
         "Accept"        = "application/vnd.github+json"
       }
       try {

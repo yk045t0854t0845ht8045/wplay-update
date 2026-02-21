@@ -1,8 +1,8 @@
 {
-  "name": "wplay",
+  "name": "origin",
   "version": "1.0.90",
   "description": "Launcher de jogos em Electron com download, instalacao e execucao.",
-  "author": "WPlay",
+  "author": "Origin",
   "main": "main.js",
   "scripts": {
     "tw:build": "tailwindcss -c tailwind.config.js -i ./renderer/styles.input.css -o ./renderer/styles.css",
@@ -13,7 +13,7 @@
     "gh:publish-game": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/publish-game-to-github.ps1",
     "update-now": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/update-now.ps1",
     "build": "npm run tw:build && npm run next:build && set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win --x64",
-    "build:portable": "npm run tw:build && npm run next:build && set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win portable --x64 -c.win.artifactName=WPlay-Portable-${version}-${arch}.${ext}",
+    "build:portable": "npm run tw:build && npm run next:build && set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win portable --x64 -c.win.artifactName=Origin-Portable-${version}-${arch}.${ext}",
     "release:github": "npm run tw:build && npm run next:build && set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win --x64 --publish always"
   },
   "dependencies": {
@@ -37,8 +37,8 @@
     "tailwindcss": "^3.4.17"
   },
   "build": {
-    "appId": "com.wplay.app",
-    "productName": "WPlay",
+    "appId": "com.origin.app",
+    "productName": "Origin",
     "compression": "maximum",
     "asar": true,
     "removePackageScripts": true,
@@ -48,9 +48,9 @@
     ],
     "protocols": [
       {
-        "name": "WPlay Auth",
+        "name": "Origin Auth",
         "schemes": [
-          "wplay"
+          "origin"
         ]
       }
     ],
@@ -98,7 +98,7 @@
           ]
         }
       ],
-      "artifactName": "WPlaySetup.${ext}"
+      "artifactName": "OriginSetup.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -108,7 +108,7 @@
       "createStartMenuShortcut": true,
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
-      "shortcutName": "WPlay"
+      "shortcutName": "Origin"
     },
     "publish": {
       "provider": "github",

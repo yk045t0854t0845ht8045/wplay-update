@@ -27,12 +27,12 @@ module.exports = async function afterPack(context) {
   }
 
   const productFilename =
-    String(context?.packager?.appInfo?.productFilename || context?.packager?.appInfo?.productName || "WPlay").trim() ||
-    "WPlay";
+    String(context?.packager?.appInfo?.productFilename || context?.packager?.appInfo?.productName || "Origin").trim() ||
+    "Origin";
   const exePath = path.join(appOutDir, `${productFilename}.exe`);
   const iconPath = path.join(projectDir, "build", "icon.ico");
   const appVersion = String(context?.packager?.appInfo?.version || "").trim();
-  const brandedProcessName = "WPlay Games";
+  const brandedProcessName = "Origin Games";
   const originalFilename = path.basename(exePath);
   const internalName = path.basename(exePath, path.extname(exePath));
 

@@ -4,13 +4,13 @@ const fs = require("fs");
 const { spawn } = require("child_process");
 
 const ELECTRON_NODE_ENV_KEY = "ELECTRON_RUN_AS_NODE";
-const ELECTRON_NODE_RELAUNCH_GUARD_KEY = "WPLAY_ELECTRON_NODE_RELAUNCHED";
+const ELECTRON_NODE_RELAUNCH_GUARD_KEY = "ORIGIN_ELECTRON_NODE_RELAUNCHED";
 const EARLY_STARTUP_LOG_FILE_NAME = "launcher.startup.log";
 
 function appendEarlyStartupLog(message) {
   try {
     const appDataDir = String(process.env.APPDATA || process.cwd() || "").trim() || process.cwd();
-    const runtimeDir = path.join(appDataDir, "wplay");
+    const runtimeDir = path.join(appDataDir, "origin");
     fs.mkdirSync(runtimeDir, { recursive: true });
     const logPath = path.join(runtimeDir, EARLY_STARTUP_LOG_FILE_NAME);
     const line = `[${new Date().toISOString()}] ${String(message || "").trim()}\n`;
@@ -29,7 +29,7 @@ function relaunchWithoutElectronRunAsNode() {
     .slice(1)
     .filter((arg) => {
       const value = String(arg || "").trim();
-      return /^wplay:\/\//i.test(value);
+      return /^origin:\/\//i.test(value);
     });
   const child = spawn(process.execPath, nextArgs, {
     env: relaunchEnv,
@@ -105,7 +105,7 @@ const MAINTENANCE_STATE_CHANNEL = "launcher:maintenance-state";
 const MAX_SCAN_DEPTH = 6;
 const MAX_SCAN_FILES = 7000;
 const INSTALL_SIZE_CACHE_TTL_MS = 60 * 60 * 1000;
-const AUTH_PROTOCOL_SCHEME = "wplay";
+const AUTH_PROTOCOL_SCHEME = "origin";
 const AUTH_CALLBACK_URL_DEFAULT = `${AUTH_PROTOCOL_SCHEME}://auth/callback`;
 const AUTH_LOGIN_TIMEOUT_MS = 3 * 60 * 1000;
 const AUTH_EXPIRY_SKEW_SECONDS = 30;
@@ -168,10 +168,10 @@ const SOCIAL_ACTIVITY_BACKGROUND_SEEN_LIMIT = 420;
 const SOCIAL_ACTIVITY_BACKGROUND_LIMIT = 80;
 const MAINTENANCE_MONITOR_INTERVAL_MS = 4500;
 const MAINTENANCE_MONITOR_INTERVAL_LOW_SPEC_MS = 9000;
-const WINDOWS_APP_USER_MODEL_ID = "com.wplay.app";
-const WINDOWS_APP_USER_MODEL_ID_DEV = "com.wplay.app.dev";
-const DEV_RUNTIME_APP_NAME = "WPlay Dev";
-const DEV_RUNTIME_USER_DATA_DIR_NAME = "WPlay-Dev";
+const WINDOWS_APP_USER_MODEL_ID = "com.origin.app";
+const WINDOWS_APP_USER_MODEL_ID_DEV = "com.origin.app.dev";
+const DEV_RUNTIME_APP_NAME = "Origin Dev";
+const DEV_RUNTIME_USER_DATA_DIR_NAME = "Origin-Dev";
 const YOUTUBE_EMBED_REFERER = "https://www.youtube.com/";
 const YOUTUBE_EMBED_ORIGIN = "https://www.youtube.com";
 const STEAM_OPENID_URL = "https://steamcommunity.com/openid/login";
@@ -213,7 +213,7 @@ const STARTUP_FAILURE_WINDOW_MS = 20 * 60 * 1000;
 const STARTUP_FAILURES_BEFORE_SAFE_MODE = 2;
 const MAIN_WINDOW_MAX_LOAD_RETRIES = 2;
 const MAIN_WINDOW_LOAD_RETRY_DELAY_MS = 1200;
-const TRAY_TOOLTIP_TEXT = "WPlay Games Launcher";
+const TRAY_TOOLTIP_TEXT = "Origin Games Launcher";
 const RUNTIME_CONFIG_LAUNCH_ON_SYSTEM_STARTUP_KEY = "launchOnStartup";
 const ACTIVE_INSTALL_PHASES = new Set(["queued", "paused", "preparing", "downloading", "extracting"]);
 
@@ -448,7 +448,7 @@ function resolveRuntimeStateDirectory() {
   }
 
   const appDataDir = String(process.env.APPDATA || process.cwd() || "").trim() || process.cwd();
-  const runtimeFolder = runtimeChannel === "dev" ? DEV_RUNTIME_USER_DATA_DIR_NAME : "wplay";
+  const runtimeFolder = runtimeChannel === "dev" ? DEV_RUNTIME_USER_DATA_DIR_NAME : "origin";
   const fallbackDir = path.join(appDataDir, runtimeFolder);
   try {
     fs.mkdirSync(fallbackDir, { recursive: true });
@@ -1609,7 +1609,7 @@ function buildAutoUpdateRuntimeDiagnostic(runtimeInfo = resolveAutoUpdateRuntime
 
 function resolveAutoUpdateUnsupportedMessage(runtimeInfo = resolveAutoUpdateRuntimeInfo()) {
   if (runtimeInfo.runtimeChannel === "dev" || runtimeInfo.defaultApp || runtimeInfo.electronBinary) {
-    return "Atualizador automatico desativado no modo desenvolvimento. Feche o launcher dev e abra o WPlay instalado.";
+    return "Atualizador automatico desativado no modo desenvolvimento. Feche o launcher dev e abra o Origin instalado.";
   }
   return "Atualizador automatico indisponivel neste runtime.";
 }
@@ -1697,7 +1697,7 @@ function installProcessRuntimeErrorHandlers() {
     try {
       dialog.showErrorBox(
         "Falha ao iniciar o launcher",
-        `O WPlay encontrou um erro critico ao iniciar.\n\n${error?.message || "Erro desconhecido."}`
+        `O Origin encontrou um erro critico ao iniciar.\n\n${error?.message || "Erro desconhecido."}`
       );
     } catch (_dialogError) {
       // Ignore dialog failures.
@@ -2001,7 +2001,7 @@ function buildTrayMenuTemplate() {
 
   return [
     {
-      label: "Abrir WPlay",
+      label: "Abrir Origin",
       click: () => {
         showAndFocusMainWindow();
       }
@@ -2211,7 +2211,7 @@ function ensureWindowsShortcutsWithIcon() {
   };
 
   const iconPath = resolveWindowIconPath() || process.execPath;
-  const appDisplayName = String(app.getName() || "WPlay").trim() || "WPlay";
+  const appDisplayName = String(app.getName() || "Origin").trim() || "Origin";
   const shortcutName = `${appDisplayName}.lnk`;
   const shortcutDetails = {
     target: process.execPath,
@@ -2530,7 +2530,7 @@ function createUpdateSplashWindow() {
     fullscreenable: false,
     frame: false,
     autoHideMenuBar: true,
-    title: "WPlay Games Updater",
+    title: "Origin Games Updater",
     backgroundColor: "#09090A",
     icon: windowIconAsset.image || windowIconAsset.path || undefined,
     alwaysOnTop: true,
@@ -2851,7 +2851,7 @@ function createWindow() {
     minHeight: 940,
     frame: false,
     autoHideMenuBar: true,
-    title: "WPlay Games",
+    title: "Origin Games",
     backgroundColor: "#080808",
     show: false,
     icon: windowIconAsset.image || windowIconAsset.path || undefined,
@@ -4440,7 +4440,7 @@ function isRetryableAutoUpdateStatus(status) {
 function buildAutoUpdateRequestHeaders(config) {
   const headers = {
     Accept: "application/vnd.github+json",
-    "User-Agent": "WPlay-Launcher-Updater"
+    "User-Agent": "Origin-Launcher-Updater"
   };
   if (config?.token) {
     headers.Authorization = `Bearer ${config.token}`;
@@ -4697,7 +4697,7 @@ function wireAutoUpdaterEventsOnce() {
       ? directLatestMode
         ? `${latestLabel} encontrada. Baixando pacote completo mais recente...`
         : `${latestLabel} encontrada. Baixando em segundo plano...`
-      : `${latestLabel} encontrada. Use a bandeja do WPlay para baixar.`;
+      : `${latestLabel} encontrada. Use a bandeja do Origin para baixar.`;
 
     setAutoUpdateState({
       status: autoUpdater.autoDownload ? "downloading" : "available",
@@ -5018,7 +5018,7 @@ async function checkForLauncherUpdate(origin = "manual") {
           ? directLatestMode
             ? `${latestLabel} encontrada. Baixando pacote completo mais recente...`
             : `${latestLabel} encontrada. Baixando em segundo plano...`
-          : `${latestLabel} encontrada. Use a bandeja do WPlay para baixar.`;
+          : `${latestLabel} encontrada. Use a bandeja do Origin para baixar.`;
 
         setAutoUpdateState({
           status: autoUpdater.autoDownload ? "downloading" : "available",
@@ -9542,7 +9542,7 @@ async function createDownloadStream(game, options = {}) {
         maxContentLength: Infinity,
         validateStatus: () => true,
         headers: {
-          "User-Agent": "WPlay/2.0",
+          "User-Agent": "Origin/2.0",
           "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
           ...(metadataProbe ? { Range: "bytes=0-0" } : {})
         }
@@ -9631,7 +9631,7 @@ async function createDownloadStream(game, options = {}) {
             maxContentLength: Infinity,
             validateStatus: () => true,
             headers: {
-              "User-Agent": "WPlay/2.0",
+              "User-Agent": "Origin/2.0",
               "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
               ...(metadataProbe ? { Range: "bytes=0-0" } : {}),
               ...(cookieHeader ? { Cookie: cookieHeader } : {})
@@ -12665,7 +12665,7 @@ async function createGameShortcut(gameId) {
   const shortcutDetails = {
     target: executable.absolutePath,
     cwd: path.dirname(executable.absolutePath),
-    description: `Jogar ${String(game.name || "Jogo").trim()} via WPlay`,
+    description: `Jogar ${String(game.name || "Jogo").trim()} via Origin`,
     icon: executable.absolutePath || resolveWindowIconPath() || process.execPath,
     iconIndex: 0,
     appUserModelId: WINDOWS_APP_USER_MODEL_ID
@@ -12907,7 +12907,7 @@ if (!hasSingleInstanceLock) {
       try {
         dialog.showErrorBox(
           "Falha ao abrir o launcher",
-          `Nao foi possivel abrir a interface do WPlay.\n\n${error?.message || "Erro desconhecido."}`
+          `Nao foi possivel abrir a interface do Origin.\n\n${error?.message || "Erro desconhecido."}`
         );
       } catch (_dialogError) {
         // Ignore dialog failures.

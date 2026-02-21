@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 
-const BOOT_FLAG = "__WPLAY_RENDERER_BOOTED__";
+const BOOT_FLAG = "__ORIGIN_RENDERER_BOOTED__";
 
 export default function LauncherBoot() {
   useEffect(() => {

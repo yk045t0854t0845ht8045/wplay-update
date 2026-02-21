@@ -783,8 +783,8 @@ async function toggleLaunchOnStartupFromAccountMenu() {
       "success",
       "Inicializacao",
       normalized.enabled
-        ? "WPlay vai iniciar junto com o Windows."
-        : "WPlay nao vai iniciar junto com o Windows."
+        ? "Origin vai iniciar junto com o Windows."
+        : "Origin nao vai iniciar junto com o Windows."
     );
   } catch (error) {
     setStatus(`Falha ao atualizar inicializacao com sistema: ${error?.message || "erro desconhecido"}`, true);
@@ -1816,8 +1816,8 @@ function applyAutoUpdatePayload(payload, fromEvent = false) {
       "info",
       "Atualizacao disponivel",
       latestVersionTag
-        ? `${latestVersionTag} encontrada. Use a bandeja do WPlay para baixar agora.`
-        : "Nova versao encontrada. Use a bandeja do WPlay para baixar agora."
+        ? `${latestVersionTag} encontrada. Use a bandeja do Origin para baixar agora.`
+        : "Nova versao encontrada. Use a bandeja do Origin para baixar agora."
     );
   }
 
@@ -3426,7 +3426,7 @@ function syncStoreCatalogLoadingUi() {
 
 function getStoreCardKind(game) {
   const value = String(game.storeType || game.productType || game.storeKind || game.cardKind || "").trim();
-  return value || "WPlay Games - Gratuito";
+  return value || "Origin - Gratuito";
 }
 
 function getStoreFeatureTag(game) {
@@ -4765,7 +4765,7 @@ function renderVideo(game) {
               <webview
                 class="video-youtube-webview"
                 src="${escapeHtml(embedPlayerUrl)}"
-                partition="persist:wplay-youtube"
+                partition="persist:origin-youtube"
                 allowfullscreen
               ></webview>
             `
