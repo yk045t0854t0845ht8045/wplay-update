@@ -131,6 +131,8 @@ const AUTO_UPDATE_SPLASH_MAX_WAIT_MS = 90 * 1000;
 const AUTO_UPDATE_SPLASH_POLL_INTERVAL_MS = 250;
 const AUTO_UPDATE_SPLASH_PREFIX_DELAY_MS = 7500;
 const AUTO_UPDATE_INSTALL_SPLASH_MIN_VISIBLE_MS = 7000;
+const AUTO_UPDATE_STARTUP_FOLLOWUP_DELAYS_MS = [2500, 12000, 26000];
+const AUTO_UPDATE_STARTUP_FOLLOWUP_DELAYS_LOW_SPEC_MS = [7000, 22000, 42000];
 const RUNNING_PROCESS_CACHE_TTL_MS = 10 * 1000;
 const CATALOG_DEFAULT_POLL_INTERVAL_SECONDS = 6;
 const CATALOG_MIN_POLL_INTERVAL_SECONDS = 2;
@@ -2777,6 +2779,51 @@ async function waitForStartupUpdateBlockingStateToFinish(maxWaitMs = AUTO_UPDATE
   return !isAutoUpdateStartupBlockingStatus(autoUpdateState.status);
 }
 
+function scheduleStartupAutoUpdateFollowupChecks(options = {}) {
+  const precheckStarted = Boolean(options?.precheckStarted);
+  const delays = resolveHostLowSpecProfile()
+    ? AUTO_UPDATE_STARTUP_FOLLOWUP_DELAYS_LOW_SPEC_MS
+    : AUTO_UPDATE_STARTUP_FOLLOWUP_DELAYS_MS;
+  const uniqueDelays = [...new Set((Array.isArray(delays) ? delays : []).map((value) => Math.max(0, Number(value) || 0)))];
+  if (uniqueDelays.length === 0) {
+    return;
+  }
+
+  uniqueDelays.forEach((delayMs, index) => {
+    setTimeout(() => {
+      if (appQuitRequested || startupAutoUpdateFlowActive) {
+        return;
+      }
+      if (!autoUpdateConfigSnapshot?.enabled || !autoUpdateConfigSnapshot?.configured) {
+        return;
+      }
+
+      const origin = index === 0 ? (precheckStarted ? "startup-followup" : "startup") : `startup-followup-${index + 1}`;
+      appendStartupLog(`[AUTO_UPDATE] verificacao inicial em background (origin=${origin}, delayMs=${delayMs}).`);
+      void checkForLauncherUpdate(origin)
+        .then((stateSnapshot) => {
+          if (appQuitRequested || startupAutoUpdateFlowActive) {
+            return;
+          }
+
+          const snapshot =
+            stateSnapshot && typeof stateSnapshot === "object" ? stateSnapshot : getPublicAutoUpdateState();
+          if (!shouldUseStartupUpdateSplash() || !shouldShowStartupUpdateSplashForState(snapshot)) {
+            return;
+          }
+
+          appendStartupLog("[AUTO_UPDATE] update pendente detectado apos abertura; exibindo splash de update.");
+          return runStartupAutoUpdateFlowWithSplash({
+            skipStartupCheck: true
+          });
+        })
+        .catch((error) => {
+          appendStartupLog(`[AUTO_UPDATE] startup follow-up check falhou: ${formatStartupErrorForLog(error)}`);
+        });
+    }, delayMs);
+  });
+}
+
 async function runStartupAutoUpdateFlowWithSplash(options = {}) {
   if (!shouldUseStartupUpdateSplash()) {
     return;
@@ -3612,9 +3659,7 @@ async function ensurePersistedUpdaterConfigFile() {
     if (!config || typeof config !== "object") {
       return false;
     }
-    const owner = normalizeUpdaterOwnerOrRepo(config.owner);
-    const repo = normalizeUpdaterOwnerOrRepo(config.repo);
-    return Boolean(owner && repo);
+    return isUpdaterOwnerRepoConfigured(config.owner, config.repo);
   };
 
   const existingUserConfig = await readCandidate(userUpdaterConfigPath);
@@ -4167,9 +4212,7 @@ function readUpdaterConfigFileSync() {
   }
 
   for (const parsedCandidate of parsedCandidates) {
-    const owner = normalizeUpdaterOwnerOrRepo(parsedCandidate.owner);
-    const repo = normalizeUpdaterOwnerOrRepo(parsedCandidate.repo);
-    if (owner && repo) {
+    if (isUpdaterOwnerRepoConfigured(parsedCandidate.owner, parsedCandidate.repo)) {
       return parsedCandidate;
     }
   }
@@ -4182,6 +4225,41 @@ function normalizeUpdaterOwnerOrRepo(value) {
     .trim()
     .replace(/^\/+|\/+$/g, "")
     .replace(/[^a-zA-Z0-9_.-]/g, "");
+}
+
+function isUpdaterPlaceholderToken(value) {
+  const normalized = normalizeUpdaterOwnerOrRepo(value).toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  if (!compact) {
+    return true;
+  }
+
+  if (["seuusuarioouorg", "seurepodolauncher", "youruserororg", "yourlauncherrepo"].includes(compact)) {
+    return true;
+  }
+
+  return (
+    compact.includes("seuusuario") ||
+    compact.includes("seurepo") ||
+    compact.includes("youruser") ||
+    compact.includes("yourrepo")
+  );
+}
+
+function isUpdaterOwnerRepoConfigured(ownerValue, repoValue) {
+  const owner = normalizeUpdaterOwnerOrRepo(ownerValue);
+  const repo = normalizeUpdaterOwnerOrRepo(repoValue);
+  if (!owner || !repo) {
+    return false;
+  }
+  if (isUpdaterPlaceholderToken(owner) || isUpdaterPlaceholderToken(repo)) {
+    return false;
+  }
+  return true;
 }
 
 function normalizeUpdaterProvider(value) {
@@ -4209,8 +4287,10 @@ function resolveAutoUpdaterProvider(config) {
 function resolveAutoUpdaterConfig() {
   const fileConfig = readUpdaterConfigFileSync();
   const enabled = parseBoolean(process.env.WPLAY_UPDATER_ENABLED ?? fileConfig.enabled, true);
-  const owner = normalizeUpdaterOwnerOrRepo(process.env.WPLAY_UPDATER_OWNER || fileConfig.owner);
-  const repo = normalizeUpdaterOwnerOrRepo(process.env.WPLAY_UPDATER_REPO || fileConfig.repo);
+  const ownerRaw = normalizeUpdaterOwnerOrRepo(process.env.WPLAY_UPDATER_OWNER || fileConfig.owner);
+  const repoRaw = normalizeUpdaterOwnerOrRepo(process.env.WPLAY_UPDATER_REPO || fileConfig.repo);
+  const owner = isUpdaterPlaceholderToken(ownerRaw) ? "" : ownerRaw;
+  const repo = isUpdaterPlaceholderToken(repoRaw) ? "" : repoRaw;
   const channel = String(process.env.WPLAY_UPDATER_CHANNEL || fileConfig.channel || "latest").trim() || "latest";
   const privateRepo = parseBoolean(process.env.WPLAY_UPDATER_PRIVATE ?? fileConfig.private, false);
   const token = String(process.env.WPLAY_UPDATER_TOKEN || fileConfig.token || "").trim();
@@ -4235,13 +4315,22 @@ function resolveAutoUpdaterConfig() {
     process.env.WPLAY_UPDATER_AUTO_RUN_AFTER_INSTALL ?? fileConfig.autoRunAfterInstall,
     true
   );
+  const intervalSeconds = parsePositiveInteger(
+    process.env.WPLAY_UPDATER_CHECK_INTERVAL_SECONDS ?? fileConfig.checkIntervalSeconds
+  );
   const intervalMinutes = parsePositiveInteger(
     process.env.WPLAY_UPDATER_CHECK_INTERVAL_MINUTES ?? fileConfig.checkIntervalMinutes
   );
-  const configured = Boolean(owner && repo);
+  const configured = isUpdaterOwnerRepoConfigured(owner, repo);
+  const requestedIntervalMs =
+    intervalSeconds > 0
+      ? intervalSeconds * 1000
+      : intervalMinutes > 0
+        ? intervalMinutes * 60_000
+        : AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS;
   const checkIntervalMs = Math.max(
     AUTO_UPDATE_MIN_CHECK_INTERVAL_MS,
-    (intervalMinutes > 0 ? intervalMinutes * 60_000 : AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS)
+    requestedIntervalMs
   );
 
   return {
@@ -4868,6 +4957,10 @@ function setupAutoUpdater() {
   autoUpdateFeedValidationCompleted = false;
   autoUpdateFeedValidationInFlight = null;
   autoUpdateLastRequestedAt = 0;
+  appendStartupLog(
+    `[AUTO_UPDATE] setup enabled=${config.enabled} configured=${config.configured} owner=${config.owner || "n/a"} ` +
+      `repo=${config.repo || "n/a"} provider=${resolveAutoUpdaterProvider(config)} intervalMs=${config.checkIntervalMs}`
+  );
 
   if (!config.enabled) {
     setAutoUpdateState({
@@ -4966,7 +5059,10 @@ async function checkForLauncherUpdate(origin = "manual") {
 
   const normalizedOrigin = String(origin || "").trim().toLowerCase() || "manual";
   const nowMs = Date.now();
-  const bypassCooldown = normalizedOrigin === "manual" || isStartupAutoUpdateOrigin(normalizedOrigin);
+  const bypassCooldown =
+    normalizedOrigin === "manual" ||
+    isStartupAutoUpdateOrigin(normalizedOrigin) ||
+    normalizedOrigin.startsWith("deeplink");
   if (!bypassCooldown) {
     const elapsedSinceRequest = nowMs - autoUpdateLastRequestedAt;
     if (elapsedSinceRequest >= 0 && elapsedSinceRequest < AUTO_UPDATE_CHECK_COOLDOWN_MS) {
@@ -5466,16 +5562,59 @@ async function handleLauncherOpenDeepLink(rawUrl) {
     .toLowerCase();
   const tag = String(parsedUrl.searchParams.get("tag") || "").trim();
   const version = String(parsedUrl.searchParams.get("version") || "").trim();
+  const hintedVersion = normalizeVersionForComparison(version || tag);
+  const currentVersion = normalizeVersionForComparison(app.getVersion());
+  const expectsNewerVersion =
+    Boolean(hintedVersion) && Boolean(currentVersion) && isVersionNewerThanCurrent(hintedVersion, currentVersion);
   appendStartupLog(
     `[DEEPLINK] launcher/open recebido source=${source || "unknown"} target=${target || "none"} ` +
       `tag=${tag || "none"} version=${version || "none"}`
   );
 
-  try {
-    const checkedState = await checkForLauncherUpdate("manual");
+  const triggerCheckAndMaybeDownload = async (origin) => {
+    const checkedState = await checkForLauncherUpdate(origin);
     const snapshot = checkedState && typeof checkedState === "object" ? checkedState : getPublicAutoUpdateState();
     if (String(snapshot.status || "").toLowerCase() === "available") {
       await downloadLauncherUpdate();
+    }
+    return snapshot;
+  };
+
+  try {
+    const snapshot = await triggerCheckAndMaybeDownload("manual");
+    const status = String(snapshot.status || "").toLowerCase();
+    const updateInFlightOrReady =
+      status === "available" ||
+      status === "downloading" ||
+      status === "downloaded" ||
+      status === "installing" ||
+      Boolean(snapshot.updateDownloaded);
+
+    if (hintedVersion && !expectsNewerVersion) {
+      appendStartupLog(
+        `[DEEPLINK] versao indicada (${hintedVersion}) nao e superior a versao atual (${currentVersion || "unknown"}).`
+      );
+    }
+
+    if (expectsNewerVersion && !updateInFlightOrReady) {
+      const retryDelaysMs = [6000, 18000, 36000];
+      appendStartupLog(
+        `[DEEPLINK] versao indicada (${hintedVersion}) superior a atual (${currentVersion || "unknown"}); ` +
+          `agendando retries de update em ${retryDelaysMs.join(",")}ms.`
+      );
+
+      retryDelaysMs.forEach((delayMs, index) => {
+        setTimeout(() => {
+          if (appQuitRequested) {
+            return;
+          }
+          void triggerCheckAndMaybeDownload(`deeplink-retry-${index + 1}`).catch((error) => {
+            appendStartupLog(
+              `[DEEPLINK] retry ${index + 1} falhou ao iniciar update: ${formatStartupErrorForLog(error)}`
+            );
+          });
+        }, delayMs);
+      });
     }
   } catch (error) {
     appendStartupLog(`[DEEPLINK] launcher/open falhou ao iniciar update: ${formatStartupErrorForLog(error)}`);
@@ -13006,29 +13145,9 @@ if (!hasSingleInstanceLock) {
     }
 
     if (shouldCheckUpdateOnLaunch && !shouldRunStartupUpdateSplash) {
-      const updateWarmupDelayMs = resolveHostLowSpecProfile() ? 7_000 : 2_500;
-      setTimeout(() => {
-        const followupOrigin = startupUpdatePrecheckStarted ? "startup-followup" : "startup";
-        appendStartupLog(`[AUTO_UPDATE] verificacao inicial em background (origin=${followupOrigin}).`);
-        void checkForLauncherUpdate(followupOrigin)
-          .then((stateSnapshot) => {
-            if (appQuitRequested || startupAutoUpdateFlowActive) {
-              return;
-            }
-            const snapshot =
-              stateSnapshot && typeof stateSnapshot === "object" ? stateSnapshot : getPublicAutoUpdateState();
-            if (!shouldUseStartupUpdateSplash() || !shouldShowStartupUpdateSplashForState(snapshot)) {
-              return;
-            }
-            appendStartupLog("[AUTO_UPDATE] update pendente detectado apos abertura; exibindo splash de update.");
-            return runStartupAutoUpdateFlowWithSplash({
-              skipStartupCheck: true
-            });
-          })
-          .catch((error) => {
-            appendStartupLog(`[AUTO_UPDATE] startup follow-up check falhou: ${formatStartupErrorForLog(error)}`);
-          });
-      }, updateWarmupDelayMs);
+      scheduleStartupAutoUpdateFollowupChecks({
+        precheckStarted: startupUpdatePrecheckStarted
+      });
     }
 
     if (pendingDeepLinkUrlBuffer) {
