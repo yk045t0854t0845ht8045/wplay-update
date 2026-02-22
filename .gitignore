@@ -11,3 +11,4 @@ config/auth.json
 config/updater.json
 .env
 .env.*
+site/

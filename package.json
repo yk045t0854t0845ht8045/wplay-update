@@ -12,6 +12,7 @@
     "dev": "npm run tw:build && npm run next:build && electron .",
     "gh:publish-game": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/publish-game-to-github.ps1",
     "update-now": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/update-now.ps1",
+    "site": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/site.ps1",
     "build": "npm run tw:build && npm run next:build && set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win --x64",
     "build:portable": "npm run tw:build && npm run next:build && set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win portable --x64 -c.win.artifactName=Origin-Portable-${version}-${arch}.${ext}",
     "release:github": "npm run tw:build && npm run next:build && set CSC_IDENTITY_AUTO_DISCOVERY=false&& electron-builder --win --x64 --publish always"
