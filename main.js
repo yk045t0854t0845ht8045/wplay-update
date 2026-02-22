@@ -4399,9 +4399,7 @@ function formatAutoUpdateError(error) {
 
   if (lower.includes("cannot find latest.yml") || (lower.includes("latest.yml") && lower.includes("404"))) {
     return (
-      `[AUTO_UPDATE_FEED] O repo ${repoLabel} nao possui artefatos de update do launcher. ` +
-      "Para auto update funcionar, publique release com latest.yml, .exe e .blockmap " +
-      "(nao use repo de assets de jogo)."
+      "No Assets"
     );
   }
 
