@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   installGame: (gameId) => ipcRenderer.invoke("launcher:install-game", gameId),
   pauseInstall: (gameId) => ipcRenderer.invoke("launcher:pause-install", gameId),
   resumeInstall: (gameId) => ipcRenderer.invoke("launcher:resume-install", gameId),
+  cancelInstall: (gameId) => ipcRenderer.invoke("launcher:cancel-install", gameId),
   pauseAllInstalls: () => ipcRenderer.invoke("launcher:pause-all-installs"),
   resumeAllInstalls: () => ipcRenderer.invoke("launcher:resume-all-installs"),
   uninstallGame: (gameId) => ipcRenderer.invoke("launcher:uninstall-game", gameId),

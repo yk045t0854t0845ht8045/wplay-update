@@ -120,9 +120,12 @@ const DOWNLOAD_SOURCE_SELECTION_SEED = crypto.randomBytes(8).toString("hex");
 const GOOGLE_DRIVE_MAX_CONFIRM_HOPS = 6;
 const DEFENDER_SCAN_TIMEOUT_MS = 20 * 60 * 1000;
 const ARCHIVE_TOOL_TIMEOUT_MS = 25 * 60 * 1000;
-const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 60 * 1000;
-const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 2 * 60 * 1000;
-const AUTO_UPDATE_CHECK_COOLDOWN_MS = 45 * 1000;
+const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 15 * 1000;
+const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 45 * 1000;
+const AUTO_UPDATE_CHECK_COOLDOWN_MS = 12 * 1000;
+const AUTO_UPDATE_INTERVAL_JITTER_RATIO = 0.18;
+const AUTO_UPDATE_INTERVAL_MAX_JITTER_MS = 8 * 1000;
+const AUTO_UPDATE_INTERVAL_INITIAL_MAX_DELAY_MS = 18 * 1000;
 const AUTO_UPDATE_MANUAL_TRANSIENT_RETRY_DELAY_MS = 1400;
 const AUTO_UPDATE_TARGET_RELEASE_CACHE_TTL_MS = 2 * 60 * 1000;
 const AUTO_UPDATE_RELEASE_SCAN_LIMIT = 25;
@@ -4546,7 +4549,7 @@ function resolveAutoUpdaterConfig() {
   const requestedIntervalMs =
     intervalSeconds > 0
       ? intervalSeconds * 1000
-      : intervalMinutes > 0
+      : intervalMinutes > 1
         ? intervalMinutes * 60_000
         : AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS;
   const checkIntervalMs = Math.max(
@@ -4772,8 +4775,24 @@ function setAutoUpdateNoReleaseState(message) {
 
 function clearAutoUpdaterInterval() {
   if (!autoUpdateIntervalId) return;
-  clearInterval(autoUpdateIntervalId);
+  clearTimeout(autoUpdateIntervalId);
   autoUpdateIntervalId = null;
+}
+
+function computeAutoUpdateIntervalTickDelayMs(baseIntervalMs, options = {}) {
+  const baseMs = Math.max(
+    AUTO_UPDATE_MIN_CHECK_INTERVAL_MS,
+    Number(baseIntervalMs) || AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS
+  );
+  const initial = options?.initial === true;
+  const initialCapMs = Math.max(AUTO_UPDATE_MIN_CHECK_INTERVAL_MS, AUTO_UPDATE_INTERVAL_INITIAL_MAX_DELAY_MS);
+  const targetBaseMs = initial ? Math.min(baseMs, initialCapMs) : baseMs;
+  const jitterCapMs = Math.min(
+    AUTO_UPDATE_INTERVAL_MAX_JITTER_MS,
+    Math.floor(targetBaseMs * AUTO_UPDATE_INTERVAL_JITTER_RATIO)
+  );
+  const jitterMs = jitterCapMs > 0 ? Math.round((Math.random() * 2 - 1) * jitterCapMs) : 0;
+  return Math.max(AUTO_UPDATE_MIN_CHECK_INTERVAL_MS, targetBaseMs + jitterMs);
 }
 
 function scheduleAutoUpdaterInterval(checkIntervalMs) {
@@ -4781,9 +4800,27 @@ function scheduleAutoUpdaterInterval(checkIntervalMs) {
   if (!Number.isFinite(checkIntervalMs) || checkIntervalMs <= 0) {
     return;
   }
-  autoUpdateIntervalId = setInterval(() => {
-    void checkForLauncherUpdate("interval");
-  }, checkIntervalMs);
+
+  const baseIntervalMs = Math.max(
+    AUTO_UPDATE_MIN_CHECK_INTERVAL_MS,
+    Number(checkIntervalMs) || AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS
+  );
+
+  const scheduleNext = (initial = false) => {
+    const delayMs = computeAutoUpdateIntervalTickDelayMs(baseIntervalMs, { initial });
+    autoUpdateIntervalId = setTimeout(() => {
+      autoUpdateIntervalId = null;
+      void checkForLauncherUpdate("interval")
+        .catch(() => {})
+        .finally(() => {
+          if (!appQuitRequested) {
+            scheduleNext(false);
+          }
+        });
+    }, delayMs);
+  };
+
+  scheduleNext(true);
 }
 
 function getExpectedUpdateManifestNames(channelValue) {
@@ -9460,7 +9497,8 @@ function stopCatalogSizeSyncMonitor() {
   catalogSizeSyncTimer = null;
 }
 
-async function resolveCatalogEntries(settings = {}, localEntries = []) {
+async function resolveCatalogEntries(settings = {}, localEntries = [], options = {}) {
+  const forceRefresh = options?.forceRefresh === true;
   const sourceConfig = resolveCatalogSourceConfig(settings);
   const fallbackEntries = Array.isArray(localEntries) ? localEntries : [];
 
@@ -9475,6 +9513,7 @@ async function resolveCatalogEntries(settings = {}, localEntries = []) {
 
   const now = Date.now();
   if (
+    !forceRefresh &&
     Array.isArray(remoteCatalogCache.entries) &&
     remoteCatalogCache.entries.length > 0 &&
     now - remoteCatalogCache.loadedAt < sourceConfig.pollIntervalMs
@@ -9489,12 +9528,14 @@ async function resolveCatalogEntries(settings = {}, localEntries = []) {
 
   if (remoteCatalogInFlight) {
     const pendingResult = await remoteCatalogInFlight;
-    return {
-      entries: pendingResult.entries,
-      source: pendingResult.source,
-      warning: pendingResult.warning || "",
-      sourceConfig
-    };
+    if (!forceRefresh) {
+      return {
+        entries: pendingResult.entries,
+        source: pendingResult.source,
+        warning: pendingResult.warning || "",
+        sourceConfig
+      };
+    }
   }
 
   remoteCatalogInFlight = (async () => {
@@ -9555,9 +9596,12 @@ async function resolveCatalogEntries(settings = {}, localEntries = []) {
   return remoteCatalogInFlight;
 }
 
-async function readCatalogBundle() {
+async function readCatalogBundle(options = {}) {
+  const forceRefreshCatalog = options?.forceRefreshCatalog === true;
   const { settings, entries: localEntries } = await parseLocalCatalogFile();
-  const resolvedCatalog = await resolveCatalogEntries(settings, localEntries);
+  const resolvedCatalog = await resolveCatalogEntries(settings, localEntries, {
+    forceRefresh: forceRefreshCatalog
+  });
   const entries = Array.isArray(resolvedCatalog.entries) ? resolvedCatalog.entries : [];
   const catalogSourceConfig = resolvedCatalog.sourceConfig || resolveCatalogSourceConfig(settings);
   const authConfig = resolveAuthConfig();
@@ -11928,7 +11972,32 @@ function buildInstallAutoRetryScheduleMessage(nextRetryAtMs, failureCode = "") {
   return `${headline} Retomada automatica em ${waitLabel}${clockLabel ? ` (aprox. ${clockLabel}).` : "."}`;
 }
 
+function createInstallCanceledError(message = "Instalacao cancelada pelo usuario.") {
+  const finalMessage = String(message || "").trim() || "Instalacao cancelada pelo usuario.";
+  const error = new Error(finalMessage);
+  error.installCanceled = true;
+  error.failureCode = "INSTALL_CANCELED";
+  return error;
+}
+
+function isInstallCanceledError(error) {
+  if (error?.installCanceled === true) {
+    return true;
+  }
+  const failureCode = String(error?.failureCode || "").trim().toUpperCase();
+  if (failureCode === "INSTALL_CANCELED") {
+    return true;
+  }
+  const lower = normalizeTextForMatch(error?.message || "");
+  return lower.includes("instalacao cancelada pelo usuario") || lower.includes("download cancelado pelo usuario");
+}
+
 function normalizeInstallFailureMessage(error) {
+  const canceled = isInstallCanceledError(error);
+  if (canceled) {
+    return formatInstallFailure("INSTALL_CANCELED", "Instalacao cancelada pelo usuario.");
+  }
+
   const explicitFailureCode = String(error?.failureCode || "").trim().toUpperCase();
   if (explicitFailureCode === "DRIVE_QUOTA") {
     return formatInstallFailure(
@@ -12478,16 +12547,39 @@ function refreshQueuedInstallProgress() {
 function createInstallRunControl(gameId) {
   const normalizedGameId = String(gameId || "").trim();
   let paused = false;
+  let canceled = false;
+  let cancelReason = "Instalacao cancelada pelo usuario.";
   let lastActivePhase = "preparing";
   let lastActiveProgress = null;
   const pauseWaiters = [];
 
+  const flushPauseWaiters = () => {
+    while (pauseWaiters.length > 0) {
+      const resolve = pauseWaiters.shift();
+      try {
+        resolve?.();
+      } catch (_error) {
+        // Ignore waiter resolution errors.
+      }
+    }
+  };
+
+  const ensureNotCanceled = () => {
+    if (!canceled) {
+      return;
+    }
+    throw createInstallCanceledError(cancelReason);
+  };
+
   const waitIfPaused = async () => {
+    ensureNotCanceled();
     while (paused) {
+      ensureNotCanceled();
       await new Promise((resolve) => {
         pauseWaiters.push(resolve);
       });
     }
+    ensureNotCanceled();
   };
 
   const captureProgress = (payload) => {
@@ -12507,7 +12599,7 @@ function createInstallRunControl(gameId) {
   };
 
   const pause = (message = "Download pausado.") => {
-    if (paused) {
+    if (paused || canceled) {
       return false;
     }
     paused = true;
@@ -12528,18 +12620,11 @@ function createInstallRunControl(gameId) {
   };
 
   const resume = (message = "Retomando download...") => {
-    if (!paused) {
+    if (!paused || canceled) {
       return false;
     }
     paused = false;
-    while (pauseWaiters.length > 0) {
-      const resolve = pauseWaiters.shift();
-      try {
-        resolve?.();
-      } catch (_error) {
-        // Ignore waiter resolution errors.
-      }
-    }
+    flushPauseWaiters();
 
     const baseProgress = lastActiveProgress
       ? {
@@ -12558,12 +12643,40 @@ function createInstallRunControl(gameId) {
     return true;
   };
 
+  const cancel = (message = "Download cancelado pelo usuario.") => {
+    if (canceled) {
+      return false;
+    }
+    canceled = true;
+    cancelReason = String(message || "").trim() || "Download cancelado pelo usuario.";
+    paused = false;
+    flushPauseWaiters();
+
+    const baseProgress = lastActiveProgress || {};
+    const percentRaw = Number(baseProgress.percent);
+    const percent = Number.isFinite(percentRaw) ? Math.max(0, Math.min(100, percentRaw)) : 0;
+    emitInstallProgress({
+      gameId: normalizedGameId,
+      phase: "paused",
+      percent,
+      downloadedBytes: parseSizeBytes(baseProgress.downloadedBytes) > 0 ? Number(baseProgress.downloadedBytes) : 0,
+      totalBytes: parseSizeBytes(baseProgress.totalBytes) > 0 ? Number(baseProgress.totalBytes) : 0,
+      sourceLabel: normalizeOptionalString(baseProgress.sourceLabel),
+      message: "Cancelando download..."
+    });
+    return true;
+  };
+
   return {
     isPaused: () => paused,
+    isCanceled: () => canceled,
     waitIfPaused,
+    ensureNotCanceled,
     captureProgress,
     pause,
     resume,
+    cancel,
+    getCancelReason: () => String(cancelReason || "Instalacao cancelada pelo usuario."),
     getActivePhase: () => String(lastActivePhase || "preparing").toLowerCase()
   };
 }
@@ -12594,7 +12707,17 @@ async function runInstallQueue() {
       const result = await installGameNow(nextGameId);
       request.resolve(result);
     } catch (error) {
-      request.reject(error);
+      if (error?.installPausedForRetry === true) {
+        request.resolve(
+          error?.pausedOutcome || {
+            ok: true,
+            paused: true,
+            state: "paused-retry"
+          }
+        );
+      } else {
+        request.reject(error);
+      }
     } finally {
       const currentRequest = queuedInstallRequestsByGameId.get(nextGameId);
       if (currentRequest === request) {
@@ -12653,7 +12776,13 @@ async function installGameNow(gameId) {
   };
 
   const task = (async () => {
-    const { games, settings } = await readCatalogBundle();
+    const previousSession = activeInstallSessionsByGameId.get(gameId);
+    const shouldForceCatalogRefresh =
+      previousSession?.retryable === true ||
+      String(previousSession?.lastFailureCode || "").trim().toUpperCase() === "DRIVE_QUOTA";
+    const { games, settings } = await readCatalogBundle({
+      forceRefreshCatalog: shouldForceCatalogRefresh
+    });
     const game = games.find((entry) => entry.id === gameId);
     if (!game) {
       throw new Error("Jogo nao encontrado no catalogo.");
@@ -12920,6 +13049,24 @@ async function installGameNow(gameId) {
       if (cacheKey) {
         installSizeCache.delete(cacheKey);
       }
+      const canceledByUser = isInstallCanceledError(error);
+      if (canceledByUser) {
+        const cancelMessage = "Instalacao cancelada pelo usuario.";
+        await clearActiveInstallSession(gameId).catch(() => {});
+        emitInstallTaskProgress({
+          gameId,
+          phase: "canceled",
+          percent: 0,
+          message: cancelMessage
+        });
+        return {
+          ok: true,
+          canceled: true,
+          state: "canceled-active",
+          message: cancelMessage
+        };
+      }
+
       const normalizedErrorMessage = normalizeInstallFailureMessage(error);
       const failureCode =
         extractInstallFailureCode(normalizedErrorMessage) ||
@@ -12970,6 +13117,23 @@ async function installGameNow(gameId) {
         });
         lastPausedInstallGameId = gameId;
         refreshInstallAutoRetryMonitor();
+
+        const pausedOutcome = {
+          ok: true,
+          paused: true,
+          state: canAutoRetry ? "paused-auto-retry" : "paused-manual-retry",
+          autoRetryScheduled: canAutoRetry,
+          retryAt:
+            canAutoRetry && nextRetryAtMs > 0
+              ? new Date(nextRetryAtMs).toISOString()
+              : "",
+          failureCode,
+          message: failureMessage
+        };
+        const pausedError = new Error(failureMessage);
+        pausedError.installPausedForRetry = true;
+        pausedError.pausedOutcome = pausedOutcome;
+        throw pausedError;
       } else {
         await clearActiveInstallSession(gameId).catch(() => {});
         emitInstallTaskProgress({
@@ -12978,8 +13142,8 @@ async function installGameNow(gameId) {
           percent: 0,
           message: failureMessage
         });
+        throw new Error(failureMessage);
       }
-      throw new Error(failureMessage);
     } finally {
       if (!keepTempArchiveForRetry) {
         await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
@@ -13004,6 +13168,118 @@ async function installGameNow(gameId) {
       await clearActiveInstallSession(gameId).catch(() => {});
     }
   }
+}
+
+async function cleanupInstallArtifactsForGame(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    return {
+      removedTempArchive: false,
+      removedInstallDir: false
+    };
+  }
+
+  const session = activeInstallSessionsByGameId.get(normalizedGameId);
+  if (!session || typeof session !== "object") {
+    return {
+      removedTempArchive: false,
+      removedInstallDir: false
+    };
+  }
+
+  const installRoot = normalizeAbsolutePath(session.installRoot || "");
+  const installDir = normalizeAbsolutePath(session.installDir || "");
+  const tempArchivePath = normalizeAbsolutePath(session.tempArchivePath || "");
+  const tempRoot = installRoot ? path.join(installRoot, TEMP_DIR_NAME) : "";
+  let removedTempArchive = false;
+  let removedInstallDir = false;
+
+  if (tempArchivePath && tempRoot && isPathInsideDirectory(tempRoot, tempArchivePath)) {
+    await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
+    removedTempArchive = true;
+  }
+
+  if (
+    installRoot &&
+    installDir &&
+    isPathInsideDirectory(installRoot, installDir) &&
+    !arePathsEquivalent(installRoot, installDir)
+  ) {
+    await fsp.rm(installDir, { recursive: true, force: true }).catch(() => {});
+    const cacheKey = getInstallSizeCacheKey(installDir);
+    if (cacheKey) {
+      installSizeCache.delete(cacheKey);
+    }
+    removedInstallDir = true;
+  }
+
+  return {
+    removedTempArchive,
+    removedInstallDir
+  };
+}
+
+async function cancelInstall(gameId) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    throw new Error("ID do jogo invalido para cancelar download.");
+  }
+
+  const runControl = installRunControlsByGameId.get(normalizedGameId);
+  if (runControl) {
+    const canceledNow = runControl.cancel("Download cancelado pelo usuario.");
+    await patchActiveInstallSession(normalizedGameId, {
+      phase: "paused",
+      retryable: false,
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0,
+      lastFailureCode: "INSTALL_CANCELED",
+      lastFailureMessage: "Instalacao cancelada pelo usuario."
+    }).catch(() => {});
+    return {
+      ok: true,
+      canceled: true,
+      state: canceledNow ? "canceling-active" : "already-canceling-active"
+    };
+  }
+
+  const request = queuedInstallRequestsByGameId.get(normalizedGameId);
+  if (request && ["queued", "paused"].includes(String(request.state || "").toLowerCase())) {
+    applyInstallAutoRetryMetadataToQueuedRequest(request, {
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0,
+      lastFailureCode: "INSTALL_CANCELED",
+      lastFailureMessage: "Instalacao cancelada pelo usuario."
+    });
+    removeInstallFromQueue(normalizedGameId);
+    queuedInstallRequestsByGameId.delete(normalizedGameId);
+    if (lastPausedInstallGameId === normalizedGameId) {
+      lastPausedInstallGameId = "";
+    }
+
+    await cleanupInstallArtifactsForGame(normalizedGameId).catch(() => {});
+    await clearActiveInstallSession(normalizedGameId).catch(() => {});
+    activeInstallProgressByGameId.delete(normalizedGameId);
+    refreshQueuedInstallProgress();
+
+    try {
+      request.resolve?.({
+        ok: true,
+        canceled: true,
+        state: "canceled-queued"
+      });
+    } catch (_error) {
+      // Ignore promise resolution errors for stale listeners.
+    }
+
+    return {
+      ok: true,
+      canceled: true,
+      state: "canceled-queued"
+    };
+  }
+
+  throw new Error("Nao existe download ativo ou em fila para este jogo.");
 }
 
 async function pauseInstall(gameId) {
@@ -14869,6 +15145,7 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:install-game", (_event, gameId) => installGame(gameId));
     ipcMain.handle("launcher:pause-install", (_event, gameId) => pauseInstall(gameId));
     ipcMain.handle("launcher:resume-install", (_event, gameId) => resumeInstall(gameId));
+    ipcMain.handle("launcher:cancel-install", (_event, gameId) => cancelInstall(gameId));
     ipcMain.handle("launcher:pause-all-installs", () => pauseAllInstalls());
     ipcMain.handle("launcher:resume-all-installs", () => resumeAllInstalls());
     ipcMain.handle("launcher:uninstall-game", (_event, gameId) => uninstallGame(gameId));

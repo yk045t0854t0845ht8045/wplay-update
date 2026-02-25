@@ -4015,34 +4015,48 @@ function renderDownloadsView() {
           : sourceLabel && progress?.phase === "downloading"
             ? `${phaseText} • ${sourceLabel}`
             : phaseText;
-      const canPause = ["queued", "preparing", "downloading"].includes(String(progress?.phase || "").toLowerCase());
-      const canResume = String(progress?.phase || "").toLowerCase() === "paused";
-      const actionMarkup = canPause
+      const phaseLower = String(progress?.phase || "").toLowerCase();
+      const canPause = ["queued", "preparing", "downloading"].includes(phaseLower);
+      const canResume = phaseLower === "paused";
+      const canCancel = ["queued", "preparing", "downloading", "paused"].includes(phaseLower);
+      const primaryActionMarkup = canPause
         ? `
-            <div class="downloads-item-actions">
-              <button
-                type="button"
-                class="downloads-item-action-btn"
-                data-download-action="pause-download"
-                data-game-id="${escapeHtml(gameId)}"
-              >
-                PAUSAR
-              </button>
-            </div>
+            <button
+              type="button"
+              class="downloads-item-action-btn"
+              data-download-action="pause-download"
+              data-game-id="${escapeHtml(gameId)}"
+            >
+              PAUSAR
+            </button>
           `
         : canResume
           ? `
-              <div class="downloads-item-actions">
-                <button
-                  type="button"
-                  class="downloads-item-action-btn"
-                  data-download-action="resume-download"
-                  data-game-id="${escapeHtml(gameId)}"
-                >
-                  RETOMAR
-                </button>
-              </div>
+              <button
+                type="button"
+                class="downloads-item-action-btn"
+                data-download-action="resume-download"
+                data-game-id="${escapeHtml(gameId)}"
+              >
+                RETOMAR
+              </button>
             `
+          : "";
+      const cancelActionMarkup = canCancel
+        ? `
+            <button
+              type="button"
+              class="downloads-item-action-btn is-danger"
+              data-download-action="cancel-download"
+              data-game-id="${escapeHtml(gameId)}"
+            >
+              CANCELAR
+            </button>
+          `
+        : "";
+      const actionMarkup =
+        primaryActionMarkup || cancelActionMarkup
+          ? `<div class="downloads-item-actions">${primaryActionMarkup}${cancelActionMarkup}</div>`
           : "";
 
       return `
@@ -5438,6 +5452,30 @@ async function handleGameAction(gameId, action) {
       return;
     }
 
+    if (action === "cancel-download") {
+      if (typeof window.launcherApi.cancelInstall !== "function") {
+        throw new Error("Cancelamento de download nao esta disponivel nesta versao do launcher.");
+      }
+      const confirmed = window.confirm(`Cancelar o download de ${game.name} e remover os arquivos parciais?`);
+      if (!confirmed) {
+        return;
+      }
+
+      const result = await window.launcherApi.cancelInstall(gameId);
+      state.downloadSpeedByGameId.delete(gameId);
+      state.installProgressByGameId.delete(gameId);
+      clearRecentCompletedDownload(gameId);
+      renderAll();
+      await refreshGames();
+      setStatus(`Download cancelado: ${game.name}.`);
+      const removedText =
+        result?.state === "canceled-queued"
+          ? `${game.name} foi removido da fila e os arquivos temporarios foram apagados.`
+          : `${game.name} sera cancelado e os arquivos temporarios serao apagados em seguida.`;
+      notify("info", "Download cancelado", removedText);
+      return;
+    }
+
     if (action === "install") {
       const installChoice = await askInstallPathChoice();
       if (installChoice === "cancel") {
@@ -6442,6 +6480,15 @@ function installEventBindings() {
 
     if (ACTIVE_INSTALL_PHASES.has(payload.phase)) {
       setStatus(payload.message || "Processando download...");
+    }
+
+    if (payload.phase === "canceled") {
+      clearRecentCompletedDownload(payload.gameId);
+      setStatus(payload.message || "Download cancelado.");
+      state.installProgressByGameId.delete(payload.gameId);
+      state.downloadSpeedByGameId.delete(payload.gameId);
+      renderAll();
+      return;
     }
 
     if (payload.phase === "failed") {

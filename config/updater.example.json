@@ -11,7 +11,7 @@
   "autoDownload": true,
   "preferLatestFullInstaller": true,
   "disableHttp2": true,
-  "checkIntervalMinutes": 1,
+  "checkIntervalSeconds": 30,
   "allowPrerelease": false,
   "allowDowngrade": false
 }
