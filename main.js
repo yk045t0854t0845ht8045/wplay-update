@@ -220,6 +220,39 @@ const MAIN_WINDOW_LOAD_RETRY_DELAY_MS = 1200;
 const TRAY_TOOLTIP_TEXT = "Origin Games Launcher";
 const RUNTIME_CONFIG_LAUNCH_ON_SYSTEM_STARTUP_KEY = "launchOnStartup";
 const ACTIVE_INSTALL_PHASES = new Set(["queued", "paused", "preparing", "downloading", "extracting"]);
+const INSTALL_RECOVERY_MAX_PAUSED_AGE_MS = 5 * 24 * 60 * 60 * 1000;
+const INSTALL_RECOVERY_PAUSED_MESSAGE =
+  "Instalacao interrompida. Clique em Retomar para continuar com protecao anti-falhas.";
+const DOWNLOAD_RESUME_MIN_BYTES = 256 * 1024;
+const DOWNLOAD_CANDIDATE_MAX_ATTEMPTS = 4;
+const DOWNLOAD_RETRY_BASE_DELAY_MS = 1250;
+const DOWNLOAD_RETRY_MAX_DELAY_MS = 9000;
+const INSTALL_AUTO_RETRY_MONITOR_MIN_DELAY_MS = 800;
+const INSTALL_AUTO_RETRY_MONITOR_IDLE_DELAY_MS = 60 * 1000;
+const INSTALL_AUTO_RETRY_MAX_ATTEMPTS = 12;
+const INSTALL_AUTO_RETRY_MAX_DELAY_MS = 6 * 60 * 60 * 1000;
+const INSTALL_AUTO_RETRY_GENERIC_BASE_DELAY_MS = 45 * 1000;
+const INSTALL_AUTO_RETRY_DOWNLOAD_BASE_DELAY_MS = 65 * 1000;
+const INSTALL_AUTO_RETRY_DRIVE_QUOTA_BASE_DELAY_MS = 20 * 60 * 1000;
+const INSTALL_AUTO_RETRY_JITTER_MAX_MS = 12 * 1000;
+const INSTALL_AUTO_RETRY_DISABLED_CODES = new Set([
+  "GAME_UNAVAILABLE",
+  "SOURCE_NOT_CONFIGURED",
+  "INSTALL_PATH_INVALID",
+  "DRIVE_ACCESS",
+  "INVALID_DOWNLOAD_LINK",
+  "CHECKSUM_MISMATCH",
+  "ARCHIVE_PASSWORD",
+  "RAR_TOOL_UNSUPPORTED",
+  "ARCHIVE_INVALID",
+  "SECURITY_THREAT",
+  "EXECUTABLE_NOT_FOUND"
+]);
+const SOCIAL_ACTIVITY_PUBLISH_QUEUE_FILE_NAME = "launcher.social-activity-queue.json";
+const SOCIAL_ACTIVITY_PUBLISH_MAX_RETRIES = 6;
+const SOCIAL_ACTIVITY_PUBLISH_RETRY_BASE_MS = 2000;
+const SOCIAL_ACTIVITY_PUBLISH_RETRY_MAX_MS = 10 * 60 * 1000;
+const SOCIAL_ACTIVITY_RUNTIME_TRANSITION_DEBOUNCE_MS = 30 * 1000;
 
 let mainWindow = null;
 let updateSplashWindow = null;
@@ -276,6 +309,8 @@ let installQueueRunnerInFlight = null;
 let installQueuePaused = false;
 let lastPausedInstallGameId = "";
 const installQueuePauseWaiters = [];
+let installAutoRetryMonitorTimer = null;
+let installAutoRetryMonitorInFlight = null;
 let installRequestSequence = 0;
 const activeUninstalls = new Set();
 const installSizeCache = new Map();
@@ -331,6 +366,9 @@ const steamUserDataCache = {
 };
 const socialActivityEmitCache = new Map();
 const socialActivityBackgroundSeenIds = new Set();
+const socialActivityPublishQueue = [];
+const socialRuntimeRunningStateByUserGame = new Map();
+const socialRuntimeLastEmittedAtByUserGame = new Map();
 const windowIconAssetCache = {
   resolved: false,
   path: "",
@@ -355,6 +393,10 @@ let socialActivityBackgroundPollTimer = null;
 let socialActivityBackgroundPollInFlight = null;
 let socialActivityBackgroundCursorIso = "";
 let socialActivityBackgroundCurrentUserId = "";
+let socialActivityPublishQueueLoaded = false;
+let socialActivityPublishQueuePersistQueue = Promise.resolve();
+let socialActivityPublishQueueFlushInFlight = null;
+let socialActivityPublishQueueFlushTimer = null;
 let catalogRealtimeMonitorTimer = null;
 let catalogRealtimeMonitorInFlight = null;
 let catalogRealtimeSignature = "";
@@ -600,6 +642,14 @@ function getPlaytimeStateFilePath() {
     return "";
   }
   return path.join(baseDir, PLAYTIME_STATE_FILE_NAME);
+}
+
+function getSocialActivityPublishQueueFilePath() {
+  const baseDir = resolveRuntimeStateDirectory();
+  if (!baseDir) {
+    return "";
+  }
+  return path.join(baseDir, SOCIAL_ACTIVITY_PUBLISH_QUEUE_FILE_NAME);
 }
 
 function normalizePlaytimeUserId(value) {
@@ -1328,6 +1378,20 @@ function normalizeActiveInstallSessionRecord(rawRecord) {
   const installRoot = normalizeAbsolutePath(rawRecord.installRoot || "");
   const installDir = normalizeAbsolutePath(rawRecord.installDir || "");
   const tempArchivePath = normalizeAbsolutePath(rawRecord.tempArchivePath || "");
+  const retryCount = Math.max(
+    0,
+    parsePositiveInteger(rawRecord.retryCount || rawRecord.retry_count || rawRecord.retryAttempts || rawRecord.retry_attempts)
+  );
+  const nextRetryAtMs = toValidTimestampMs(rawRecord.nextRetryAtMs || rawRecord.next_retry_at_ms || rawRecord.nextRetryAt);
+  const autoRetryEnabled =
+    parseBoolean(rawRecord.autoRetryEnabled ?? rawRecord.auto_retry_enabled, false) && nextRetryAtMs > 0;
+  const retryable = parseBoolean(rawRecord.retryable, false) || autoRetryEnabled;
+  const lastFailureCode = String(rawRecord.lastFailureCode || rawRecord.last_failure_code || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, "")
+    .slice(0, 64);
+  const lastFailureMessage = trimProcessOutput(rawRecord.lastFailureMessage || rawRecord.last_failure_message || "", 560);
   const nowIso = new Date().toISOString();
 
   return {
@@ -1338,7 +1402,13 @@ function normalizeActiveInstallSessionRecord(rawRecord) {
     tempArchivePath,
     phase,
     startedAt: String(rawRecord.startedAt || "").trim() || nowIso,
-    updatedAt: String(rawRecord.updatedAt || "").trim() || nowIso
+    updatedAt: String(rawRecord.updatedAt || "").trim() || nowIso,
+    retryable,
+    autoRetryEnabled,
+    retryCount,
+    nextRetryAtMs: autoRetryEnabled ? nextRetryAtMs : 0,
+    lastFailureCode,
+    lastFailureMessage
   };
 }
 
@@ -1458,6 +1528,32 @@ async function updateActiveInstallSessionPhase(gameId, phase) {
   await queuePersistActiveInstallSessions();
 }
 
+async function patchActiveInstallSession(gameId, patch = {}) {
+  const id = String(gameId || "").trim();
+  if (!id) {
+    return;
+  }
+
+  const current = activeInstallSessionsByGameId.get(id);
+  if (!current) {
+    return;
+  }
+
+  const normalizedPatch = patch && typeof patch === "object" ? patch : {};
+  const normalized = normalizeActiveInstallSessionRecord({
+    ...current,
+    ...normalizedPatch,
+    gameId: id,
+    updatedAt: new Date().toISOString()
+  });
+  if (!normalized) {
+    return;
+  }
+
+  activeInstallSessionsByGameId.set(id, normalized);
+  await queuePersistActiveInstallSessions();
+}
+
 async function clearActiveInstallSession(gameId) {
   const id = String(gameId || "").trim();
   if (!id) {
@@ -1476,59 +1572,141 @@ async function recoverInterruptedInstallSessionsOnStartup() {
     return;
   }
 
-  let removedInstallDirs = 0;
+  let recoveredSessions = 0;
+  let droppedStaleSessions = 0;
+  let droppedInvalidSessions = 0;
   let removedTempArchives = 0;
-  let skippedSessions = 0;
+  let removedInstallDirs = 0;
+  let autoResumedSessions = 0;
+
+  activeInstallSessionsByGameId.clear();
+  activeInstallProgressByGameId.clear();
+  queuedInstallRequestsByGameId.clear();
+  installQueue.length = 0;
 
   for (const record of records) {
+    const gameId = String(record?.gameId || "").trim();
+    if (!gameId) {
+      droppedInvalidSessions += 1;
+      continue;
+    }
+
     const installRoot = normalizeAbsolutePath(record.installRoot || "");
     const installDir = normalizeAbsolutePath(record.installDir || "");
     const tempArchivePath = normalizeAbsolutePath(record.tempArchivePath || "");
     const tempRoot = installRoot ? path.join(installRoot, TEMP_DIR_NAME) : "";
-    let handled = false;
+    const managedRoot = installRoot && isManagedInstallRootPath(installRoot);
+    const updatedAtMs = toValidTimestampMs(record.updatedAt || record.startedAt);
+    const ageMs = updatedAtMs > 0 ? Math.max(0, Date.now() - updatedAtMs) : Number.POSITIVE_INFINITY;
+    const staleSession = ageMs > INSTALL_RECOVERY_MAX_PAUSED_AGE_MS;
 
-    if (
+    if (staleSession) {
+      if (
+        managedRoot &&
+        tempArchivePath &&
+        tempRoot &&
+        isPathInsideDirectory(tempRoot, tempArchivePath)
+      ) {
+        await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
+        removedTempArchives += 1;
+      }
+      if (
+        managedRoot &&
+        installDir &&
+        isPathInsideDirectory(installRoot, installDir) &&
+        !arePathsEquivalent(installRoot, installDir)
+      ) {
+        await fsp.rm(installDir, { recursive: true, force: true }).catch(() => {});
+        const cacheKey = getInstallSizeCacheKey(installDir);
+        if (cacheKey) {
+          installSizeCache.delete(cacheKey);
+        }
+        removedInstallDirs += 1;
+      }
+      droppedStaleSessions += 1;
+      continue;
+    }
+
+    const hasSafeInstallDir =
       installRoot &&
       installDir &&
-      isManagedInstallRootPath(installRoot) &&
       isPathInsideDirectory(installRoot, installDir) &&
-      !arePathsEquivalent(installRoot, installDir)
-    ) {
-      await fsp.rm(installDir, { recursive: true, force: true }).catch(() => {});
-      const cacheKey = getInstallSizeCacheKey(installDir);
-      if (cacheKey) {
-        installSizeCache.delete(cacheKey);
-      }
-      removedInstallDirs += 1;
-      handled = true;
+      !arePathsEquivalent(installRoot, installDir);
+    const hasSafeTempArchive =
+      !tempArchivePath || (tempRoot && isPathInsideDirectory(tempRoot, tempArchivePath));
+    if (!hasSafeInstallDir || !hasSafeTempArchive) {
+      droppedInvalidSessions += 1;
+      continue;
     }
 
-    if (
-      installRoot &&
-      tempArchivePath &&
-      isManagedInstallRootPath(installRoot) &&
-      tempRoot &&
-      isPathInsideDirectory(tempRoot, tempArchivePath)
-    ) {
-      await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
-      removedTempArchives += 1;
-      handled = true;
+    const normalizedRecord = normalizeActiveInstallSessionRecord({
+      ...record,
+      gameId,
+      phase: "paused",
+      updatedAt: new Date().toISOString()
+    });
+    if (!normalizedRecord) {
+      droppedInvalidSessions += 1;
+      continue;
+    }
+    if (activeInstallSessionsByGameId.has(gameId)) {
+      droppedInvalidSessions += 1;
+      continue;
     }
 
-    if (!handled) {
-      skippedSessions += 1;
-      appendStartupLog(
-        `[INSTALL_RECOVERY_SKIP] gameId=${record.gameId || "unknown"} installRoot=${installRoot || "n/a"} installDir=${installDir || "n/a"}`
-      );
+    activeInstallSessionsByGameId.set(gameId, normalizedRecord);
+
+    const nextRetryAtMs = toValidTimestampMs(normalizedRecord.nextRetryAtMs);
+    const autoRetryEnabled = normalizedRecord.autoRetryEnabled === true && nextRetryAtMs > 0;
+    const shouldAutoResumeNow = autoRetryEnabled && nextRetryAtMs <= Date.now();
+    const queuedRequest = createQueuedInstallRequest(gameId, {
+      autoRetryEnabled,
+      retryCount: normalizedRecord.retryCount,
+      nextRetryAtMs,
+      lastFailureCode: normalizedRecord.lastFailureCode,
+      lastFailureMessage: normalizedRecord.lastFailureMessage
+    });
+    queuedRequest.state = shouldAutoResumeNow ? "queued" : "paused";
+    if (shouldAutoResumeNow && getInstallQueueIndex(gameId) < 0) {
+      installQueue.push(gameId);
+      autoResumedSessions += 1;
     }
+    queuedInstallRequestsByGameId.set(gameId, queuedRequest);
+
+    const partialArchiveBytes = await getFileSizeIfExists(tempArchivePath);
+    const autoRetryHint = autoRetryEnabled
+      ? buildInstallAutoRetryScheduleMessage(nextRetryAtMs, normalizedRecord.lastFailureCode)
+      : "";
+    const resumeHint =
+      shouldAutoResumeNow
+        ? "Instalacao recuperada apos reinicio. Retomada automatica iniciada."
+        : autoRetryHint ||
+          (partialArchiveBytes >= DOWNLOAD_RESUME_MIN_BYTES
+            ? `${INSTALL_RECOVERY_PAUSED_MESSAGE} Download parcial detectado (${formatBytesShort(partialArchiveBytes)}).`
+            : INSTALL_RECOVERY_PAUSED_MESSAGE);
+    activeInstallProgressByGameId.set(gameId, {
+      gameId,
+      phase: shouldAutoResumeNow ? "queued" : "paused",
+      percent: 0,
+      downloadedBytes: partialArchiveBytes > 0 ? partialArchiveBytes : 0,
+      totalBytes: 0,
+      queuePosition: 0,
+      recovered: true,
+      message: resumeHint
+    });
+    recoveredSessions += 1;
   }
 
-  activeInstallSessionsByGameId.clear();
-  activeInstallProgressByGameId.clear();
-  await writeInstallSessionRecordsToDisk([]);
+  await queuePersistActiveInstallSessions();
+  refreshInstallAutoRetryMonitor();
+  if (installQueue.length > 0 && !installQueuePaused) {
+    ensureInstallQueueRunner();
+  }
 
   appendStartupLog(
-    `[INSTALL_RECOVERY] sessoes=${records.length} instalacoes-removidas=${removedInstallDirs} arquivos-temp-removidos=${removedTempArchives} ignoradas=${skippedSessions}`
+    `[INSTALL_RECOVERY] sessoes=${records.length} recuperadas=${recoveredSessions} removidas-antigas=${droppedStaleSessions} ` +
+      `invalidas=${droppedInvalidSessions} instalacoes-removidas=${removedInstallDirs} arquivos-temp-removidos=${removedTempArchives} ` +
+      `retomadas-auto=${autoResumedSessions}`
   );
 }
 
@@ -6122,6 +6300,15 @@ function extractTotalBytesFromHeaders(headers = {}) {
     return 0;
   }
 
+  const contentRange = String(headers["content-range"] || "").trim();
+  const rangeMatch = contentRange.match(/\/(\d+)\s*$/);
+  if (rangeMatch?.[1]) {
+    const fromRange = parseSizeBytes(rangeMatch[1]);
+    if (fromRange > 0) {
+      return fromRange;
+    }
+  }
+
   const headerCandidates = [
     headers["content-length"],
     headers["x-goog-stored-content-length"],
@@ -6134,12 +6321,6 @@ function extractTotalBytesFromHeaders(headers = {}) {
     if (parsed > 0) {
       return parsed;
     }
-  }
-
-  const contentRange = String(headers["content-range"] || "").trim();
-  const rangeMatch = contentRange.match(/\/(\d+)\s*$/);
-  if (rangeMatch?.[1]) {
-    return parseSizeBytes(rangeMatch[1]);
   }
 
   return 0;
@@ -6574,6 +6755,13 @@ function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
     archiveType: pickFirstDefinedValue(merged, ["archiveType", "archive_type"]),
     archivePassword: pickFirstDefinedValue(merged, ["archivePassword", "archive_password"]),
     checksumSha256: pickFirstDefinedValue(merged, ["checksumSha256", "checksum_sha256", "sha256"]),
+    downloadMaxAttempts: pickFirstDefinedValue(merged, [
+      "downloadMaxAttempts",
+      "download_max_attempts",
+      "download_retry_attempts",
+      "maxDownloadRetries",
+      "max_download_retries"
+    ]),
     downloadUrl: pickFirstDefinedValue(merged, ["downloadUrl", "download_url"]),
     downloadUrls,
     downloadSources,
@@ -6817,6 +7005,19 @@ async function isDirectory(targetPath) {
     return stat.isDirectory();
   } catch (_error) {
     return false;
+  }
+}
+
+async function getFileSizeIfExists(targetPath) {
+  try {
+    const stat = await fsp.stat(targetPath);
+    if (!stat.isFile()) {
+      return 0;
+    }
+    const size = Number(stat.size || 0);
+    return Number.isFinite(size) && size > 0 ? Math.floor(size) : 0;
+  } catch (_error) {
+    return 0;
   }
 }
 
@@ -7621,6 +7822,287 @@ function scheduleSyncDirtyPlaytimeRecords(delayMs = PLAYTIME_SYNC_DEBOUNCE_MS) {
   }, safeDelayMs);
 }
 
+function normalizeSocialActivityQueuePayload(rawPayload = {}) {
+  if (!rawPayload || typeof rawPayload !== "object") {
+    return null;
+  }
+
+  const gameId = sanitizeNotificationText(rawPayload.gameId, 120);
+  const gameName = sanitizeNotificationText(rawPayload.gameName, 140) || "Jogo";
+  if (!gameId && !gameName) {
+    return null;
+  }
+
+  return {
+    gameId,
+    gameName,
+    source: sanitizeNotificationText(rawPayload.source || "", 60) || "launcher"
+  };
+}
+
+function normalizeSocialActivityQueueEntry(rawEntry = {}) {
+  if (!rawEntry || typeof rawEntry !== "object") {
+    return null;
+  }
+
+  const payload = normalizeSocialActivityQueuePayload(rawEntry.payload || rawEntry);
+  if (!payload) {
+    return null;
+  }
+
+  const nowMs = Date.now();
+  const attempts = Math.max(0, Math.min(128, parsePositiveInteger(rawEntry.attempts) || 0));
+  const enqueuedAtMs =
+    toValidTimestampMs(rawEntry.enqueuedAtMs || rawEntry.enqueued_at_ms || rawEntry.enqueuedAt || rawEntry.createdAt) || nowMs;
+  const nextAttemptAtMs =
+    toValidTimestampMs(rawEntry.nextAttemptAtMs || rawEntry.next_attempt_at_ms || rawEntry.nextAttemptAt) || enqueuedAtMs;
+  const id =
+    sanitizeNotificationText(rawEntry.id || rawEntry.entryId, 180) ||
+    `saq-${nowMs.toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
+
+  return {
+    id,
+    payload,
+    attempts,
+    enqueuedAtMs,
+    nextAttemptAtMs,
+    lastError: sanitizeNotificationText(rawEntry.lastError, 280)
+  };
+}
+
+function readSocialActivityPublishQueueSync() {
+  const filePath = getSocialActivityPublishQueueFilePath();
+  if (!filePath) {
+    return [];
+  }
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      return [];
+    }
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const entriesRaw = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.entries) ? parsed.entries : [];
+    return entriesRaw.map((entry) => normalizeSocialActivityQueueEntry(entry)).filter(Boolean);
+  } catch (error) {
+    appendStartupLog(`[SOCIAL_QUEUE_READ_ERROR] ${formatStartupErrorForLog(error)}`);
+    return [];
+  }
+}
+
+function getSocialActivityPublishQueueSnapshotForPersistence() {
+  return socialActivityPublishQueue
+    .map((entry) => normalizeSocialActivityQueueEntry(entry))
+    .filter(Boolean)
+    .sort((left, right) => Number(left.nextAttemptAtMs || 0) - Number(right.nextAttemptAtMs || 0))
+    .slice(0, 2400);
+}
+
+async function writeSocialActivityPublishQueueToDisk() {
+  ensureSocialActivityPublishQueueLoadedSync();
+  const filePath = getSocialActivityPublishQueueFilePath();
+  if (!filePath) {
+    return;
+  }
+
+  const snapshot = getSocialActivityPublishQueueSnapshotForPersistence();
+  if (snapshot.length === 0) {
+    await fsp.rm(filePath, { force: true }).catch(() => {});
+    return;
+  }
+
+  try {
+    await fsp.mkdir(path.dirname(filePath), { recursive: true });
+    await fsp.writeFile(
+      filePath,
+      JSON.stringify(
+        {
+          updatedAt: new Date().toISOString(),
+          entries: snapshot
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    appendStartupLog(`[SOCIAL_QUEUE_WRITE_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function flushSocialActivityPublishQueueSync() {
+  ensureSocialActivityPublishQueueLoadedSync();
+  const filePath = getSocialActivityPublishQueueFilePath();
+  if (!filePath) {
+    return;
+  }
+
+  const snapshot = getSocialActivityPublishQueueSnapshotForPersistence();
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    if (snapshot.length === 0) {
+      fs.rmSync(filePath, { force: true });
+      return;
+    }
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          updatedAt: new Date().toISOString(),
+          entries: snapshot
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    appendStartupLog(`[SOCIAL_QUEUE_FLUSH_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function queuePersistSocialActivityPublishQueue() {
+  socialActivityPublishQueuePersistQueue = socialActivityPublishQueuePersistQueue
+    .catch(() => {})
+    .then(async () => {
+      await writeSocialActivityPublishQueueToDisk();
+    });
+  return socialActivityPublishQueuePersistQueue;
+}
+
+function ensureSocialActivityPublishQueueLoadedSync() {
+  if (socialActivityPublishQueueLoaded) {
+    return;
+  }
+  socialActivityPublishQueueLoaded = true;
+  const nowMs = Date.now();
+  const maxAgeMs = 7 * 24 * 60 * 60 * 1000;
+  const persisted = readSocialActivityPublishQueueSync().filter((entry) => {
+    const enqueuedAtMs = Number(entry?.enqueuedAtMs || 0);
+    if (!Number.isFinite(enqueuedAtMs) || enqueuedAtMs <= 0) {
+      return false;
+    }
+    return nowMs - enqueuedAtMs <= maxAgeMs;
+  });
+  socialActivityPublishQueue.length = 0;
+  socialActivityPublishQueue.push(...persisted);
+}
+
+function computeSocialActivityPublishRetryDelayMs(attemptNumber) {
+  const safeAttempt = Math.max(1, Math.min(32, parsePositiveInteger(attemptNumber) || 1));
+  const base = SOCIAL_ACTIVITY_PUBLISH_RETRY_BASE_MS * (2 ** (safeAttempt - 1));
+  return Math.min(SOCIAL_ACTIVITY_PUBLISH_RETRY_MAX_MS, Math.max(1200, base));
+}
+
+function isRetryableSocialPublishError(error) {
+  const status = Number(error?.status || error?.response?.status || 0);
+  if ([408, 409, 425, 429, 500, 502, 503, 504, 521, 522, 524].includes(status)) {
+    return true;
+  }
+
+  const message = String(error?.message || "").toLowerCase();
+  if (!message) {
+    return false;
+  }
+
+  if (
+    message.includes("social_auth_required") ||
+    message.includes("social_supabase_auth") ||
+    message.includes("network") ||
+    message.includes("timeout") ||
+    message.includes("temporar") ||
+    message.includes("econn") ||
+    message.includes("enotfound") ||
+    message.includes("socket hang up") ||
+    message.includes("http_429") ||
+    message.includes("http_500") ||
+    message.includes("http_502") ||
+    message.includes("http_503") ||
+    message.includes("http_504")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function scheduleSocialActivityPublishQueueFlush(delayMs = 0) {
+  const safeDelayMs = Math.max(0, Number(delayMs) || 0);
+  if (socialActivityPublishQueueFlushTimer) {
+    clearTimeout(socialActivityPublishQueueFlushTimer);
+    socialActivityPublishQueueFlushTimer = null;
+  }
+  socialActivityPublishQueueFlushTimer = setTimeout(() => {
+    socialActivityPublishQueueFlushTimer = null;
+    void flushQueuedSocialGameLaunchActivities(true).catch(() => {});
+  }, safeDelayMs);
+}
+
+function buildSocialRuntimeUserGameKey(userId, gameId) {
+  const safeUserId = normalizeSteamId(userId);
+  const safeGameId = sanitizeNotificationText(gameId, 120).toLowerCase();
+  if (!safeUserId || !safeGameId) {
+    return "";
+  }
+  return `${safeUserId}:${safeGameId}`;
+}
+
+function queueSocialRuntimeTransitionLaunchActivities(games = []) {
+  const steamSession = getSteamSessionSnapshot();
+  const userId = normalizeSteamId(steamSession?.steamId || steamSession?.user?.id);
+  if (!userId) {
+    socialRuntimeRunningStateByUserGame.clear();
+    socialRuntimeLastEmittedAtByUserGame.clear();
+    return;
+  }
+  if (!Array.isArray(games) || games.length === 0) {
+    return;
+  }
+
+  const now = Date.now();
+  const seenForUser = new Set();
+
+  for (const game of games) {
+    const key = buildSocialRuntimeUserGameKey(userId, game?.id);
+    if (!key) {
+      continue;
+    }
+    seenForUser.add(key);
+
+    const isRunning = game?.installed === true && game?.running === true;
+    const previousRunning = socialRuntimeRunningStateByUserGame.get(key);
+    socialRuntimeRunningStateByUserGame.set(key, isRunning);
+
+    if (previousRunning === undefined) {
+      continue;
+    }
+    if (previousRunning === true || !isRunning) {
+      continue;
+    }
+
+    const lastEmittedAt = Number(socialRuntimeLastEmittedAtByUserGame.get(key) || 0);
+    if (lastEmittedAt > 0 && now - lastEmittedAt < SOCIAL_ACTIVITY_RUNTIME_TRANSITION_DEBOUNCE_MS) {
+      continue;
+    }
+    socialRuntimeLastEmittedAtByUserGame.set(key, now);
+    void enqueueSocialGameLaunchActivity({
+      gameId: game.id,
+      gameName: game.name,
+      source: "runtime-detection"
+    }).catch(() => {});
+  }
+
+  for (const key of [...socialRuntimeRunningStateByUserGame.keys()]) {
+    if (!key.startsWith(`${userId}:`)) {
+      continue;
+    }
+    if (!seenForUser.has(key)) {
+      socialRuntimeRunningStateByUserGame.delete(key);
+      socialRuntimeLastEmittedAtByUserGame.delete(key);
+    }
+  }
+}
+
 function resolveSupabaseSocialActivityContext() {
   const authConfig = resolveAuthConfig();
   if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
@@ -7713,6 +8195,10 @@ function stopSocialActivityBackgroundMonitor() {
   if (socialActivityBackgroundPollTimer) {
     clearInterval(socialActivityBackgroundPollTimer);
     socialActivityBackgroundPollTimer = null;
+  }
+  if (socialActivityPublishQueueFlushTimer) {
+    clearTimeout(socialActivityPublishQueueFlushTimer);
+    socialActivityPublishQueueFlushTimer = null;
   }
   resetSocialActivityBackgroundTrackingState();
 }
@@ -7891,11 +8377,14 @@ function ensureSocialActivityBackgroundMonitorStarted() {
     return;
   }
 
+  ensureSocialActivityPublishQueueLoadedSync();
   const intervalMs = getSocialActivityBackgroundPollIntervalMs();
   socialActivityBackgroundPollTimer = setInterval(() => {
     void pollBackgroundFriendGameActivities(true);
+    void flushQueuedSocialGameLaunchActivities(true).catch(() => {});
   }, intervalMs);
   void pollBackgroundFriendGameActivities(true);
+  void flushQueuedSocialGameLaunchActivities(true).catch(() => {});
 }
 
 async function fetchSteamFriendSteamIds(steamId, steamWebApiKey) {
@@ -8029,13 +8518,14 @@ function clearSocialActivityEmitDebounceForGame(payload = {}) {
   }
 }
 
-async function publishSocialGameLaunchActivity(payload = {}) {
+async function publishSocialGameLaunchActivityNow(payload = {}, options = {}) {
   const context = resolveSupabaseSocialActivityContext();
   const actorSteamId = normalizeSteamId(context.userId);
   const actorDisplayName = sanitizeNotificationText(context.userDisplayName, 80) || "Jogador";
   const actorAvatarUrl = sanitizeHttpUrlForToast(context.userAvatarUrl);
   const gameId = sanitizeNotificationText(payload.gameId, 120);
   const gameName = sanitizeNotificationText(payload.gameName, 140) || "Jogo";
+  const skipDebounce = options?.skipDebounce === true;
 
   if (!actorSteamId || !gameName) {
     return { ok: false, skipped: true };
@@ -8049,14 +8539,11 @@ async function publishSocialGameLaunchActivity(payload = {}) {
   const now = Date.now();
   pruneStaleSocialActivityEmitCache(now);
 
-  const lastEmittedAt = Number(socialActivityEmitCache.get(emitKey) || 0);
-  if (lastEmittedAt > 0 && now - lastEmittedAt < SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS) {
-    return { ok: true, skipped: true, reason: "debounced" };
-  }
-
-  socialActivityEmitCache.set(emitKey, now);
-  if (socialActivityEmitCache.size > 600) {
-    pruneStaleSocialActivityEmitCache(now);
+  if (!skipDebounce) {
+    const lastEmittedAt = Number(socialActivityEmitCache.get(emitKey) || 0);
+    if (lastEmittedAt > 0 && now - lastEmittedAt < SOCIAL_ACTIVITY_EMIT_DEBOUNCE_MS) {
+      return { ok: true, skipped: true, reason: "debounced" };
+    }
   }
 
   const endpoint = getSocialActivitySupabaseEndpoint(context);
@@ -8077,15 +8564,188 @@ async function publishSocialGameLaunchActivity(payload = {}) {
   );
 
   if (response.status === 404) {
-    throw new Error(`[SOCIAL_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`);
+    const tableError = new Error(`[SOCIAL_TABLE_NOT_FOUND] Tabela ${context.schema}.${context.table} nao encontrada no Supabase.`);
+    tableError.status = response.status;
+    throw tableError;
   }
   if (response.status >= 400) {
-    throw new Error(`[SOCIAL_HTTP_${response.status}] Falha ao publicar atividade social.`);
+    const httpError = new Error(`[SOCIAL_HTTP_${response.status}] Falha ao publicar atividade social.`);
+    httpError.status = response.status;
+    throw httpError;
   }
 
   await pruneSocialActivityInSupabase(context).catch(() => {});
+  socialActivityEmitCache.set(emitKey, now);
+  if (socialActivityEmitCache.size > 600) {
+    pruneStaleSocialActivityEmitCache(now);
+  }
 
   return { ok: true };
+}
+
+function buildSocialActivityQueuePayloadSignature(payload = {}) {
+  const normalized = normalizeSocialActivityQueuePayload(payload);
+  if (!normalized) {
+    return "";
+  }
+  const gameId = String(normalized.gameId || "").trim().toLowerCase();
+  const gameName = String(normalized.gameName || "").trim().toLowerCase();
+  if (!gameId && !gameName) {
+    return "";
+  }
+  return `${gameId}:${gameName}`;
+}
+
+function clearQueuedSocialGameLaunchActivitiesForGame(payload = {}) {
+  ensureSocialActivityPublishQueueLoadedSync();
+  const signature = buildSocialActivityQueuePayloadSignature(payload);
+  if (!signature || socialActivityPublishQueue.length === 0) {
+    return 0;
+  }
+
+  const previousLength = socialActivityPublishQueue.length;
+  const keptEntries = socialActivityPublishQueue.filter((entry) => {
+    const entrySignature = buildSocialActivityQueuePayloadSignature(entry?.payload);
+    return entrySignature !== signature;
+  });
+
+  const removed = Math.max(0, previousLength - keptEntries.length);
+  if (removed > 0) {
+    socialActivityPublishQueue.length = 0;
+    socialActivityPublishQueue.push(...keptEntries);
+    void queuePersistSocialActivityPublishQueue();
+  }
+  return removed;
+}
+
+async function enqueueSocialGameLaunchActivity(payload = {}) {
+  ensureSocialActivityPublishQueueLoadedSync();
+  const normalizedPayload = normalizeSocialActivityQueuePayload(payload);
+  if (!normalizedPayload) {
+    return { ok: false, skipped: true };
+  }
+
+  const signature = buildSocialActivityQueuePayloadSignature(normalizedPayload);
+  const nowMs = Date.now();
+  if (signature) {
+    for (const queuedEntry of socialActivityPublishQueue) {
+      const queuedSignature = buildSocialActivityQueuePayloadSignature(queuedEntry?.payload);
+      if (!queuedSignature || queuedSignature !== signature) {
+        continue;
+      }
+      const ageMs = nowMs - Number(queuedEntry?.enqueuedAtMs || 0);
+      if (ageMs >= 0 && ageMs < SOCIAL_ACTIVITY_RUNTIME_TRANSITION_DEBOUNCE_MS) {
+        return { ok: true, queued: false, skipped: true, reason: "already-queued" };
+      }
+    }
+  }
+
+  const entry = normalizeSocialActivityQueueEntry({
+    payload: normalizedPayload,
+    attempts: 0,
+    enqueuedAtMs: nowMs,
+    nextAttemptAtMs: nowMs,
+    lastError: ""
+  });
+  if (!entry) {
+    return { ok: false, skipped: true };
+  }
+
+  socialActivityPublishQueue.push(entry);
+  await queuePersistSocialActivityPublishQueue();
+  scheduleSocialActivityPublishQueueFlush(40);
+  return { ok: true, queued: true, queueSize: socialActivityPublishQueue.length };
+}
+
+async function flushQueuedSocialGameLaunchActivities(silent = true) {
+  ensureSocialActivityPublishQueueLoadedSync();
+  if (socialActivityPublishQueue.length === 0) {
+    return { ok: true, flushed: 0, pending: 0 };
+  }
+  if (socialActivityPublishQueueFlushInFlight) {
+    return socialActivityPublishQueueFlushInFlight;
+  }
+
+  socialActivityPublishQueueFlushInFlight = (async () => {
+    let flushedCount = 0;
+    let changed = false;
+    let nextDueAtMs = 0;
+    const nowMs = Date.now();
+    const remaining = [];
+
+    const queuedEntries = socialActivityPublishQueue
+      .map((entry) => normalizeSocialActivityQueueEntry(entry))
+      .filter(Boolean)
+      .sort((left, right) => Number(left.nextAttemptAtMs || 0) - Number(right.nextAttemptAtMs || 0));
+
+    for (const entry of queuedEntries) {
+      if (Number(entry.nextAttemptAtMs || 0) > nowMs) {
+        remaining.push(entry);
+        const candidateNext = Number(entry.nextAttemptAtMs || 0);
+        if (!nextDueAtMs || candidateNext < nextDueAtMs) {
+          nextDueAtMs = candidateNext;
+        }
+        continue;
+      }
+
+      try {
+        await publishSocialGameLaunchActivityNow(entry.payload, { skipDebounce: false });
+        flushedCount += 1;
+        changed = true;
+      } catch (error) {
+        const attempts = Math.max(0, Number(entry.attempts || 0)) + 1;
+        const retryable = isRetryableSocialPublishError(error);
+        if (!retryable || attempts >= SOCIAL_ACTIVITY_PUBLISH_MAX_RETRIES) {
+          changed = true;
+          if (!silent) {
+            appendStartupLog(
+              `[SOCIAL_QUEUE_DROP] entry=${entry.id} attempts=${attempts} retryable=${retryable} ` +
+                `erro=${formatStartupErrorForLog(error)}`
+            );
+          }
+          continue;
+        }
+
+        const retryDelayMs = computeSocialActivityPublishRetryDelayMs(attempts);
+        const rescheduledAtMs = Date.now() + retryDelayMs;
+        remaining.push({
+          ...entry,
+          attempts,
+          nextAttemptAtMs: rescheduledAtMs,
+          lastError: sanitizeNotificationText(error?.message, 280)
+        });
+        changed = true;
+        if (!nextDueAtMs || rescheduledAtMs < nextDueAtMs) {
+          nextDueAtMs = rescheduledAtMs;
+        }
+      }
+    }
+
+    socialActivityPublishQueue.length = 0;
+    socialActivityPublishQueue.push(...remaining);
+
+    if (changed) {
+      await queuePersistSocialActivityPublishQueue();
+    }
+
+    if (nextDueAtMs > 0) {
+      scheduleSocialActivityPublishQueueFlush(Math.max(250, nextDueAtMs - Date.now()));
+    }
+
+    return {
+      ok: true,
+      flushed: flushedCount,
+      pending: socialActivityPublishQueue.length
+    };
+  })().finally(() => {
+    socialActivityPublishQueueFlushInFlight = null;
+  });
+
+  return socialActivityPublishQueueFlushInFlight;
+}
+
+async function publishSocialGameLaunchActivity(payload = {}) {
+  return enqueueSocialGameLaunchActivity(payload);
 }
 
 async function listFriendGameActivitiesForCurrentUser(options = {}) {
@@ -8923,6 +9583,19 @@ async function readCatalogBundle() {
       );
       const archivePassword = String(entry.archivePassword || "").trim();
       const checksumSha256 = String(entry.checksumSha256 || entry.sha256 || entry.archiveSha256 || "").trim().toLowerCase();
+      const downloadMaxAttempts = Math.max(
+        1,
+        Math.min(
+          8,
+          parsePositiveInteger(
+            entry.downloadMaxAttempts ||
+              entry.download_max_attempts ||
+              entry.download_retry_attempts ||
+              entry.maxDownloadRetries ||
+              entry.max_download_retries
+          ) || DOWNLOAD_CANDIDATE_MAX_ATTEMPTS
+        )
+      );
       const launchExecutable = String(entry.launchExecutable || defaultExecutable).trim() || "game.exe";
       const installDirName = String(entry.installDirName || name).trim() || name;
       const section = String(entry.section || "Jogos gratis").trim() || "Jogos gratis";
@@ -9001,6 +9674,7 @@ async function readCatalogBundle() {
         archiveType: normalizeArchiveType(entry.archiveType),
         archivePassword,
         checksumSha256,
+        downloadMaxAttempts,
         downloadUrl,
         downloadUrls,
         downloadSources,
@@ -9747,6 +10421,25 @@ function normalizeTextForMatch(value) {
     .toLowerCase();
 }
 
+function isDriveQuotaMessage(value) {
+  const lower = normalizeTextForMatch(value);
+  if (!lower) {
+    return false;
+  }
+  return (
+    lower.includes("limite ultrapassado") ||
+    lower.includes("limite de downloads") ||
+    lower.includes("limite de download") ||
+    lower.includes("muitos usuarios visualizaram") ||
+    lower.includes("muitos usuarios viram ou baixaram") ||
+    lower.includes("nao e possivel visualizar ou fazer download deste arquivo no momento") ||
+    lower.includes("too many users have viewed or downloaded this file recently") ||
+    lower.includes("download quota is exceeded") ||
+    lower.includes("quota exceeded") ||
+    lower.includes("you can't view or download this file at this time")
+  );
+}
+
 function detectDriveBlockingReason(bodyText, statusCode = 0) {
   const text = String(bodyText || "");
   const lower = normalizeTextForMatch(text);
@@ -9760,19 +10453,7 @@ function detectDriveBlockingReason(bodyText, statusCode = 0) {
     return "Arquivo do Google Drive nao encontrado ou sem permissao publica.";
   }
 
-  if (
-    statusCode === 429 ||
-    lower.includes("limite ultrapassado") ||
-    lower.includes("limite de downloads") ||
-    lower.includes("limite de download") ||
-    lower.includes("muitos usuarios visualizaram") ||
-    lower.includes("muitos usuarios viram ou baixaram") ||
-    lower.includes("nao e possivel visualizar ou fazer download deste arquivo no momento") ||
-    lower.includes("too many users have viewed or downloaded this file recently") ||
-    lower.includes("download quota is exceeded") ||
-    lower.includes("quota exceeded") ||
-    lower.includes("you can't view or download this file at this time")
-  ) {
+  if (statusCode === 429 || isDriveQuotaMessage(lower)) {
     return "Google Drive atingiu o limite de downloads deste arquivo. Tente novamente mais tarde.";
   }
 
@@ -9945,10 +10626,108 @@ function isGoogleDriveCandidate(candidate) {
   );
 }
 
+function buildDownloadRangeHeader(resumeFromBytes = 0, metadataProbe = false) {
+  if (metadataProbe) {
+    return "bytes=0-0";
+  }
+  const offset = Math.max(0, parsePositiveInteger(resumeFromBytes) || 0);
+  if (offset <= 0) {
+    return "";
+  }
+  return `bytes=${offset}-`;
+}
+
+function computeDownloadRetryDelayMs(attemptNumber) {
+  const safeAttempt = Math.max(1, Math.min(12, parsePositiveInteger(attemptNumber) || 1));
+  const base = DOWNLOAD_RETRY_BASE_DELAY_MS * (2 ** (safeAttempt - 1));
+  return Math.min(DOWNLOAD_RETRY_MAX_DELAY_MS, Math.max(600, base));
+}
+
+function parseHttpStatusFromErrorValue(error) {
+  const directStatus = Number(error?.status || error?.response?.status || 0);
+  if (Number.isFinite(directStatus) && directStatus > 0) {
+    return directStatus;
+  }
+
+  const message = String(error?.message || "");
+  const statusMatch = message.match(/\b(?:http|status)[\s:_-]*(\d{3})\b/i) || message.match(/\b(\d{3})\b/);
+  if (!statusMatch?.[1]) {
+    return 0;
+  }
+  const parsedStatus = Number(statusMatch[1]);
+  return Number.isFinite(parsedStatus) ? parsedStatus : 0;
+}
+
+function isRetryableHttpStatus(status) {
+  return [408, 409, 425, 429, 500, 502, 503, 504, 521, 522, 524].includes(Number(status) || 0);
+}
+
+function isRetryableDownloadError(error) {
+  const failureCode = String(error?.failureCode || "").trim().toUpperCase();
+  if (failureCode === "DRIVE_QUOTA") {
+    return true;
+  }
+
+  const status = parseHttpStatusFromErrorValue(error);
+  if (isRetryableHttpStatus(status)) {
+    return true;
+  }
+
+  const code = String(error?.code || "").trim().toUpperCase();
+  if (
+    [
+      "ECONNABORTED",
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "EPIPE",
+      "EAI_AGAIN",
+      "ENOTFOUND",
+      "ECONNREFUSED",
+      "UND_ERR_CONNECT_TIMEOUT"
+    ].includes(code)
+  ) {
+    return true;
+  }
+
+  const lower = String(error?.message || "").toLowerCase();
+  if (!lower) {
+    return false;
+  }
+
+  if (
+    lower.includes("checksum") ||
+    lower.includes("html em vez do arquivo") ||
+    lower.includes("tipo de arquivo inesperado") ||
+    lower.includes("arquivo compactado valido") ||
+    lower.includes("google drive nao encontrado") ||
+    lower.includes("table_not_found")
+  ) {
+    return false;
+  }
+
+  return (
+    lower.includes("temporari") ||
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("network") ||
+    lower.includes("socket hang up") ||
+    lower.includes("stream has been aborted") ||
+    lower.includes("download incompleto") ||
+    lower.includes("download foi interrompido") ||
+    lower.includes("nao foi possivel abrir links validos de download") ||
+    lower.includes("falha ao baixar um arquivo valido") ||
+    lower.includes("incomplete") ||
+    lower.includes("econn") ||
+    lower.includes("enotfound")
+  );
+}
+
 async function createDownloadStream(game, options = {}) {
   const skipSourceUrls = Array.isArray(options.skipSourceUrls) ? options.skipSourceUrls : [];
   const skipped = new Set(skipSourceUrls.map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean));
   const metadataProbe = options.probeMetadata === true;
+  const resumeFromBytes = Math.max(0, parsePositiveInteger(options.resumeFromBytes) || 0);
+  const requestedRangeHeader = buildDownloadRangeHeader(resumeFromBytes, metadataProbe);
   const requestTimeoutMs = Math.max(3_000, Number(options.timeoutMs) || DOWNLOAD_STREAM_TIMEOUT_MS);
   const orderedCandidates = sortCandidatesForDistributedDownloads(normalizeDownloadCandidates(game), game);
   const candidates = orderedCandidates.filter((candidate) => !skipped.has(String(candidate.url).toLowerCase()));
@@ -9959,6 +10738,8 @@ async function createDownloadStream(game, options = {}) {
   let lastError = null;
   const precheckFailures = [];
   const precheckFailedUrls = [];
+  let driveQuotaDetected = false;
+  const blockedDriveIds = new Set();
   const registerFailure = (candidate, reason) => {
     const label = getDownloadCandidateLabel(candidate);
     pushUniqueFailure(precheckFailures, `${label}: ${String(reason || "falha desconhecida").trim()}`);
@@ -9969,6 +10750,13 @@ async function createDownloadStream(game, options = {}) {
   };
 
   for (const candidate of candidates) {
+    const isDriveCandidate = isGoogleDriveCandidate(candidate);
+    const candidateDriveId = isDriveCandidate ? String(game.googleDriveFileId || extractDriveId(candidate.url) || "").trim() : "";
+    if (candidateDriveId && blockedDriveIds.has(candidateDriveId)) {
+      registerFailure(candidate, "arquivo do Drive temporariamente bloqueado por limite de downloads");
+      continue;
+    }
+
     try {
       const response = await axios({
         method: "GET",
@@ -9982,14 +10770,46 @@ async function createDownloadStream(game, options = {}) {
         headers: {
           "User-Agent": "Origin/2.0",
           "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-          ...(metadataProbe ? { Range: "bytes=0-0" } : {})
+          ...(requestedRangeHeader ? { Range: requestedRangeHeader } : {})
         }
       });
 
       if (response.status >= 400) {
-        response.data.destroy();
+        let failureReason = `HTTP ${response.status}`;
+        if (isDriveCandidate) {
+          try {
+            const bodyText = await readStreamAsText(response.data, 384 * 1024);
+            const driveReason = detectDriveBlockingReason(bodyText, response.status);
+            if (driveReason) {
+              failureReason = driveReason;
+            }
+            if (isDriveQuotaMessage(driveReason)) {
+              driveQuotaDetected = true;
+              if (candidateDriveId) {
+                blockedDriveIds.add(candidateDriveId);
+              }
+            }
+          } catch (_bodyError) {
+            if (response.status === 429) {
+              failureReason = "Google Drive atingiu o limite de downloads deste arquivo. Tente novamente mais tarde.";
+              driveQuotaDetected = true;
+              if (candidateDriveId) {
+                blockedDriveIds.add(candidateDriveId);
+              }
+            } else if (response?.data && typeof response.data.destroy === "function") {
+              response.data.destroy();
+            }
+          }
+        } else if (response?.data && typeof response.data.destroy === "function") {
+          response.data.destroy();
+        }
+
         const statusError = new Error(`HTTP ${response.status}`);
-        registerFailure(candidate, `HTTP ${response.status}`);
+        statusError.status = response.status;
+        if (failureReason) {
+          statusError.message = String(failureReason);
+        }
+        registerFailure(candidate, failureReason);
         lastError = statusError;
         continue;
       }
@@ -9999,7 +10819,7 @@ async function createDownloadStream(game, options = {}) {
       const looksLikeHtml = contentType.includes("text/html") && !disposition.includes("attachment");
       const looksLikeJson = contentType.includes("application/json");
       const looksLikePlainText = contentType.includes("text/plain") && !disposition.includes("attachment");
-      const isDrive = isGoogleDriveCandidate(candidate);
+      const isDrive = isDriveCandidate;
 
       if (isDrive && (looksLikeHtml || looksLikeJson || looksLikePlainText)) {
         const driveId = game.googleDriveFileId || extractDriveId(candidate.url);
@@ -10028,12 +10848,26 @@ async function createDownloadStream(game, options = {}) {
             return {
               response: currentResponse,
               sourceUrl: candidate.url,
-              candidate
+              candidate,
+              responseStatus: Number(currentResponse.status || 0),
+              resumeRequestedBytes: resumeFromBytes,
+              resumeAccepted: !metadataProbe && resumeFromBytes > 0 && Number(currentResponse.status || 0) === 206,
+              precheckFailures: [...precheckFailures],
+              precheckFailedUrls: [...precheckFailedUrls]
             };
           }
 
           const bodyText = await readStreamAsText(currentResponse.data);
           const driveBlockReason = detectDriveBlockingReason(bodyText, currentResponse.status);
+          if (isDriveQuotaMessage(driveBlockReason)) {
+            driveQuotaDetected = true;
+            if (driveId) {
+              blockedDriveIds.add(driveId);
+            }
+            lastError = new Error(driveBlockReason);
+            registerFailure(candidate, driveBlockReason);
+            break;
+          }
           let confirmUrl = buildDriveConfirmUrl(bodyText, currentUrl);
 
           if (!confirmUrl) {
@@ -10071,7 +10905,7 @@ async function createDownloadStream(game, options = {}) {
             headers: {
               "User-Agent": "Origin/2.0",
               "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-              ...(metadataProbe ? { Range: "bytes=0-0" } : {}),
+              ...(requestedRangeHeader ? { Range: requestedRangeHeader } : {}),
               ...(cookieHeader ? { Cookie: cookieHeader } : {})
             }
           });
@@ -10111,10 +10945,19 @@ async function createDownloadStream(game, options = {}) {
         response,
         sourceUrl: candidate.url,
         candidate,
+        responseStatus: Number(response.status || 0),
+        resumeRequestedBytes: resumeFromBytes,
+        resumeAccepted: !metadataProbe && resumeFromBytes > 0 && Number(response.status || 0) === 206,
         precheckFailures: [...precheckFailures],
         precheckFailedUrls: [...precheckFailedUrls]
       };
     } catch (error) {
+      if (isDriveCandidate && isDriveQuotaMessage(error?.message)) {
+        driveQuotaDetected = true;
+        if (candidateDriveId) {
+          blockedDriveIds.add(candidateDriveId);
+        }
+      }
       registerFailure(candidate, error.message);
       lastError = error;
     }
@@ -10129,11 +10972,17 @@ async function createDownloadStream(game, options = {}) {
     );
     streamError.attemptedUrls = candidates.map((candidate) => String(candidate.url || "").trim()).filter(Boolean);
     streamError.precheckFailures = [...precheckFailures];
+    if (driveQuotaDetected) {
+      streamError.failureCode = "DRIVE_QUOTA";
+    }
     throw streamError;
   }
   const streamError = new Error("Nao foi possivel abrir o link de download.");
   streamError.attemptedUrls = candidates.map((candidate) => String(candidate.url || "").trim()).filter(Boolean);
   streamError.precheckFailures = [...precheckFailures];
+  if (driveQuotaDetected) {
+    streamError.failureCode = "DRIVE_QUOTA";
+  }
   throw streamError;
 }
 
@@ -10191,49 +11040,125 @@ async function downloadFile({ game, destinationPath, onProgress, runControl }) {
     throw new Error("Jogo sem fonte de download configurada (downloadUrl/downloadUrls/downloadSources).");
   }
 
-  const triedCandidates = new Set();
+  const blockedCandidates = new Set();
+  const attemptCountBySourceUrl = new Map();
   const failures = [];
+  const maxAttemptsPerCandidate = Math.max(
+    1,
+    Math.min(
+      8,
+      parsePositiveInteger(game?.downloadMaxAttempts || game?.download_max_attempts || game?.download_retry_attempts) ||
+        DOWNLOAD_CANDIDATE_MAX_ATTEMPTS
+    )
+  );
 
-  while (triedCandidates.size < allCandidates.length) {
+  while (blockedCandidates.size < allCandidates.length) {
     if (runControl && typeof runControl.waitIfPaused === "function") {
       await runControl.waitIfPaused();
     }
 
+    const resumeOffset = await getFileSizeIfExists(destinationPath);
     let payload;
     try {
       payload = await createDownloadStream(game, {
-        skipSourceUrls: [...triedCandidates]
+        skipSourceUrls: [...blockedCandidates],
+        resumeFromBytes: resumeOffset >= DOWNLOAD_RESUME_MIN_BYTES ? resumeOffset : 0
       });
     } catch (error) {
       const attemptedUrls = Array.isArray(error?.attemptedUrls) ? error.attemptedUrls : [];
+      const streamFailureCode = String(error?.failureCode || "").trim().toUpperCase();
+      const retryableStreamError = streamFailureCode !== "DRIVE_QUOTA" && isRetryableDownloadError(error);
+      let hasRetryableCandidate = false;
       for (const url of attemptedUrls) {
-        triedCandidates.add(String(url || "").trim());
+        const normalizedUrl = String(url || "").trim();
+        if (!normalizedUrl) {
+          continue;
+        }
+        const currentAttempts = Math.max(0, Number(attemptCountBySourceUrl.get(normalizedUrl) || 0)) + 1;
+        attemptCountBySourceUrl.set(normalizedUrl, currentAttempts);
+        if (retryableStreamError && currentAttempts < maxAttemptsPerCandidate) {
+          hasRetryableCandidate = true;
+          continue;
+        }
+        blockedCandidates.add(normalizedUrl);
       }
       const precheckFailures = Array.isArray(error?.precheckFailures) ? error.precheckFailures : [];
       for (const entry of precheckFailures) {
         pushUniqueFailure(failures, entry);
       }
+      if (hasRetryableCandidate) {
+        const retryDelayMs = computeDownloadRetryDelayMs(1);
+        await waitForMilliseconds(retryDelayMs);
+        continue;
+      }
       if (failures.length > 0) {
         const details = compactFailureDetails(failures).join(" | ");
-        throw new Error(`Nao foi possivel abrir links validos de download. ${details}`);
+        const streamOpenError = new Error(`Nao foi possivel abrir links validos de download. ${details}`);
+        if (streamFailureCode) {
+          streamOpenError.failureCode = streamFailureCode;
+        }
+        throw streamOpenError;
       }
       throw error;
     }
 
-    const { response, sourceUrl, candidate, precheckFailures = [], precheckFailedUrls = [] } = payload;
+    const {
+      response,
+      sourceUrl,
+      candidate,
+      resumeRequestedBytes = 0,
+      resumeAccepted = false,
+      precheckFailures = [],
+      precheckFailedUrls = []
+    } = payload;
     for (const entry of precheckFailures) {
       pushUniqueFailure(failures, entry);
     }
     for (const url of precheckFailedUrls) {
-      triedCandidates.add(String(url || "").trim());
+      const normalizedUrl = String(url || "").trim();
+      if (normalizedUrl) {
+        blockedCandidates.add(normalizedUrl);
+      }
     }
-    const sourceKey = String(sourceUrl || "");
-    triedCandidates.add(sourceKey);
-    const totalBytes = extractTotalBytesFromHeaders(response.headers);
-    let downloadedBytes = 0;
+
+    const sourceKey = String(sourceUrl || "").trim();
+    const currentAttempt = Math.max(0, Number(attemptCountBySourceUrl.get(sourceKey) || 0)) + 1;
+    attemptCountBySourceUrl.set(sourceKey, currentAttempt);
+
+    const resumeStartBytes =
+      resumeAccepted === true && Number(resumeRequestedBytes) >= DOWNLOAD_RESUME_MIN_BYTES
+        ? Math.floor(Number(resumeRequestedBytes))
+        : 0;
+    if (resumeStartBytes <= 0 && resumeOffset > 0) {
+      await fsp.rm(destinationPath, { force: true }).catch(() => {});
+    }
+
+    let totalBytes = extractTotalBytesFromHeaders(response.headers);
+    const contentLengthBytes = parseSizeBytes(response?.headers?.["content-length"]);
+    if (resumeStartBytes > 0) {
+      if (totalBytes <= 0 && contentLengthBytes > 0) {
+        totalBytes = resumeStartBytes + contentLengthBytes;
+      } else if (contentLengthBytes > 0 && totalBytes <= resumeStartBytes) {
+        totalBytes = resumeStartBytes + contentLengthBytes;
+      }
+    }
+
+    let downloadedBytes = resumeStartBytes;
     let lastSampleAt = Date.now();
-    let lastSampleBytes = 0;
+    let lastSampleBytes = downloadedBytes;
     let lastSpeedBps = 0;
+    const sourceLabel = getDownloadCandidateLabel(candidate);
+
+    if (downloadedBytes > 0 && typeof onProgress === "function") {
+      onProgress(downloadedBytes, totalBytes, {
+        speedBps: 0,
+        sourceLabel,
+        sourceUrl,
+        resumed: true,
+        resumedBytes: downloadedBytes
+      });
+    }
+
     const progressTransform = createPauseAwarePassThroughTransform(runControl, (chunk) => {
       downloadedBytes += chunk.length;
       const now = Date.now();
@@ -10249,14 +11174,25 @@ async function downloadFile({ game, destinationPath, onProgress, runControl }) {
       if (typeof onProgress === "function") {
         onProgress(downloadedBytes, totalBytes, {
           speedBps: Math.max(0, lastSpeedBps),
-          sourceLabel: getDownloadCandidateLabel(candidate),
+          sourceLabel,
           sourceUrl
         });
       }
     });
 
     try {
-      await pipeline(response.data, progressTransform, fs.createWriteStream(destinationPath));
+      await pipeline(
+        response.data,
+        progressTransform,
+        fs.createWriteStream(
+          destinationPath,
+          resumeStartBytes > 0
+            ? {
+                flags: "a"
+              }
+            : {}
+        )
+      );
       if (totalBytes > 0 && downloadedBytes > 0 && downloadedBytes < totalBytes) {
         throw new Error(`Download incompleto (${downloadedBytes}/${totalBytes} bytes).`);
       }
@@ -10266,14 +11202,28 @@ async function downloadFile({ game, destinationPath, onProgress, runControl }) {
       }
       return {
         sourceUrl,
-        sourceLabel: getDownloadCandidateLabel(candidate),
+        sourceLabel,
         totalBytes: totalBytes > 0 ? totalBytes : downloadedBytes,
-        downloadedBytes
+        downloadedBytes,
+        attempts: currentAttempt,
+        resumedBytes: resumeStartBytes
       };
     } catch (error) {
+      const label = sourceLabel || getDownloadCandidateLabel(candidate || sourceKey);
+      const retryable = isRetryableDownloadError(error);
+      const canRetry = retryable && currentAttempt < maxAttemptsPerCandidate;
+      if (canRetry) {
+        const retryDelayMs = computeDownloadRetryDelayMs(currentAttempt);
+        pushUniqueFailure(failures, `${label}: falha temporaria (${String(error?.message || "erro de rede")})`);
+        await waitForMilliseconds(retryDelayMs);
+        continue;
+      }
+
       await fsp.rm(destinationPath, { force: true }).catch(() => {});
-      const label = getDownloadCandidateLabel(candidate || sourceKey);
-      pushUniqueFailure(failures, `${label}: ${error.message}`);
+      pushUniqueFailure(failures, `${label}: ${String(error?.message || "falha desconhecida")}`);
+      if (sourceKey) {
+        blockedCandidates.add(sourceKey);
+      }
     }
   }
 
@@ -10832,7 +11782,11 @@ async function scanArchiveWithWindowsDefender(archivePath) {
   );
 
   if (result.timedOut) {
-    throw new Error("Verificacao de seguranca expirou no Windows Defender.");
+    return {
+      scanned: false,
+      skipped: true,
+      reason: "Windows Defender excedeu tempo limite."
+    };
   }
 
   const output = trimProcessOutput(result.output);
@@ -10881,7 +11835,109 @@ function formatInstallFailure(code, message, hint = "") {
   return `[${cleanCode}] ${cleanMessage} Dica: ${cleanHint}`;
 }
 
+function extractInstallFailureCode(message) {
+  const text = String(message || "").trim();
+  if (!text) {
+    return "";
+  }
+  const match = text.match(/^\[([A-Z0-9_]{2,64})\]/);
+  return match?.[1] ? String(match[1]).trim().toUpperCase() : "";
+}
+
+function isInstallFailureCodeAutoRetryDisabled(failureCode) {
+  const code = String(failureCode || "").trim().toUpperCase();
+  if (!code) {
+    return false;
+  }
+  return INSTALL_AUTO_RETRY_DISABLED_CODES.has(code);
+}
+
+function computeInstallAutoRetryDelayMs(failureCode, retryCount = 1) {
+  const code = String(failureCode || "").trim().toUpperCase();
+  const safeRetryCount = Math.max(1, Math.min(30, parsePositiveInteger(retryCount) || 1));
+
+  let baseDelayMs = INSTALL_AUTO_RETRY_GENERIC_BASE_DELAY_MS;
+  if (code === "DRIVE_QUOTA") {
+    baseDelayMs = INSTALL_AUTO_RETRY_DRIVE_QUOTA_BASE_DELAY_MS;
+  } else if (["DOWNLOAD_FAILED", "DOWNLOAD_INTERRUPTED"].includes(code)) {
+    baseDelayMs = INSTALL_AUTO_RETRY_DOWNLOAD_BASE_DELAY_MS;
+  }
+
+  const exponentialDelay = Math.min(INSTALL_AUTO_RETRY_MAX_DELAY_MS, baseDelayMs * (2 ** (safeRetryCount - 1)));
+  const jitterCap = Math.max(0, Math.min(INSTALL_AUTO_RETRY_JITTER_MAX_MS, Math.floor(exponentialDelay * 0.22)));
+  const jitter = jitterCap > 0 ? Math.floor(Math.random() * jitterCap) : 0;
+  return Math.max(INSTALL_AUTO_RETRY_MONITOR_MIN_DELAY_MS, exponentialDelay + jitter);
+}
+
+function formatAutoRetryRemainingTime(waitMs) {
+  const totalMs = Math.max(0, Math.floor(Number(waitMs) || 0));
+  if (totalMs < 1000) {
+    return "instantes";
+  }
+
+  const totalSeconds = Math.ceil(totalMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    if (minutes > 0) {
+      return `${hours}h ${minutes}min`;
+    }
+    return `${hours}h`;
+  }
+  if (minutes > 0) {
+    return `${minutes}min`;
+  }
+  return `${seconds}s`;
+}
+
+function formatAutoRetryClockTime(timestampMs) {
+  const safeTimestampMs = toValidTimestampMs(timestampMs);
+  if (safeTimestampMs <= 0) {
+    return "";
+  }
+  try {
+    return new Date(safeTimestampMs).toLocaleTimeString("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+  } catch (_error) {
+    return "";
+  }
+}
+
+function buildInstallAutoRetryScheduleMessage(nextRetryAtMs, failureCode = "") {
+  const safeRetryAtMs = toValidTimestampMs(nextRetryAtMs);
+  if (safeRetryAtMs <= 0) {
+    return "";
+  }
+
+  const remainingMs = Math.max(0, safeRetryAtMs - Date.now());
+  const safeCode = String(failureCode || "").trim().toUpperCase();
+  const headline =
+    safeCode === "DRIVE_QUOTA"
+      ? "Google Drive em limite de downloads."
+      : "Falha temporaria detectada.";
+  if (remainingMs <= 1500) {
+    return `${headline} Retomada automatica em instantes.`;
+  }
+
+  const waitLabel = formatAutoRetryRemainingTime(remainingMs);
+  const clockLabel = formatAutoRetryClockTime(safeRetryAtMs);
+  return `${headline} Retomada automatica em ${waitLabel}${clockLabel ? ` (aprox. ${clockLabel}).` : "."}`;
+}
+
 function normalizeInstallFailureMessage(error) {
+  const explicitFailureCode = String(error?.failureCode || "").trim().toUpperCase();
+  if (explicitFailureCode === "DRIVE_QUOTA") {
+    return formatInstallFailure(
+      "DRIVE_QUOTA",
+      "Google Drive bloqueou temporariamente este arquivo por limite de downloads.",
+      "Tente mais tarde ou adicione uma fonte espelho em downloadSources/downloadUrls."
+    );
+  }
+
   const raw = String(error?.message || "Falha inesperada durante a instalacao.")
     .replace(/\s+/g, " ")
     .trim();
@@ -10904,6 +11960,13 @@ function normalizeInstallFailureMessage(error) {
       "SOURCE_NOT_CONFIGURED",
       "Nenhuma fonte de download foi configurada para este jogo.",
       "Preencha downloadUrl/downloadSources/downloadUrls no catalogo de jogos (Supabase ou games.json)."
+    );
+  }
+  if (lower.includes("install_path_invalid") || lower.includes("caminho de instalacao invalido")) {
+    return formatInstallFailure(
+      "INSTALL_PATH_INVALID",
+      "Foi detectado um caminho de instalacao inseguro para este jogo.",
+      "Revise installDirName e launchExecutable para evitar caminhos fora da pasta de jogos."
     );
   }
   if (
@@ -11079,6 +12142,7 @@ function setInstallQueuePausedState(nextValue) {
   if (!installQueuePaused) {
     resolveInstallQueuePauseWaiters();
   }
+  refreshInstallAutoRetryMonitor();
 }
 
 function waitForInstallQueueResume() {
@@ -11090,8 +12154,18 @@ function waitForInstallQueueResume() {
   });
 }
 
-function createQueuedInstallRequest(gameId) {
+function createQueuedInstallRequest(gameId, options = {}) {
   const normalizedGameId = String(gameId || "").trim();
+  const safeOptions = options && typeof options === "object" ? options : {};
+  const retryCount = Math.max(0, parsePositiveInteger(safeOptions.retryCount));
+  const nextRetryAtMs = toValidTimestampMs(safeOptions.nextRetryAtMs);
+  const autoRetryEnabled = safeOptions.autoRetryEnabled === true && nextRetryAtMs > 0;
+  const lastFailureCode = String(safeOptions.lastFailureCode || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, "")
+    .slice(0, 64);
+  const lastFailureMessage = trimProcessOutput(safeOptions.lastFailureMessage || "", 560);
   let resolvePromise;
   let rejectPromise;
   const promise = new Promise((resolve, reject) => {
@@ -11106,8 +12180,249 @@ function createQueuedInstallRequest(gameId) {
     enqueuedAt: Date.now(),
     promise,
     resolve: resolvePromise,
-    reject: rejectPromise
+    reject: rejectPromise,
+    autoRetryEnabled,
+    retryCount,
+    nextRetryAtMs: autoRetryEnabled ? nextRetryAtMs : 0,
+    lastFailureCode,
+    lastFailureMessage
   };
+}
+
+function applyInstallAutoRetryMetadataToQueuedRequest(request, options = {}) {
+  if (!request || typeof request !== "object") {
+    return;
+  }
+
+  const safeOptions = options && typeof options === "object" ? options : {};
+  const nextRetryAtMs = toValidTimestampMs(safeOptions.nextRetryAtMs);
+  const autoRetryEnabled = safeOptions.autoRetryEnabled === true && nextRetryAtMs > 0;
+  request.autoRetryEnabled = autoRetryEnabled;
+  request.nextRetryAtMs = autoRetryEnabled ? nextRetryAtMs : 0;
+  request.retryCount = Math.max(
+    0,
+    parsePositiveInteger(safeOptions.retryCount !== undefined ? safeOptions.retryCount : request.retryCount)
+  );
+  request.lastFailureCode = String(safeOptions.lastFailureCode ?? request.lastFailureCode ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, "")
+    .slice(0, 64);
+  request.lastFailureMessage = trimProcessOutput(
+    safeOptions.lastFailureMessage !== undefined ? safeOptions.lastFailureMessage : request.lastFailureMessage,
+    560
+  );
+}
+
+function resolveQueuedInstallAutoRetryMetadata(gameId, request = null) {
+  const normalizedGameId = String(gameId || "").trim();
+  if (!normalizedGameId) {
+    return {
+      autoRetryEnabled: false,
+      retryCount: 0,
+      nextRetryAtMs: 0,
+      lastFailureCode: "",
+      lastFailureMessage: ""
+    };
+  }
+
+  const queuedRequest = request || queuedInstallRequestsByGameId.get(normalizedGameId) || null;
+  const session = activeInstallSessionsByGameId.get(normalizedGameId) || null;
+  const requestNextRetryAtMs = toValidTimestampMs(queuedRequest?.nextRetryAtMs);
+  const sessionNextRetryAtMs = toValidTimestampMs(session?.nextRetryAtMs);
+  const nextRetryAtMs = Math.max(requestNextRetryAtMs, sessionNextRetryAtMs);
+  const autoRetryEnabled = (queuedRequest?.autoRetryEnabled === true || session?.autoRetryEnabled === true) && nextRetryAtMs > 0;
+  const retryCount = Math.max(
+    0,
+    parsePositiveInteger(queuedRequest?.retryCount),
+    parsePositiveInteger(session?.retryCount)
+  );
+  const lastFailureCode = String(queuedRequest?.lastFailureCode || session?.lastFailureCode || "")
+    .trim()
+    .toUpperCase();
+  const lastFailureMessage = trimProcessOutput(
+    queuedRequest?.lastFailureMessage || session?.lastFailureMessage || "",
+    560
+  );
+
+  return {
+    autoRetryEnabled,
+    retryCount,
+    nextRetryAtMs: autoRetryEnabled ? nextRetryAtMs : 0,
+    lastFailureCode,
+    lastFailureMessage
+  };
+}
+
+function getNextInstallAutoRetryDueAtMs() {
+  let nextDueAtMs = 0;
+  for (const [gameId, request] of queuedInstallRequestsByGameId.entries()) {
+    if (!request || request.state !== "paused") {
+      continue;
+    }
+    const retryMetadata = resolveQueuedInstallAutoRetryMetadata(gameId, request);
+    if (!retryMetadata.autoRetryEnabled || retryMetadata.nextRetryAtMs <= 0) {
+      continue;
+    }
+    if (!nextDueAtMs || retryMetadata.nextRetryAtMs < nextDueAtMs) {
+      nextDueAtMs = retryMetadata.nextRetryAtMs;
+    }
+  }
+  return nextDueAtMs;
+}
+
+function clearInstallAutoRetryMonitorTimer() {
+  if (!installAutoRetryMonitorTimer) {
+    return;
+  }
+  clearTimeout(installAutoRetryMonitorTimer);
+  installAutoRetryMonitorTimer = null;
+}
+
+function scheduleInstallAutoRetryMonitor(delayMs = INSTALL_AUTO_RETRY_MONITOR_IDLE_DELAY_MS) {
+  clearInstallAutoRetryMonitorTimer();
+  const safeDelayMs = Math.max(INSTALL_AUTO_RETRY_MONITOR_MIN_DELAY_MS, Number(delayMs) || INSTALL_AUTO_RETRY_MONITOR_IDLE_DELAY_MS);
+  installAutoRetryMonitorTimer = setTimeout(() => {
+    installAutoRetryMonitorTimer = null;
+    void flushInstallAutoRetryQueue();
+  }, safeDelayMs);
+}
+
+function refreshInstallAutoRetryMonitor() {
+  const nextDueAtMs = getNextInstallAutoRetryDueAtMs();
+  if (nextDueAtMs <= 0) {
+    clearInstallAutoRetryMonitorTimer();
+    return;
+  }
+  if (installQueuePaused) {
+    scheduleInstallAutoRetryMonitor(INSTALL_AUTO_RETRY_MONITOR_IDLE_DELAY_MS);
+    return;
+  }
+  const delayMs = Math.max(INSTALL_AUTO_RETRY_MONITOR_MIN_DELAY_MS, nextDueAtMs - Date.now());
+  scheduleInstallAutoRetryMonitor(delayMs);
+}
+
+async function flushInstallAutoRetryQueue() {
+  if (installAutoRetryMonitorInFlight) {
+    return installAutoRetryMonitorInFlight;
+  }
+
+  installAutoRetryMonitorInFlight = (async () => {
+    if (installQueuePaused) {
+      scheduleInstallAutoRetryMonitor(INSTALL_AUTO_RETRY_MONITOR_IDLE_DELAY_MS);
+      return { ok: true, resumed: 0, skipped: true };
+    }
+
+    const nowMs = Date.now();
+    const dueEntries = [];
+    for (const [gameId, request] of queuedInstallRequestsByGameId.entries()) {
+      if (!request || request.state !== "paused") {
+        continue;
+      }
+      const retryMetadata = resolveQueuedInstallAutoRetryMetadata(gameId, request);
+      if (!retryMetadata.autoRetryEnabled || retryMetadata.nextRetryAtMs <= 0) {
+        continue;
+      }
+      if (retryMetadata.nextRetryAtMs <= nowMs + 300) {
+        dueEntries.push({
+          gameId,
+          retryCount: retryMetadata.retryCount,
+          nextRetryAtMs: retryMetadata.nextRetryAtMs,
+          failureCode: retryMetadata.lastFailureCode
+        });
+      }
+    }
+
+    dueEntries.sort((left, right) => Number(left.nextRetryAtMs || 0) - Number(right.nextRetryAtMs || 0));
+    let resumedCount = 0;
+
+    for (const entry of dueEntries) {
+      const gameId = String(entry.gameId || "").trim();
+      if (!gameId) {
+        continue;
+      }
+
+      const request = queuedInstallRequestsByGameId.get(gameId);
+      if (!request || request.state !== "paused") {
+        continue;
+      }
+
+      try {
+        await resumeInstall(gameId);
+        resumedCount += 1;
+        await patchActiveInstallSession(gameId, {
+          autoRetryEnabled: false,
+          nextRetryAtMs: 0
+        }).catch(() => {});
+      } catch (error) {
+        const latestRequest = queuedInstallRequestsByGameId.get(gameId);
+        if (!latestRequest || latestRequest.state !== "paused") {
+          continue;
+        }
+
+        const normalizedErrorMessage = normalizeInstallFailureMessage(error);
+        const failureCode =
+          extractInstallFailureCode(normalizedErrorMessage) ||
+          String(entry.failureCode || "").trim().toUpperCase() ||
+          "DOWNLOAD_FAILED";
+        const retryCount = Math.max(1, parsePositiveInteger(entry.retryCount) + 1);
+        const canAutoRetry =
+          retryCount <= INSTALL_AUTO_RETRY_MAX_ATTEMPTS &&
+          !isInstallFailureCodeAutoRetryDisabled(failureCode);
+
+        if (!canAutoRetry) {
+          applyInstallAutoRetryMetadataToQueuedRequest(latestRequest, {
+            autoRetryEnabled: false,
+            retryCount,
+            nextRetryAtMs: 0,
+            lastFailureCode: failureCode,
+            lastFailureMessage: normalizedErrorMessage
+          });
+          emitQueuedInstallProgress(gameId, latestRequest, {
+            message: `Falha temporaria recorrente. Clique em Retomar manualmente. ${normalizedErrorMessage}`
+          });
+          await patchActiveInstallSession(gameId, {
+            phase: "paused",
+            retryable: true,
+            autoRetryEnabled: false,
+            retryCount,
+            nextRetryAtMs: 0,
+            lastFailureCode: failureCode,
+            lastFailureMessage: normalizedErrorMessage
+          }).catch(() => {});
+          continue;
+        }
+
+        const nextRetryAtMs = Date.now() + computeInstallAutoRetryDelayMs(failureCode, retryCount);
+        applyInstallAutoRetryMetadataToQueuedRequest(latestRequest, {
+          autoRetryEnabled: true,
+          retryCount,
+          nextRetryAtMs,
+          lastFailureCode: failureCode,
+          lastFailureMessage: normalizedErrorMessage
+        });
+        emitQueuedInstallProgress(gameId, latestRequest, {
+          message: `${buildInstallAutoRetryScheduleMessage(nextRetryAtMs, failureCode)} ${normalizedErrorMessage}`
+        });
+        await patchActiveInstallSession(gameId, {
+          phase: "paused",
+          retryable: true,
+          autoRetryEnabled: true,
+          retryCount,
+          nextRetryAtMs,
+          lastFailureCode: failureCode,
+          lastFailureMessage: normalizedErrorMessage
+        }).catch(() => {});
+      }
+    }
+
+    refreshInstallAutoRetryMonitor();
+    return { ok: true, resumed: resumedCount };
+  })().finally(() => {
+    installAutoRetryMonitorInFlight = null;
+  });
+
+  return installAutoRetryMonitorInFlight;
 }
 
 function emitQueuedInstallProgress(gameId, request, options = {}) {
@@ -11124,6 +12439,11 @@ function emitQueuedInstallProgress(gameId, request, options = {}) {
   const percentRaw = Number(cachedProgress.percent);
   const percent = Number.isFinite(percentRaw) ? Math.max(0, Math.min(100, percentRaw)) : 0;
   const message = normalizeOptionalString(options.message);
+  const retryMetadata = resolveQueuedInstallAutoRetryMetadata(normalizedGameId, request);
+  const autoRetryMessage =
+    paused && retryMetadata.autoRetryEnabled
+      ? buildInstallAutoRetryScheduleMessage(retryMetadata.nextRetryAtMs, retryMetadata.lastFailureCode)
+      : "";
 
   emitInstallProgress({
     gameId: normalizedGameId,
@@ -11135,9 +12455,10 @@ function emitQueuedInstallProgress(gameId, request, options = {}) {
     message:
       message ||
       (paused
-        ? queuePosition > 0
-          ? `Download pausado (${queuePosition} na fila).`
-          : "Download pausado."
+        ? autoRetryMessage ||
+          (queuePosition > 0
+            ? `Download pausado (${queuePosition} na fila).`
+            : "Download pausado.")
         : queuePosition > 0
           ? `Na fila de instalacao (${queuePosition} na fila).`
           : "Na fila de instalacao.")
@@ -11151,6 +12472,7 @@ function refreshQueuedInstallProgress() {
       emitQueuedInstallProgress(gameId, request);
     }
   }
+  refreshInstallAutoRetryMonitor();
 }
 
 function createInstallRunControl(gameId) {
@@ -11274,10 +12596,13 @@ async function runInstallQueue() {
     } catch (error) {
       request.reject(error);
     } finally {
-      if (queuedInstallRequestsByGameId.get(nextGameId) === request) {
+      const currentRequest = queuedInstallRequestsByGameId.get(nextGameId);
+      if (currentRequest === request) {
         queuedInstallRequestsByGameId.delete(nextGameId);
       }
-      if (lastPausedInstallGameId === nextGameId) {
+      if (currentRequest && currentRequest !== request && currentRequest.state === "paused") {
+        lastPausedInstallGameId = nextGameId;
+      } else if (lastPausedInstallGameId === nextGameId) {
         lastPausedInstallGameId = "";
       }
       refreshQueuedInstallProgress();
@@ -11341,8 +12666,18 @@ async function installGameNow(gameId) {
     const installDir = getGameInstallDir(game, installRoot);
     const tempDir = path.join(installRoot, TEMP_DIR_NAME);
     const safeTempId = slugifyId(game.id, "game");
-    const tempArchivePath = path.join(tempDir, `${safeTempId}-${Date.now()}${getArchiveExt(game)}`);
+    const tempArchivePath = path.join(tempDir, `${safeTempId}${getArchiveExt(game)}`);
+    if (
+      !isPathInsideDirectory(installRoot, installDir) ||
+      arePathsEquivalent(installRoot, installDir) ||
+      !isPathInsideDirectory(tempDir, tempArchivePath)
+    ) {
+      throw new Error("[INSTALL_PATH_INVALID] Caminho de instalacao invalido detectado.");
+    }
     const localArchivePath = await resolveConfiguredLocalArchivePath(game);
+    const usingLocalArchive = Boolean(localArchivePath);
+    const existingPartialArchiveBytes = usingLocalArchive ? 0 : await getFileSizeIfExists(tempArchivePath);
+    const shouldAttemptResumeFromPartial = existingPartialArchiveBytes >= DOWNLOAD_RESUME_MIN_BYTES;
     const installSessionTimestamp = new Date().toISOString();
 
     await fsp.mkdir(tempDir, { recursive: true });
@@ -11357,8 +12692,12 @@ async function installGameNow(gameId) {
       updatedAt: installSessionTimestamp
     }).catch(() => {});
 
+    let keepTempArchiveForRetry = false;
+    let preserveRetryStateAfterFailure = false;
     try {
-      await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
+      if (usingLocalArchive) {
+        await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
+      }
       await fsp.rm(installDir, { recursive: true, force: true }).catch(() => {});
       await fsp.mkdir(installDir, { recursive: true });
       await runControl.waitIfPaused();
@@ -11370,7 +12709,6 @@ async function installGameNow(gameId) {
         message: "Preparando instalacao..."
       });
 
-      const usingLocalArchive = Boolean(localArchivePath);
       let transferResult = null;
 
       await runControl.waitIfPaused();
@@ -11379,7 +12717,13 @@ async function installGameNow(gameId) {
         gameId,
         phase: "downloading",
         percent: 0,
-        message: usingLocalArchive ? "Copiando arquivo local..." : "Baixando..."
+        downloadedBytes: shouldAttemptResumeFromPartial ? existingPartialArchiveBytes : 0,
+        totalBytes: 0,
+        message: usingLocalArchive
+          ? "Copiando arquivo local..."
+          : shouldAttemptResumeFromPartial
+            ? `Retomando download... (${formatBytesShort(existingPartialArchiveBytes)} ja baixados)`
+            : "Baixando..."
       });
 
       if (usingLocalArchive) {
@@ -11576,17 +12920,73 @@ async function installGameNow(gameId) {
       if (cacheKey) {
         installSizeCache.delete(cacheKey);
       }
-      await clearActiveInstallSession(gameId).catch(() => {});
       const normalizedErrorMessage = normalizeInstallFailureMessage(error);
-      emitInstallTaskProgress({
-        gameId,
-        phase: "failed",
-        percent: 0,
-        message: normalizedErrorMessage
-      });
-      throw new Error(normalizedErrorMessage);
+      const failureCode =
+        extractInstallFailureCode(normalizedErrorMessage) ||
+        String(error?.failureCode || "").trim().toUpperCase();
+      keepTempArchiveForRetry =
+        !usingLocalArchive && (isRetryableDownloadError(error) || failureCode === "DRIVE_QUOTA");
+      preserveRetryStateAfterFailure = keepTempArchiveForRetry;
+      const previousRetryCount = Math.max(
+        0,
+        parsePositiveInteger(activeInstallSessionsByGameId.get(gameId)?.retryCount)
+      );
+      const retryCount = previousRetryCount + 1;
+      const canAutoRetry =
+        keepTempArchiveForRetry &&
+        retryCount <= INSTALL_AUTO_RETRY_MAX_ATTEMPTS &&
+        !isInstallFailureCodeAutoRetryDisabled(failureCode);
+      const nextRetryAtMs = canAutoRetry ? Date.now() + computeInstallAutoRetryDelayMs(failureCode, retryCount) : 0;
+      const retryScheduleMessage = canAutoRetry
+        ? buildInstallAutoRetryScheduleMessage(nextRetryAtMs, failureCode)
+        : "";
+      const failureMessage = keepTempArchiveForRetry
+        ? `${normalizedErrorMessage} Arquivo parcial preservado para retomada automatica na proxima tentativa.`
+        : normalizedErrorMessage;
+
+      if (keepTempArchiveForRetry) {
+        await patchActiveInstallSession(gameId, {
+          phase: "paused",
+          retryable: true,
+          autoRetryEnabled: canAutoRetry,
+          retryCount,
+          nextRetryAtMs,
+          lastFailureCode: failureCode,
+          lastFailureMessage: normalizedErrorMessage
+        }).catch(() => {});
+        const pausedRequest = createQueuedInstallRequest(gameId, {
+          autoRetryEnabled: canAutoRetry,
+          retryCount,
+          nextRetryAtMs,
+          lastFailureCode: failureCode,
+          lastFailureMessage: normalizedErrorMessage
+        });
+        pausedRequest.state = "paused";
+        queuedInstallRequestsByGameId.set(gameId, pausedRequest);
+        emitQueuedInstallProgress(gameId, pausedRequest, {
+          message: canAutoRetry
+            ? `${retryScheduleMessage} ${failureMessage}`
+            : `Falha temporaria. Clique em Retomar para continuar de onde parou. ${failureMessage}`
+        });
+        lastPausedInstallGameId = gameId;
+        refreshInstallAutoRetryMonitor();
+      } else {
+        await clearActiveInstallSession(gameId).catch(() => {});
+        emitInstallTaskProgress({
+          gameId,
+          phase: "failed",
+          percent: 0,
+          message: failureMessage
+        });
+      }
+      throw new Error(failureMessage);
     } finally {
-      await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
+      if (!keepTempArchiveForRetry) {
+        await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
+      }
+      if (!preserveRetryStateAfterFailure) {
+        await clearActiveInstallSession(gameId).catch(() => {});
+      }
     }
   })();
 
@@ -11596,8 +12996,13 @@ async function installGameNow(gameId) {
   } finally {
     activeInstalls.delete(gameId);
     installRunControlsByGameId.delete(gameId);
-    activeInstallProgressByGameId.delete(String(gameId || "").trim());
-    await clearActiveInstallSession(gameId).catch(() => {});
+    const progressGameId = String(gameId || "").trim();
+    const preservedRequest = queuedInstallRequestsByGameId.get(progressGameId);
+    const shouldPreserveProgress = preservedRequest && preservedRequest.state === "paused";
+    if (!shouldPreserveProgress) {
+      activeInstallProgressByGameId.delete(progressGameId);
+      await clearActiveInstallSession(gameId).catch(() => {});
+    }
   }
 }
 
@@ -11616,7 +13021,11 @@ async function pauseInstall(gameId) {
     }
     if (runControl.pause("Download pausado.")) {
       lastPausedInstallGameId = normalizedGameId;
-      await updateActiveInstallSessionPhase(normalizedGameId, "paused").catch(() => {});
+      await patchActiveInstallSession(normalizedGameId, {
+        phase: "paused",
+        autoRetryEnabled: false,
+        nextRetryAtMs: 0
+      }).catch(() => {});
       return { ok: true, state: "paused-active" };
     }
     return { ok: true, state: "already-paused" };
@@ -11624,13 +13033,33 @@ async function pauseInstall(gameId) {
 
   const request = queuedInstallRequestsByGameId.get(normalizedGameId);
   if (request && request.state === "queued") {
+    applyInstallAutoRetryMetadataToQueuedRequest(request, {
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    });
     request.state = "paused";
     removeInstallFromQueue(normalizedGameId);
+    await patchActiveInstallSession(normalizedGameId, {
+      phase: "paused",
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    }).catch(() => {});
     emitQueuedInstallProgress(normalizedGameId, request, { message: "Download pausado na fila." });
     refreshQueuedInstallProgress();
     return { ok: true, state: "paused-queued" };
   }
   if (request && request.state === "paused") {
+    applyInstallAutoRetryMetadataToQueuedRequest(request, {
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    });
+    await patchActiveInstallSession(normalizedGameId, {
+      phase: "paused",
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    }).catch(() => {});
+    emitQueuedInstallProgress(normalizedGameId, request, { message: "Download pausado." });
+    refreshQueuedInstallProgress();
     return { ok: true, state: "already-paused" };
   }
 
@@ -11647,7 +13076,11 @@ async function resumeInstall(gameId) {
   if (runControl) {
     setInstallQueuePausedState(false);
     if (runControl.resume("Retomando download...")) {
-      await updateActiveInstallSessionPhase(normalizedGameId, runControl.getActivePhase()).catch(() => {});
+      await patchActiveInstallSession(normalizedGameId, {
+        phase: runControl.getActivePhase(),
+        autoRetryEnabled: false,
+        nextRetryAtMs: 0
+      }).catch(() => {});
       ensureInstallQueueRunner();
       return { ok: true, state: "resumed-active" };
     }
@@ -11656,10 +13089,19 @@ async function resumeInstall(gameId) {
 
   const request = queuedInstallRequestsByGameId.get(normalizedGameId);
   if (request && request.state === "paused") {
+    applyInstallAutoRetryMetadataToQueuedRequest(request, {
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    });
     request.state = "queued";
     if (getInstallQueueIndex(normalizedGameId) < 0) {
       installQueue.push(normalizedGameId);
     }
+    await patchActiveInstallSession(normalizedGameId, {
+      phase: "queued",
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    }).catch(() => {});
     emitQueuedInstallProgress(normalizedGameId, request, { message: "Retomando na fila..." });
     refreshQueuedInstallProgress();
     setInstallQueuePausedState(false);
@@ -11682,18 +13124,36 @@ async function pauseAllInstalls() {
     if (runControl.pause("Download pausado.")) {
       pausedActive += 1;
       lastPausedInstallGameId = gameId;
-      await updateActiveInstallSessionPhase(gameId, "paused").catch(() => {});
+      await patchActiveInstallSession(gameId, {
+        phase: "paused",
+        autoRetryEnabled: false,
+        nextRetryAtMs: 0
+      }).catch(() => {});
     }
   }
 
   for (const [gameId, request] of queuedInstallRequestsByGameId.entries()) {
-    if (request.state !== "queued") {
+    const state = String(request?.state || "").toLowerCase();
+    if (!["queued", "paused"].includes(state)) {
       continue;
     }
-    request.state = "paused";
-    removeInstallFromQueue(gameId);
-    emitQueuedInstallProgress(gameId, request, { message: "Download pausado na fila." });
-    pausedQueued += 1;
+    applyInstallAutoRetryMetadataToQueuedRequest(request, {
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    });
+    if (state === "queued") {
+      request.state = "paused";
+      removeInstallFromQueue(gameId);
+      pausedQueued += 1;
+      emitQueuedInstallProgress(gameId, request, { message: "Download pausado na fila." });
+    } else {
+      emitQueuedInstallProgress(gameId, request, { message: "Download pausado." });
+    }
+    await patchActiveInstallSession(gameId, {
+      phase: "paused",
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    }).catch(() => {});
   }
 
   refreshQueuedInstallProgress();
@@ -11710,7 +13170,11 @@ async function resumeAllInstalls() {
   if (preferredControl && preferredControl.resume("Retomando download...")) {
     resumedActive += 1;
     resumedActiveGameId = lastPausedInstallGameId;
-    await updateActiveInstallSessionPhase(lastPausedInstallGameId, preferredControl.getActivePhase()).catch(() => {});
+    await patchActiveInstallSession(lastPausedInstallGameId, {
+      phase: preferredControl.getActivePhase(),
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    }).catch(() => {});
   } else {
     for (const [gameId, runControl] of installRunControlsByGameId.entries()) {
       if (!runControl.resume("Retomando download...")) {
@@ -11718,7 +13182,11 @@ async function resumeAllInstalls() {
       }
       resumedActive += 1;
       resumedActiveGameId = gameId;
-      await updateActiveInstallSessionPhase(gameId, runControl.getActivePhase()).catch(() => {});
+      await patchActiveInstallSession(gameId, {
+        phase: runControl.getActivePhase(),
+        autoRetryEnabled: false,
+        nextRetryAtMs: 0
+      }).catch(() => {});
       break;
     }
   }
@@ -11727,10 +13195,19 @@ async function resumeAllInstalls() {
     .filter((request) => request && request.state === "paused")
     .sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
   for (const request of queuedPausedRequests) {
+    applyInstallAutoRetryMetadataToQueuedRequest(request, {
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    });
     request.state = "queued";
     if (getInstallQueueIndex(request.gameId) < 0) {
       installQueue.push(request.gameId);
     }
+    await patchActiveInstallSession(request.gameId, {
+      phase: "queued",
+      autoRetryEnabled: false,
+      nextRetryAtMs: 0
+    }).catch(() => {});
     resumedQueued += 1;
   }
 
@@ -12914,6 +14391,9 @@ async function getGamesWithStatus(rawOptions = {}) {
   const gamesWithPlaytime = await applyPersistedPlaytimeToCatalogGames(resolvedGames, {
     refreshRemote: requestOptions.lightweight !== true
   });
+  if (requestOptions.includeRunningState) {
+    queueSocialRuntimeTransitionLaunchActivities(gamesWithPlaytime);
+  }
   return gamesWithPlaytime;
 }
 
@@ -13180,8 +14660,11 @@ async function playGame(gameId) {
 
   void publishSocialGameLaunchActivity({
     gameId: game.id,
-    gameName: game.name
-  }).catch(() => {});
+    gameName: game.name,
+    source: "play-button"
+  }).catch((error) => {
+    appendStartupLog(`[SOCIAL_QUEUE_ENQUEUE_ERROR] ${formatStartupErrorForLog(error)}`);
+  });
 
   return {
     ok: true
@@ -13204,6 +14687,10 @@ async function closeGame(gameId) {
       gameId: game.id,
       gameName: game.name
     });
+    clearQueuedSocialGameLaunchActivitiesForGame({
+      gameId: game.id,
+      gameName: game.name
+    });
     return {
       ok: true,
       alreadyStopped: false,
@@ -13223,6 +14710,10 @@ async function closeGame(gameId) {
   }
 
   clearSocialActivityEmitDebounceForGame({
+    gameId: game.id,
+    gameName: game.name
+  });
+  clearQueuedSocialGameLaunchActivitiesForGame({
     gameId: game.id,
     gameName: game.name
   });
@@ -13426,6 +14917,7 @@ if (!hasSingleInstanceLock) {
     appQuitRequested = true;
     clearStartupBootWatchdog();
     clearAutoUpdaterInterval();
+    clearInstallAutoRetryMonitorTimer();
     stopSocialActivityBackgroundMonitor();
     stopCatalogRealtimeMonitor();
     stopMaintenanceRealtimeMonitor();
@@ -13450,6 +14942,7 @@ if (!hasSingleInstanceLock) {
     flushCatalogSizeCacheSync();
     flushActiveInstallSessionsSync();
     flushPlaytimeStateSync();
+    flushSocialActivityPublishQueueSync();
     destroyUpdateSplashWindow();
     destroyTray();
     appendStartupLog("[APP] encerrando launcher.");
