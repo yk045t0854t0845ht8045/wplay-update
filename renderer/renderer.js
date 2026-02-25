@@ -113,6 +113,7 @@ const PROGRESS_RENDER_MIN_INTERVAL_MS = 120;
 const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 35 * 1000 : 15 * 1000;
 const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = LOW_SPEC_DEVICE ? 2 * 60 * 1000 : 75 * 1000;
 const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = LOW_SPEC_DEVICE ? 7 * 1000 : 3 * 1000;
+const AUTO_UPDATE_MANUAL_RETRY_DELAY_MS = LOW_SPEC_DEVICE ? 2000 : 1300;
 const CATALOG_CHANGED_REFRESH_DEBOUNCE_MS = LOW_SPEC_DEVICE ? 1500 : 800;
 const FRIEND_ACTIVITY_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 10 * 1000 : 6 * 1000;
 const FRIEND_ACTIVITY_CURSOR_BACKTRACK_MS = 18 * 1000;
@@ -1605,6 +1606,76 @@ function hasAutoUpdateApiSupport() {
   );
 }
 
+function waitUiMilliseconds(milliseconds) {
+  const safeDelay = Math.max(0, Number(milliseconds) || 0);
+  if (safeDelay <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, safeDelay);
+  });
+}
+
+function isAutoUpdateTransientUiErrorText(value) {
+  const lower = String(value || "").toLowerCase();
+  if (!lower) return false;
+  return (
+    lower.includes("[auto_update_temp]") ||
+    lower.includes("temporariamente") ||
+    lower.includes("rate limit") ||
+    lower.includes("timed out") ||
+    lower.includes("etimedout") ||
+    lower.includes("econnreset") ||
+    lower.includes("econnrefused") ||
+    lower.includes("enotfound") ||
+    lower.includes("network") ||
+    lower.includes("socket hang up") ||
+    lower.includes("err_http2_server_refused_stream") ||
+    lower.includes("server_refused_stream") ||
+    lower.includes("server refused stream") ||
+    lower.includes("err_empty_response") ||
+    lower.includes("net::err_empty_response") ||
+    lower.includes("empty response") ||
+    lower.includes("429") ||
+    lower.includes("503")
+  );
+}
+
+function normalizeAutoUpdateUiErrorMessage(value, fallbackMessage = "Falha ao verificar atualizacoes.") {
+  const raw = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!raw) {
+    return fallbackMessage;
+  }
+  if (isAutoUpdateTransientUiErrorText(raw)) {
+    return "Servico de update temporariamente indisponivel. Tente novamente em instantes.";
+  }
+  if (raw.length > 220) {
+    return `${raw.slice(0, 217)}...`;
+  }
+  return raw;
+}
+
+async function requestManualAutoUpdateCheckWithRetry(maxAttempts = 2) {
+  const attempts = Math.max(1, Number(maxAttempts) || 1);
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await window.launcherApi.autoUpdateCheck();
+    } catch (error) {
+      lastError = error;
+      const errorText = `${error?.message || ""} ${error?.code || ""}`.trim();
+      const shouldRetry = attempt < attempts && isAutoUpdateTransientUiErrorText(errorText);
+      if (!shouldRetry) {
+        throw error;
+      }
+      await waitUiMilliseconds(AUTO_UPDATE_MANUAL_RETRY_DELAY_MS);
+    }
+  }
+  throw lastError || new Error("Falha ao verificar atualizacoes.");
+}
+
 function scheduleAutoUpdateBackgroundCheckSoon(delayMs = AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS) {
   if (!hasAutoUpdateApiSupport()) {
     return;
@@ -1782,7 +1853,10 @@ function renderAutoUpdateButton() {
   } else if (autoUpdate.status === "disabled") {
     label = autoUpdate.error || autoUpdate.message || "Atualizador desativado ou nao configurado.";
   } else if (autoUpdate.status === "error") {
-    label = autoUpdate.error || autoUpdate.message || "Falha no atualizador. Tentando novamente em segundo plano.";
+    label = normalizeAutoUpdateUiErrorMessage(
+      autoUpdate.error || autoUpdate.message,
+      "Falha no atualizador. Tentando novamente em segundo plano."
+    );
   }
 
   topUpdateBtn.setAttribute("aria-label", label);
@@ -1837,8 +1911,10 @@ function applyAutoUpdatePayload(payload, fromEvent = false) {
   }
 
   if (fromEvent && previous.status !== "error" && next.status === "error") {
-    const errorText = next.error || next.message || "Falha ao verificar atualizacoes.";
-    notify("error", "Atualizacao", errorText);
+    const rawErrorText = next.error || next.message || "Falha ao verificar atualizacoes.";
+    const errorText = normalizeAutoUpdateUiErrorMessage(rawErrorText, "Falha ao verificar atualizacoes.");
+    const transientFailure = isAutoUpdateTransientUiErrorText(rawErrorText);
+    notify(transientFailure ? "info" : "error", "Atualizacao", errorText);
   }
 }
 
@@ -1944,7 +2020,7 @@ async function checkForAutoUpdateManually() {
   }
 
   try {
-    const payload = await window.launcherApi.autoUpdateCheck();
+    const payload = await requestManualAutoUpdateCheckWithRetry(2);
     applyAutoUpdatePayload(payload, false);
     const status = String(payload?.status || "").toLowerCase();
 
@@ -1972,10 +2048,16 @@ async function checkForAutoUpdateManually() {
     }
 
     if (status === "error") {
-      notify("error", "Atualizacao", payload?.error || payload?.message || "Falha ao verificar atualizacoes.");
+      const rawErrorText = payload?.error || payload?.message || "Falha ao verificar atualizacoes.";
+      const errorText = normalizeAutoUpdateUiErrorMessage(rawErrorText, "Falha ao verificar atualizacoes.");
+      const transientFailure = isAutoUpdateTransientUiErrorText(rawErrorText);
+      notify(transientFailure ? "info" : "error", "Atualizacao", errorText);
     }
   } catch (error) {
-    notify("error", "Atualizacao", error?.message || "Falha ao verificar atualizacoes.");
+    const rawErrorText = error?.message || error || "Falha ao verificar atualizacoes.";
+    const errorText = normalizeAutoUpdateUiErrorMessage(rawErrorText, "Falha ao verificar atualizacoes.");
+    const transientFailure = isAutoUpdateTransientUiErrorText(rawErrorText);
+    notify(transientFailure ? "info" : "error", "Atualizacao", errorText);
   }
 }
 
@@ -2001,11 +2083,17 @@ async function downloadAutoUpdateNow() {
     }
 
     if (status === "error") {
-      notify("error", "Atualizacao", payload?.error || payload?.message || "Falha ao baixar atualizacao.");
+      const rawErrorText = payload?.error || payload?.message || "Falha ao baixar atualizacao.";
+      const errorText = normalizeAutoUpdateUiErrorMessage(rawErrorText, "Falha ao baixar atualizacao.");
+      const transientFailure = isAutoUpdateTransientUiErrorText(rawErrorText);
+      notify(transientFailure ? "info" : "error", "Atualizacao", errorText);
       return;
     }
   } catch (error) {
-    notify("error", "Atualizacao", error?.message || "Falha ao baixar atualizacao.");
+    const rawErrorText = error?.message || error || "Falha ao baixar atualizacao.";
+    const errorText = normalizeAutoUpdateUiErrorMessage(rawErrorText, "Falha ao baixar atualizacao.");
+    const transientFailure = isAutoUpdateTransientUiErrorText(rawErrorText);
+    notify(transientFailure ? "info" : "error", "Atualizacao", errorText);
   }
 }
 

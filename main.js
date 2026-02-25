@@ -122,6 +122,7 @@ const ARCHIVE_TOOL_TIMEOUT_MS = 25 * 60 * 1000;
 const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 60 * 1000;
 const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 2 * 60 * 1000;
 const AUTO_UPDATE_CHECK_COOLDOWN_MS = 45 * 1000;
+const AUTO_UPDATE_MANUAL_TRANSIENT_RETRY_DELAY_MS = 1400;
 const AUTO_UPDATE_TARGET_RELEASE_CACHE_TTL_MS = 2 * 60 * 1000;
 const AUTO_UPDATE_RELEASE_SCAN_LIMIT = 25;
 const AUTO_UPDATE_PRELAUNCH_CHECK_TIMEOUT_MS = 15 * 1000;
@@ -4453,6 +4454,30 @@ function isAutoUpdateHttp2RefusedStreamError(error) {
   );
 }
 
+function isAutoUpdateEmptyResponseText(value) {
+  const lower = String(value || "").toLowerCase();
+  if (!lower) {
+    return false;
+  }
+  return (
+    lower.includes("err_empty_response") ||
+    lower.includes("net::err_empty_response") ||
+    lower.includes("empty response")
+  );
+}
+
+function isAutoUpdateEmptyResponseError(error) {
+  if (!error) {
+    return false;
+  }
+  if (typeof error === "string") {
+    return isAutoUpdateEmptyResponseText(error);
+  }
+  return isAutoUpdateEmptyResponseText(
+    `${error.code || ""} ${error.name || ""} ${error.message || ""} ${error.stack || ""}`
+  );
+}
+
 function formatAutoUpdateError(error) {
   const raw = String(error?.message || error || "").replace(/\s+/g, " ").trim();
   if (!raw) {
@@ -4487,6 +4512,10 @@ function formatAutoUpdateError(error) {
     return "[AUTO_UPDATE_TEMP] Conexao HTTP/2 recusada pelo servidor de update. O launcher vai tentar novamente automaticamente.";
   }
 
+  if (isAutoUpdateEmptyResponseError(error) || isAutoUpdateEmptyResponseText(lower)) {
+    return "[AUTO_UPDATE_TEMP] Servidor de update sem resposta no momento. O launcher vai tentar novamente automaticamente.";
+  }
+
   if (raw.length > 260) {
     return `${raw.slice(0, 257)}...`;
   }
@@ -4516,6 +4545,9 @@ function isAutoUpdateTransientError(errorMessage) {
     value.includes("err_http2_server_refused_stream") ||
     value.includes("server_refused_stream") ||
     value.includes("server refused stream") ||
+    value.includes("err_empty_response") ||
+    value.includes("net::err_empty_response") ||
+    value.includes("empty response") ||
     value.includes("429") ||
     value.includes("503")
   );
@@ -5124,6 +5156,25 @@ function setupAutoUpdater() {
   }
 }
 
+async function runAutoUpdaterCheckWithTransientRetry(origin = "manual") {
+  const normalizedOrigin = String(origin || "").trim().toLowerCase() || "manual";
+  try {
+    return await autoUpdater.checkForUpdates();
+  } catch (error) {
+    const formattedError = formatAutoUpdateError(error);
+    const shouldRetryOnce = normalizedOrigin === "manual" && isAutoUpdateTransientError(formattedError);
+    if (!shouldRetryOnce) {
+      throw error;
+    }
+
+    appendStartupLog(
+      `[AUTO_UPDATE] falha transiente no check manual: ${formattedError}. retry em ${AUTO_UPDATE_MANUAL_TRANSIENT_RETRY_DELAY_MS}ms.`
+    );
+    await waitForMilliseconds(AUTO_UPDATE_MANUAL_TRANSIENT_RETRY_DELAY_MS);
+    return autoUpdater.checkForUpdates();
+  }
+}
+
 async function checkForLauncherUpdate(origin = "manual") {
   const runtimeInfo = resolveAutoUpdateRuntimeInfo();
   if (!autoUpdater || !autoUpdateConfigSnapshot?.enabled || !autoUpdateConfigSnapshot?.configured || !runtimeInfo.packaged) {
@@ -5173,8 +5224,7 @@ async function checkForLauncherUpdate(origin = "manual") {
 
   autoUpdateLastCheckOrigin = normalizedOrigin;
   autoUpdateLastRequestedAt = nowMs;
-  autoUpdateCheckInFlight = autoUpdater
-    .checkForUpdates()
+  autoUpdateCheckInFlight = runAutoUpdaterCheckWithTransientRetry(normalizedOrigin)
     .then((result) => {
       const candidateVersion = String(result?.updateInfo?.version || "").trim();
       const currentVersion = String(app.getVersion() || "").trim();
