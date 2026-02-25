@@ -116,6 +116,7 @@ const DOWNLOAD_STREAM_TIMEOUT_MS = Math.max(
   2 * 60 * 1000,
   Number(process.env.WPLAY_DOWNLOAD_TIMEOUT_MS) || 45 * 60 * 1000
 );
+const DOWNLOAD_SOURCE_SELECTION_SEED = crypto.randomBytes(8).toString("hex");
 const GOOGLE_DRIVE_MAX_CONFIRM_HOPS = 6;
 const DEFENDER_SCAN_TIMEOUT_MS = 20 * 60 * 1000;
 const ARCHIVE_TOOL_TIMEOUT_MS = 25 * 60 * 1000;
@@ -9336,6 +9337,8 @@ function detectDownloadKindFromUrl(urlValue) {
 
   if (
     url.includes("drive.google.com") ||
+    url.includes("docs.google.com/uc") ||
+    url.includes("drive.googleusercontent.com") ||
     url.includes("drive.usercontent.google.com") ||
     url.includes("www.googleapis.com/drive/v3/files")
   ) {
@@ -9365,12 +9368,66 @@ function getDefaultCandidatePriority(kind, urlValue) {
   if (normalizedKind === "dropbox") return 34;
   if (normalizedKind === "google-drive") {
     const value = String(urlValue || "").toLowerCase();
+    if (value.includes("www.googleapis.com/drive/v3/files")) return 86;
+    if (value.includes("drive.googleusercontent.com")) return 87;
+    if (value.includes("docs.google.com/uc")) return 88;
     if (value.includes("drive.usercontent.google.com")) return 90;
     if (value.includes("/uc?export=download")) return 92;
-    if (value.includes("www.googleapis.com/drive/v3/files")) return 94;
     return 96;
   }
   return 50;
+}
+
+function hashTextToUnsignedInt(value) {
+  const source = String(value || "");
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function getDownloadCandidateAffinityScore(gameId, candidateUrl) {
+  const safeGameId = String(gameId || "").trim().toLowerCase() || "global";
+  const safeUrl = String(candidateUrl || "").trim().toLowerCase();
+  return hashTextToUnsignedInt(`${DOWNLOAD_SOURCE_SELECTION_SEED}|${safeGameId}|${safeUrl}`);
+}
+
+function sortCandidatesForDistributedDownloads(candidates = [], game = {}) {
+  const safeGameId = String(game?.id || game?.name || "").trim();
+  return [...candidates].sort((left, right) => {
+    const leftPriority = Number(left?.priority);
+    const rightPriority = Number(right?.priority);
+    const safeLeftPriority = Number.isFinite(leftPriority) ? leftPriority : 9999;
+    const safeRightPriority = Number.isFinite(rightPriority) ? rightPriority : 9999;
+    const leftIsDrive = isGoogleDriveCandidate(left);
+    const rightIsDrive = isGoogleDriveCandidate(right);
+
+    if (leftIsDrive && rightIsDrive) {
+      // Distribute load among Google Drive variants so users don't hit only one endpoint.
+      if (Math.abs(safeLeftPriority - safeRightPriority) <= 8) {
+        const affinityDiff =
+          getDownloadCandidateAffinityScore(safeGameId, left?.url) -
+          getDownloadCandidateAffinityScore(safeGameId, right?.url);
+        if (affinityDiff !== 0) {
+          return affinityDiff;
+        }
+      }
+    }
+
+    if (safeLeftPriority !== safeRightPriority) {
+      return safeLeftPriority - safeRightPriority;
+    }
+
+    const leftLabel = getDownloadCandidateLabel(left);
+    const rightLabel = getDownloadCandidateLabel(right);
+    if (leftLabel !== rightLabel) {
+      return leftLabel.localeCompare(rightLabel, "pt-BR");
+    }
+
+    return String(left?.url || "").localeCompare(String(right?.url || ""), "pt-BR");
+  });
 }
 
 function normalizeDownloadCandidates(game) {
@@ -9438,9 +9495,27 @@ function normalizeDownloadCandidates(game) {
       addCandidate(apiUrl, {
         label: "google-drive-api",
         kind: "google-drive",
-        priority: 86
+        priority: 85.5
       });
     }
+
+    addCandidate(`https://drive.googleusercontent.com/uc?id=${driveId}&export=download`, {
+      label: "google-drive-googleusercontent",
+      kind: "google-drive",
+      priority: 87
+    });
+
+    addCandidate(`https://docs.google.com/uc?export=download&id=${driveId}`, {
+      label: "google-drive-docs-uc",
+      kind: "google-drive",
+      priority: 87.5
+    });
+
+    addCandidate(`https://docs.google.com/uc?export=download&id=${driveId}&confirm=t`, {
+      label: "google-drive-docs-uc-confirm",
+      kind: "google-drive",
+      priority: 87.7
+    });
 
     // Mantem compatibilidade com o formato legado que funcionava melhor:
     // driveusercontent + authuser=0 (com e sem confirm), antes do link uc padrao.
@@ -9472,6 +9547,12 @@ function normalizeDownloadCandidates(game) {
       label: "google-drive-uc",
       kind: "google-drive",
       priority: 92
+    });
+
+    addCandidate(`https://drive.google.com/uc?export=download&id=${driveId}&confirm=t`, {
+      label: "google-drive-uc-confirm",
+      kind: "google-drive",
+      priority: 92.2
     });
   }
 
@@ -9735,6 +9816,8 @@ function buildDriveConfirmUrl(html, sourceUrl) {
   const rawHtml = String(html || "");
   const hrefPatterns = [
     /href=['"](\/uc\?export=download[^'"]+)['"]/i,
+    /href=['"](https:\/\/docs\.google\.com\/uc\?export=download[^'"]+)['"]/i,
+    /href=['"](https:\/\/drive\.googleusercontent\.com\/uc[^'"]+)['"]/i,
     /href=['"](https:\/\/drive\.usercontent\.google\.com\/download[^'"]+)['"]/i,
     /href=['"](https:\/\/drive\.google\.com\/uc\?export=download[^'"]+)['"]/i
   ];
@@ -9757,7 +9840,7 @@ function buildDriveConfirmUrl(html, sourceUrl) {
 
   const downloadFormBlock =
     rawHtml.match(/<form[^>]*id=['"]download-form['"][^>]*>[\s\S]*?<\/form>/i)?.[0] ||
-    rawHtml.match(/<form[^>]*action=['"][^'"]*(?:drive\.usercontent\.google\.com\/download|drive\.google\.com\/uc)[^'"]*['"][^>]*>[\s\S]*?<\/form>/i)?.[0] ||
+    rawHtml.match(/<form[^>]*action=['"][^'"]*(?:drive\.usercontent\.google\.com\/download|drive\.google\.com\/uc|docs\.google\.com\/uc|drive\.googleusercontent\.com\/uc)[^'"]*['"][^>]*>[\s\S]*?<\/form>/i)?.[0] ||
     rawHtml.match(/<form[^>]*>[\s\S]*?(?:id=['"]uc-download-link['"]|fazer o download mesmo assim|download anyway)[\s\S]*?<\/form>/i)?.[0] ||
     "";
 
@@ -9842,6 +9925,8 @@ function getDownloadCandidateLabel(candidate) {
 
   const value = String(candidate?.url || candidate || "").toLowerCase();
   if (value.includes("objects.githubusercontent.com") || value.includes("github.com/")) return "github-release";
+  if (value.includes("drive.googleusercontent.com")) return "drive-googleusercontent";
+  if (value.includes("docs.google.com/uc")) return "docs-uc";
   if (value.includes("drive.usercontent.google.com")) return "driveusercontent";
   if (value.includes("drive.google.com/uc")) return "drive-uc";
   if (value.includes("www.googleapis.com/drive/v3/files")) return "drive-api";
@@ -9853,6 +9938,8 @@ function isGoogleDriveCandidate(candidate) {
   const value = String(candidate?.url || candidate || "").toLowerCase();
   return (
     value.includes("drive.google.com") ||
+    value.includes("docs.google.com/uc") ||
+    value.includes("drive.googleusercontent.com") ||
     value.includes("drive.usercontent.google.com") ||
     value.includes("www.googleapis.com/drive/v3/files")
   );
@@ -9863,7 +9950,8 @@ async function createDownloadStream(game, options = {}) {
   const skipped = new Set(skipSourceUrls.map((entry) => String(entry || "").trim().toLowerCase()).filter(Boolean));
   const metadataProbe = options.probeMetadata === true;
   const requestTimeoutMs = Math.max(3_000, Number(options.timeoutMs) || DOWNLOAD_STREAM_TIMEOUT_MS);
-  const candidates = normalizeDownloadCandidates(game).filter((candidate) => !skipped.has(String(candidate.url).toLowerCase()));
+  const orderedCandidates = sortCandidatesForDistributedDownloads(normalizeDownloadCandidates(game), game);
+  const candidates = orderedCandidates.filter((candidate) => !skipped.has(String(candidate.url).toLowerCase()));
   if (!candidates.length) {
     throw new Error("Nenhuma fonte de download disponivel para tentativa.");
   }

@@ -1,6 +1,7 @@
 {
   "supabaseUrl": "https://SEU-PROJETO.supabase.co",
   "supabaseAnonKey": "SUA_SUPABASE_ANON_KEY",
+  "googleApiKey": "SUA_GOOGLE_API_KEY",
   "redirectUrl": "origin://auth/callback",
   "steamWebApiKey": "SUA_STEAM_WEB_API_KEY"
 }
