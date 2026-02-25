@@ -11,11 +11,15 @@ Preencha `config/updater.json`:
   "enabled": true,
   "owner": "yk045t0854t0845ht8045",
   "repo": "wplay-update",
-  "provider": "auto",
+  "provider": "github",
   "channel": "latest",
   "updateOnLaunch": true,
   "autoRestartOnStartup": true,
+  "autoInstallSilent": true,
+  "autoRunAfterInstall": true,
   "autoDownload": true,
+  "preferLatestFullInstaller": true,
+  "disableHttp2": true,
   "checkIntervalMinutes": 1,
   "allowPrerelease": false,
   "allowDowngrade": false
@@ -24,7 +28,7 @@ Preencha `config/updater.json`:
 
 Com `checkIntervalMinutes: 1`, launcher aberto detecta update em ate ~1 minuto.
 Com `autoRestartOnStartup: true`, se abrir o launcher e existir update, ele baixa e reinicia sozinho para aplicar (sem pedir novo download manual).
-Com `provider: "auto"`, o launcher prefere feed direto (`releases/latest/download`) para evitar erro 403 de rate limit da API do GitHub.
+Com `disableHttp2: true`, o launcher aplica `--disable-http2` para evitar `net::ERR_HTTP2_SERVER_REFUSED_STREAM` no updater.
 O update do launcher agora e aplicado em modo silencioso (sem assistente de desinstalar/instalar na tela).
 
 ## 2) Comando unico (recomendado)

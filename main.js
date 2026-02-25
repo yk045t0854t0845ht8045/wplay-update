@@ -239,6 +239,7 @@ let autoUpdateFeedValidationCompleted = false;
 let autoUpdateFeedValidationInFlight = null;
 let autoUpdateLastCheckOrigin = "";
 let autoUpdateLastRequestedAt = 0;
+let autoUpdateDisableHttp2SwitchApplied = false;
 let startupAutoUpdateFlowActive = false;
 let startupIpcHandlersRegistered = false;
 let autoUpdateInstallInFlight = false;
@@ -1572,8 +1573,44 @@ function applyStartupSafeModeIfRequired() {
   );
 }
 
+function resolveUpdaterDisableHttp2Preference(configLike = null) {
+  const configValue =
+    configLike && typeof configLike === "object"
+      ? configLike.disableHttp2
+      : undefined;
+  return parseBoolean(process.env.WPLAY_UPDATER_DISABLE_HTTP2 ?? configValue, true);
+}
+
+function applyUpdaterHttp2SwitchIfEnabled(configLike = null, reason = "startup") {
+  if (autoUpdateDisableHttp2SwitchApplied) {
+    return true;
+  }
+
+  if (!resolveUpdaterDisableHttp2Preference(configLike)) {
+    return false;
+  }
+
+  try {
+    if (typeof app.commandLine?.hasSwitch === "function" && app.commandLine.hasSwitch("disable-http2")) {
+      autoUpdateDisableHttp2SwitchApplied = true;
+      return true;
+    }
+    app.commandLine.appendSwitch("disable-http2");
+    autoUpdateDisableHttp2SwitchApplied = true;
+    appendEarlyStartupLog(`[AUTO_UPDATE] workaround HTTP/2 ativado (--disable-http2) [${reason}]`);
+    return true;
+  } catch (error) {
+    appendEarlyStartupLog(
+      `[AUTO_UPDATE] falha ao aplicar workaround HTTP/2 [${reason}]: ${formatStartupErrorForLog(error)}`
+    );
+    return false;
+  }
+}
+
 prepareStartupHealthForLaunch();
 applyStartupSafeModeIfRequired();
+const startupAutoUpdaterConfigSnapshot = resolveAutoUpdaterConfig();
+applyUpdaterHttp2SwitchIfEnabled(startupAutoUpdaterConfigSnapshot, "startup");
 
 function resolveAutoUpdateRuntimeInfo() {
   const execPathValue = String(process.execPath || "").trim();
@@ -4315,6 +4352,10 @@ function resolveAutoUpdaterConfig() {
     process.env.WPLAY_UPDATER_AUTO_RUN_AFTER_INSTALL ?? fileConfig.autoRunAfterInstall,
     true
   );
+  const disableHttp2 = parseBoolean(
+    process.env.WPLAY_UPDATER_DISABLE_HTTP2 ?? fileConfig.disableHttp2,
+    true
+  );
   const intervalSeconds = parsePositiveInteger(
     process.env.WPLAY_UPDATER_CHECK_INTERVAL_SECONDS ?? fileConfig.checkIntervalSeconds
   );
@@ -4350,6 +4391,7 @@ function resolveAutoUpdaterConfig() {
     autoRestartOnStartup,
     autoInstallSilent,
     autoRunAfterInstall,
+    disableHttp2,
     checkIntervalMs
   };
 }
@@ -4387,6 +4429,30 @@ function setAutoUpdateState(nextPatch, shouldBroadcast = true) {
   }
 }
 
+function isHttp2RefusedStreamText(value) {
+  const lower = String(value || "").toLowerCase();
+  if (!lower) {
+    return false;
+  }
+  return (
+    lower.includes("err_http2_server_refused_stream") ||
+    lower.includes("server_refused_stream") ||
+    lower.includes("server refused stream")
+  );
+}
+
+function isAutoUpdateHttp2RefusedStreamError(error) {
+  if (!error) {
+    return false;
+  }
+  if (typeof error === "string") {
+    return isHttp2RefusedStreamText(error);
+  }
+  return isHttp2RefusedStreamText(
+    `${error.code || ""} ${error.name || ""} ${error.message || ""} ${error.stack || ""}`
+  );
+}
+
 function formatAutoUpdateError(error) {
   const raw = String(error?.message || error || "").replace(/\s+/g, " ").trim();
   if (!raw) {
@@ -4417,6 +4483,10 @@ function formatAutoUpdateError(error) {
     return "[AUTO_UPDATE_TEMP] GitHub limitou temporariamente as consultas de update. O launcher tentara novamente automaticamente.";
   }
 
+  if (isAutoUpdateHttp2RefusedStreamError(error) || isHttp2RefusedStreamText(lower)) {
+    return "[AUTO_UPDATE_TEMP] Conexao HTTP/2 recusada pelo servidor de update. O launcher vai tentar novamente automaticamente.";
+  }
+
   if (raw.length > 260) {
     return `${raw.slice(0, 257)}...`;
   }
@@ -4443,6 +4513,9 @@ function isAutoUpdateTransientError(errorMessage) {
     value.includes("enotfound") ||
     value.includes("network") ||
     value.includes("socket hang up") ||
+    value.includes("err_http2_server_refused_stream") ||
+    value.includes("server_refused_stream") ||
+    value.includes("server refused stream") ||
     value.includes("429") ||
     value.includes("503")
   );
@@ -4591,7 +4664,11 @@ async function probeGenericManifestAvailability(config, expectedManifests) {
     } catch (error) {
       const status = Number(error?.response?.status) || 0;
       lastStatus = status;
-      if (isRetryableAutoUpdateStatus(status)) {
+      const transientNetworkFailure =
+        isRetryableAutoUpdateStatus(status) ||
+        isAutoUpdateHttp2RefusedStreamError(error) ||
+        isAutoUpdateTransientError(error?.message || error?.code || "");
+      if (transientNetworkFailure) {
         sawRetryable = true;
       } else {
         sawNon404Error = true;
@@ -4957,7 +5034,7 @@ function setupAutoUpdater() {
   autoUpdateLastRequestedAt = 0;
   appendStartupLog(
     `[AUTO_UPDATE] setup enabled=${config.enabled} configured=${config.configured} owner=${config.owner || "n/a"} ` +
-      `repo=${config.repo || "n/a"} provider=${resolveAutoUpdaterProvider(config)} intervalMs=${config.checkIntervalMs}`
+      `repo=${config.repo || "n/a"} provider=${resolveAutoUpdaterProvider(config)} disableHttp2=${config.disableHttp2} intervalMs=${config.checkIntervalMs}`
   );
 
   if (!config.enabled) {
@@ -4985,6 +5062,7 @@ function setupAutoUpdater() {
   }
 
   try {
+    applyUpdaterHttp2SwitchIfEnabled(config, "setup");
     wireAutoUpdaterEventsOnce();
     autoUpdater.autoDownload = config.autoDownload;
     autoUpdater.autoInstallOnAppQuit = true;
@@ -5023,6 +5101,7 @@ function setupAutoUpdater() {
       latestVersion: "",
       updateDownloaded: false,
       hasUpdateCandidate: false,
+      disableHttp2: config.disableHttp2,
       preferLatestFullInstaller: config.preferLatestFullInstaller,
       progressPercent: 0,
       bytesPerSecond: 0,

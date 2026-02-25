@@ -425,6 +425,7 @@ function Sync-UserUpdaterConfigProfile {
   Set-Or-AddObjectProperty -Target $existingConfig -Name "autoRunAfterInstall" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.autoRunAfterInstall -Fallback $true)
   Set-Or-AddObjectProperty -Target $existingConfig -Name "autoDownload" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.autoDownload -Fallback $true)
   Set-Or-AddObjectProperty -Target $existingConfig -Name "preferLatestFullInstaller" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.preferLatestFullInstaller -Fallback $true)
+  Set-Or-AddObjectProperty -Target $existingConfig -Name "disableHttp2" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.disableHttp2 -Fallback $true)
   Set-Or-AddObjectProperty -Target $existingConfig -Name "allowPrerelease" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.allowPrerelease -Fallback $false)
   Set-Or-AddObjectProperty -Target $existingConfig -Name "allowDowngrade" -Value (Get-UpdaterBooleanValue -Value $BundledConfig.allowDowngrade -Fallback $false)
 

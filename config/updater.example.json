@@ -10,6 +10,7 @@
   "autoRunAfterInstall": true,
   "autoDownload": true,
   "preferLatestFullInstaller": true,
+  "disableHttp2": true,
   "checkIntervalMinutes": 1,
   "allowPrerelease": false,
   "allowDowngrade": false
