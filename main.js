@@ -238,6 +238,8 @@ const INSTALL_AUTO_RETRY_GENERIC_BASE_DELAY_MS = 45 * 1000;
 const INSTALL_AUTO_RETRY_DOWNLOAD_BASE_DELAY_MS = 65 * 1000;
 const INSTALL_AUTO_RETRY_DRIVE_QUOTA_BASE_DELAY_MS = 20 * 60 * 1000;
 const INSTALL_AUTO_RETRY_JITTER_MAX_MS = 12 * 1000;
+const INSTALL_SOURCE_COOLDOWN_MAX_ENTRIES = 320;
+const INSTALL_SOURCE_COOLDOWN_QUOTA_JITTER_MAX_MS = 90 * 1000;
 const INSTALL_AUTO_RETRY_DISABLED_CODES = new Set([
   "GAME_UNAVAILABLE",
   "SOURCE_NOT_CONFIGURED",
@@ -1367,6 +1369,294 @@ function isManagedInstallRootPath(installRoot) {
   return path.basename(normalized).toLowerCase() === INSTALL_ROOT_NAME.toLowerCase();
 }
 
+function normalizeInstallSourceCooldownKey(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "");
+  if (!key) {
+    return "";
+  }
+  if (key.startsWith("url:") || key.startsWith("drive-file:")) {
+    return key.slice(0, 640);
+  }
+  return "";
+}
+
+function normalizeDriveFileIdForCooldown(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "")
+    .slice(0, 140);
+}
+
+function buildDownloadSourceUrlCooldownKey(urlValue) {
+  const normalizedUrl = String(urlValue || "").trim().toLowerCase();
+  if (!normalizedUrl) {
+    return "";
+  }
+  return `url:${normalizedUrl.slice(0, 560)}`;
+}
+
+function buildDownloadSourceDriveCooldownKey(fileId) {
+  const normalizedId = normalizeDriveFileIdForCooldown(fileId);
+  if (!normalizedId) {
+    return "";
+  }
+  return `drive-file:${normalizedId}`;
+}
+
+function getDownloadSourceCooldownKeysForCandidate(game, candidate) {
+  const keys = [];
+  const urlKey = buildDownloadSourceUrlCooldownKey(candidate?.url || candidate);
+  if (urlKey) {
+    keys.push(urlKey);
+  }
+
+  if (isGoogleDriveCandidate(candidate)) {
+    const driveId = buildDownloadSourceDriveCooldownKey(game?.googleDriveFileId || extractDriveId(candidate?.url || ""));
+    if (driveId) {
+      keys.push(driveId);
+    }
+  }
+
+  return [...new Set(keys)];
+}
+
+function normalizeInstallSourceCooldownEntries(value) {
+  const rawEntries = Array.isArray(value) ? value : value && typeof value === "object" ? Object.values(value) : [];
+  if (!Array.isArray(rawEntries) || rawEntries.length === 0) {
+    return [];
+  }
+
+  const byKey = new Map();
+  const staleCutoffMs = Date.now() - INSTALL_RECOVERY_MAX_PAUSED_AGE_MS;
+  for (const rawEntry of rawEntries) {
+    if (!rawEntry || typeof rawEntry !== "object") {
+      continue;
+    }
+
+    const key = normalizeInstallSourceCooldownKey(rawEntry.key || rawEntry.sourceKey);
+    if (!key) {
+      continue;
+    }
+
+    const blockedUntilMs = toValidTimestampMs(
+      rawEntry.blockedUntilMs ||
+        rawEntry.blocked_until_ms ||
+        rawEntry.blockedUntil ||
+        rawEntry.nextRetryAtMs ||
+        rawEntry.next_retry_at_ms
+    );
+    const failureCode = String(rawEntry.failureCode || rawEntry.failure_code || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9_]/g, "")
+      .slice(0, 64);
+    const failureCount = Math.max(
+      0,
+      Math.min(24, parsePositiveInteger(rawEntry.failureCount || rawEntry.failure_count || rawEntry.attempts))
+    );
+    if (blockedUntilMs <= 0 && failureCount <= 0) {
+      continue;
+    }
+    if (blockedUntilMs > 0 && blockedUntilMs < staleCutoffMs) {
+      continue;
+    }
+
+    const normalizedEntry = {
+      key,
+      blockedUntilMs,
+      failureCode,
+      failureCount
+    };
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, normalizedEntry);
+      continue;
+    }
+
+    if (blockedUntilMs > Number(existing.blockedUntilMs || 0)) {
+      byKey.set(key, normalizedEntry);
+      continue;
+    }
+    if (failureCount > Number(existing.failureCount || 0)) {
+      byKey.set(key, normalizedEntry);
+    }
+  }
+
+  return [...byKey.values()]
+    .sort((left, right) => {
+      const leftUntil = Number(left?.blockedUntilMs || 0);
+      const rightUntil = Number(right?.blockedUntilMs || 0);
+      if (rightUntil !== leftUntil) {
+        return rightUntil - leftUntil;
+      }
+      return Number(right?.failureCount || 0) - Number(left?.failureCount || 0);
+    })
+    .slice(0, INSTALL_SOURCE_COOLDOWN_MAX_ENTRIES);
+}
+
+function createInstallSourceCooldownMap(entries = []) {
+  const map = new Map();
+  for (const entry of normalizeInstallSourceCooldownEntries(entries)) {
+    if (!entry?.key) {
+      continue;
+    }
+    map.set(entry.key, entry);
+  }
+  return map;
+}
+
+function exportInstallSourceCooldownEntries(sourceCooldownMap) {
+  if (!(sourceCooldownMap instanceof Map) || sourceCooldownMap.size <= 0) {
+    return [];
+  }
+  return normalizeInstallSourceCooldownEntries([...sourceCooldownMap.values()]);
+}
+
+function parseRetryAfterHeaderMs(value) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const text = String(raw || "").trim();
+  if (!text) {
+    return 0;
+  }
+
+  if (/^\d+$/.test(text)) {
+    const seconds = Math.max(0, Math.min(24 * 60 * 60, Number(text)));
+    return Math.min(INSTALL_AUTO_RETRY_MAX_DELAY_MS, seconds * 1000);
+  }
+
+  const retryAtMs = Date.parse(text);
+  if (!Number.isFinite(retryAtMs) || retryAtMs <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.min(INSTALL_AUTO_RETRY_MAX_DELAY_MS, retryAtMs - Date.now()));
+}
+
+function getInstallSourceCooldownBlockInfo(sourceCooldownMap, game, candidate) {
+  if (!(sourceCooldownMap instanceof Map) || sourceCooldownMap.size <= 0) {
+    return {
+      blocked: false,
+      blockedUntilMs: 0,
+      remainingMs: 0,
+      failureCode: "",
+      key: ""
+    };
+  }
+
+  const nowMs = Date.now();
+  let matchedKey = "";
+  let blockedUntilMs = 0;
+  let failureCode = "";
+  for (const key of getDownloadSourceCooldownKeysForCandidate(game, candidate)) {
+    const entry = sourceCooldownMap.get(key);
+    if (!entry) {
+      continue;
+    }
+    const untilMs = toValidTimestampMs(entry.blockedUntilMs);
+    if (untilMs <= blockedUntilMs) {
+      continue;
+    }
+    matchedKey = key;
+    blockedUntilMs = untilMs;
+    failureCode = String(entry.failureCode || "").trim().toUpperCase();
+  }
+
+  const remainingMs = blockedUntilMs > nowMs ? blockedUntilMs - nowMs : 0;
+  return {
+    blocked: remainingMs > 0,
+    blockedUntilMs,
+    remainingMs,
+    failureCode,
+    key: matchedKey
+  };
+}
+
+function clearInstallSourceCooldownForCandidate(sourceCooldownMap, game, candidate) {
+  if (!(sourceCooldownMap instanceof Map) || sourceCooldownMap.size <= 0) {
+    return false;
+  }
+
+  let changed = false;
+  for (const key of getDownloadSourceCooldownKeysForCandidate(game, candidate)) {
+    if (!key) {
+      continue;
+    }
+    if (sourceCooldownMap.delete(key)) {
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function computeDriveQuotaSourceCooldownMs(failureCount = 1, retryAfterMs = 0) {
+  const safeFailureCount = Math.max(1, Math.min(24, parsePositiveInteger(failureCount) || 1));
+  const exponentialDelayMs = Math.min(
+    INSTALL_AUTO_RETRY_MAX_DELAY_MS,
+    INSTALL_AUTO_RETRY_DRIVE_QUOTA_BASE_DELAY_MS * 2 ** (safeFailureCount - 1)
+  );
+  const jitterCap = Math.max(
+    0,
+    Math.min(INSTALL_SOURCE_COOLDOWN_QUOTA_JITTER_MAX_MS, Math.floor(exponentialDelayMs * 0.18))
+  );
+  const jitterMs = jitterCap > 0 ? Math.floor(Math.random() * jitterCap) : 0;
+  const retryAfterHintMs = Math.max(0, parsePositiveInteger(retryAfterMs));
+  return Math.min(INSTALL_AUTO_RETRY_MAX_DELAY_MS, Math.max(exponentialDelayMs + jitterMs, retryAfterHintMs));
+}
+
+function applyDriveQuotaCooldownForCandidate(sourceCooldownMap, game, candidate, options = {}) {
+  if (!(sourceCooldownMap instanceof Map)) {
+    return {
+      blockedUntilMs: 0,
+      retryAfterMs: 0,
+      keys: []
+    };
+  }
+
+  const retryAfterMs = Math.max(
+    0,
+    parseRetryAfterHeaderMs(options.retryAfterHeader) || parsePositiveInteger(options.retryAfterMs)
+  );
+  const keys = getDownloadSourceCooldownKeysForCandidate(game, candidate);
+  if (keys.length === 0) {
+    return {
+      blockedUntilMs: 0,
+      retryAfterMs: 0,
+      keys: []
+    };
+  }
+
+  const nowMs = Date.now();
+  let blockedUntilMs = 0;
+  let maxDelayMs = 0;
+  for (const key of keys) {
+    const current = sourceCooldownMap.get(key);
+    const nextFailureCount = Math.min(24, Math.max(0, parsePositiveInteger(current?.failureCount)) + 1);
+    const delayMs = computeDriveQuotaSourceCooldownMs(nextFailureCount, retryAfterMs);
+    const nextBlockedUntilMs = nowMs + delayMs;
+    sourceCooldownMap.set(key, {
+      key,
+      blockedUntilMs: nextBlockedUntilMs,
+      failureCode: "DRIVE_QUOTA",
+      failureCount: nextFailureCount
+    });
+    if (nextBlockedUntilMs > blockedUntilMs) {
+      blockedUntilMs = nextBlockedUntilMs;
+    }
+    if (delayMs > maxDelayMs) {
+      maxDelayMs = delayMs;
+    }
+  }
+
+  return {
+    blockedUntilMs,
+    retryAfterMs: maxDelayMs,
+    keys
+  };
+}
+
 function normalizeActiveInstallSessionRecord(rawRecord) {
   if (!rawRecord || typeof rawRecord !== "object") {
     return null;
@@ -1395,6 +1685,9 @@ function normalizeActiveInstallSessionRecord(rawRecord) {
     .replace(/[^A-Z0-9_]/g, "")
     .slice(0, 64);
   const lastFailureMessage = trimProcessOutput(rawRecord.lastFailureMessage || rawRecord.last_failure_message || "", 560);
+  const sourceCooldowns = normalizeInstallSourceCooldownEntries(
+    rawRecord.sourceCooldowns || rawRecord.source_cooldowns || rawRecord.downloadSourceCooldowns
+  );
   const nowIso = new Date().toISOString();
 
   return {
@@ -1411,7 +1704,8 @@ function normalizeActiveInstallSessionRecord(rawRecord) {
     retryCount,
     nextRetryAtMs: autoRetryEnabled ? nextRetryAtMs : 0,
     lastFailureCode,
-    lastFailureMessage
+    lastFailureMessage,
+    sourceCooldowns
   };
 }
 
@@ -10773,6 +11067,7 @@ async function createDownloadStream(game, options = {}) {
   const resumeFromBytes = Math.max(0, parsePositiveInteger(options.resumeFromBytes) || 0);
   const requestedRangeHeader = buildDownloadRangeHeader(resumeFromBytes, metadataProbe);
   const requestTimeoutMs = Math.max(3_000, Number(options.timeoutMs) || DOWNLOAD_STREAM_TIMEOUT_MS);
+  const sourceCooldownMap = options?.sourceCooldownMap instanceof Map ? options.sourceCooldownMap : new Map();
   const orderedCandidates = sortCandidatesForDistributedDownloads(normalizeDownloadCandidates(game), game);
   const candidates = orderedCandidates.filter((candidate) => !skipped.has(String(candidate.url).toLowerCase()));
   if (!candidates.length) {
@@ -10783,6 +11078,7 @@ async function createDownloadStream(game, options = {}) {
   const precheckFailures = [];
   const precheckFailedUrls = [];
   let driveQuotaDetected = false;
+  let nextRetryAtMs = 0;
   const blockedDriveIds = new Set();
   const registerFailure = (candidate, reason) => {
     const label = getDownloadCandidateLabel(candidate);
@@ -10794,6 +11090,19 @@ async function createDownloadStream(game, options = {}) {
   };
 
   for (const candidate of candidates) {
+    const cooldownInfo = getInstallSourceCooldownBlockInfo(sourceCooldownMap, game, candidate);
+    if (cooldownInfo.blocked && cooldownInfo.remainingMs > 0) {
+      const waitLabel = formatAutoRetryRemainingTime(cooldownInfo.remainingMs);
+      registerFailure(candidate, `fonte temporariamente bloqueada (${waitLabel})`);
+      if (cooldownInfo.failureCode === "DRIVE_QUOTA") {
+        driveQuotaDetected = true;
+      }
+      if (!nextRetryAtMs || cooldownInfo.blockedUntilMs < nextRetryAtMs) {
+        nextRetryAtMs = cooldownInfo.blockedUntilMs;
+      }
+      continue;
+    }
+
     const isDriveCandidate = isGoogleDriveCandidate(candidate);
     const candidateDriveId = isDriveCandidate ? String(game.googleDriveFileId || extractDriveId(candidate.url) || "").trim() : "";
     if (candidateDriveId && blockedDriveIds.has(candidateDriveId)) {
@@ -10820,6 +11129,7 @@ async function createDownloadStream(game, options = {}) {
 
       if (response.status >= 400) {
         let failureReason = `HTTP ${response.status}`;
+        const retryAfterMs = parseRetryAfterHeaderMs(response?.headers?.["retry-after"]);
         if (isDriveCandidate) {
           try {
             const bodyText = await readStreamAsText(response.data, 384 * 1024);
@@ -10832,6 +11142,13 @@ async function createDownloadStream(game, options = {}) {
               if (candidateDriveId) {
                 blockedDriveIds.add(candidateDriveId);
               }
+              const cooldownResult = applyDriveQuotaCooldownForCandidate(sourceCooldownMap, game, candidate, {
+                retryAfterMs,
+                retryAfterHeader: response?.headers?.["retry-after"]
+              });
+              if (cooldownResult.blockedUntilMs > 0 && (!nextRetryAtMs || cooldownResult.blockedUntilMs < nextRetryAtMs)) {
+                nextRetryAtMs = cooldownResult.blockedUntilMs;
+              }
             }
           } catch (_bodyError) {
             if (response.status === 429) {
@@ -10839,6 +11156,13 @@ async function createDownloadStream(game, options = {}) {
               driveQuotaDetected = true;
               if (candidateDriveId) {
                 blockedDriveIds.add(candidateDriveId);
+              }
+              const cooldownResult = applyDriveQuotaCooldownForCandidate(sourceCooldownMap, game, candidate, {
+                retryAfterMs,
+                retryAfterHeader: response?.headers?.["retry-after"]
+              });
+              if (cooldownResult.blockedUntilMs > 0 && (!nextRetryAtMs || cooldownResult.blockedUntilMs < nextRetryAtMs)) {
+                nextRetryAtMs = cooldownResult.blockedUntilMs;
               }
             } else if (response?.data && typeof response.data.destroy === "function") {
               response.data.destroy();
@@ -10889,6 +11213,7 @@ async function createDownloadStream(game, options = {}) {
 
           if (!currentIsHtml && !currentIsJson && !currentIsPlainText) {
             streamResolved = true;
+            clearInstallSourceCooldownForCandidate(sourceCooldownMap, game, candidate);
             return {
               response: currentResponse,
               sourceUrl: candidate.url,
@@ -10907,6 +11232,12 @@ async function createDownloadStream(game, options = {}) {
             driveQuotaDetected = true;
             if (driveId) {
               blockedDriveIds.add(driveId);
+            }
+            const cooldownResult = applyDriveQuotaCooldownForCandidate(sourceCooldownMap, game, candidate, {
+              retryAfterHeader: currentResponse?.headers?.["retry-after"]
+            });
+            if (cooldownResult.blockedUntilMs > 0 && (!nextRetryAtMs || cooldownResult.blockedUntilMs < nextRetryAtMs)) {
+              nextRetryAtMs = cooldownResult.blockedUntilMs;
             }
             lastError = new Error(driveBlockReason);
             registerFailure(candidate, driveBlockReason);
@@ -10985,6 +11316,7 @@ async function createDownloadStream(game, options = {}) {
         continue;
       }
 
+      clearInstallSourceCooldownForCandidate(sourceCooldownMap, game, candidate);
       return {
         response,
         sourceUrl: candidate.url,
@@ -11000,6 +11332,13 @@ async function createDownloadStream(game, options = {}) {
         driveQuotaDetected = true;
         if (candidateDriveId) {
           blockedDriveIds.add(candidateDriveId);
+        }
+        const cooldownResult = applyDriveQuotaCooldownForCandidate(sourceCooldownMap, game, candidate, {
+          retryAfterHeader: error?.response?.headers?.["retry-after"],
+          retryAfterMs: error?.retryAfterMs
+        });
+        if (cooldownResult.blockedUntilMs > 0 && (!nextRetryAtMs || cooldownResult.blockedUntilMs < nextRetryAtMs)) {
+          nextRetryAtMs = cooldownResult.blockedUntilMs;
         }
       }
       registerFailure(candidate, error.message);
@@ -11018,7 +11357,12 @@ async function createDownloadStream(game, options = {}) {
     streamError.precheckFailures = [...precheckFailures];
     if (driveQuotaDetected) {
       streamError.failureCode = "DRIVE_QUOTA";
+      if (nextRetryAtMs > Date.now()) {
+        streamError.nextRetryAtMs = nextRetryAtMs;
+        streamError.retryAfterMs = Math.max(0, nextRetryAtMs - Date.now());
+      }
     }
+    streamError.sourceCooldowns = exportInstallSourceCooldownEntries(sourceCooldownMap);
     throw streamError;
   }
   const streamError = new Error("Nao foi possivel abrir o link de download.");
@@ -11026,7 +11370,12 @@ async function createDownloadStream(game, options = {}) {
   streamError.precheckFailures = [...precheckFailures];
   if (driveQuotaDetected) {
     streamError.failureCode = "DRIVE_QUOTA";
+    if (nextRetryAtMs > Date.now()) {
+      streamError.nextRetryAtMs = nextRetryAtMs;
+      streamError.retryAfterMs = Math.max(0, nextRetryAtMs - Date.now());
+    }
   }
+  streamError.sourceCooldowns = exportInstallSourceCooldownEntries(sourceCooldownMap);
   throw streamError;
 }
 
@@ -11078,7 +11427,7 @@ function createPauseAwarePassThroughTransform(runControl, onChunk) {
   });
 }
 
-async function downloadFile({ game, destinationPath, onProgress, runControl }) {
+async function downloadFile({ game, destinationPath, onProgress, runControl, sourceCooldowns = [] }) {
   const allCandidates = normalizeDownloadCandidates(game);
   if (!allCandidates.length) {
     throw new Error("Jogo sem fonte de download configurada (downloadUrl/downloadUrls/downloadSources).");
@@ -11087,6 +11436,9 @@ async function downloadFile({ game, destinationPath, onProgress, runControl }) {
   const blockedCandidates = new Set();
   const attemptCountBySourceUrl = new Map();
   const failures = [];
+  const sourceCooldownMap = createInstallSourceCooldownMap(sourceCooldowns);
+  let retryAfterMsHint = 0;
+  let sawDriveQuotaFailure = false;
   const maxAttemptsPerCandidate = Math.max(
     1,
     Math.min(
@@ -11106,11 +11458,19 @@ async function downloadFile({ game, destinationPath, onProgress, runControl }) {
     try {
       payload = await createDownloadStream(game, {
         skipSourceUrls: [...blockedCandidates],
-        resumeFromBytes: resumeOffset >= DOWNLOAD_RESUME_MIN_BYTES ? resumeOffset : 0
+        resumeFromBytes: resumeOffset >= DOWNLOAD_RESUME_MIN_BYTES ? resumeOffset : 0,
+        sourceCooldownMap
       });
     } catch (error) {
       const attemptedUrls = Array.isArray(error?.attemptedUrls) ? error.attemptedUrls : [];
       const streamFailureCode = String(error?.failureCode || "").trim().toUpperCase();
+      if (streamFailureCode === "DRIVE_QUOTA") {
+        sawDriveQuotaFailure = true;
+      }
+      const streamRetryAfterMs = Math.max(0, parsePositiveInteger(error?.retryAfterMs));
+      if (streamRetryAfterMs > retryAfterMsHint) {
+        retryAfterMsHint = streamRetryAfterMs;
+      }
       const retryableStreamError = streamFailureCode !== "DRIVE_QUOTA" && isRetryableDownloadError(error);
       let hasRetryableCandidate = false;
       for (const url of attemptedUrls) {
@@ -11140,9 +11500,25 @@ async function downloadFile({ game, destinationPath, onProgress, runControl }) {
         const streamOpenError = new Error(`Nao foi possivel abrir links validos de download. ${details}`);
         if (streamFailureCode) {
           streamOpenError.failureCode = streamFailureCode;
+        } else if (sawDriveQuotaFailure) {
+          streamOpenError.failureCode = "DRIVE_QUOTA";
         }
+        if (retryAfterMsHint > 0) {
+          streamOpenError.retryAfterMs = retryAfterMsHint;
+        }
+        if (toValidTimestampMs(error?.nextRetryAtMs) > Date.now()) {
+          streamOpenError.nextRetryAtMs = toValidTimestampMs(error?.nextRetryAtMs);
+        }
+        streamOpenError.sourceCooldowns = exportInstallSourceCooldownEntries(sourceCooldownMap);
         throw streamOpenError;
       }
+      if (!error?.failureCode && sawDriveQuotaFailure) {
+        error.failureCode = "DRIVE_QUOTA";
+      }
+      if (!error?.retryAfterMs && retryAfterMsHint > 0) {
+        error.retryAfterMs = retryAfterMsHint;
+      }
+      error.sourceCooldowns = exportInstallSourceCooldownEntries(sourceCooldownMap);
       throw error;
     }
 
@@ -11244,16 +11620,28 @@ async function downloadFile({ game, destinationPath, onProgress, runControl }) {
       if (normalizeArchiveType(game.archiveType) !== "none") {
         await testArchiveIntegrity(destinationPath, game);
       }
+      clearInstallSourceCooldownForCandidate(sourceCooldownMap, game, candidate);
       return {
         sourceUrl,
         sourceLabel,
         totalBytes: totalBytes > 0 ? totalBytes : downloadedBytes,
         downloadedBytes,
         attempts: currentAttempt,
-        resumedBytes: resumeStartBytes
+        resumedBytes: resumeStartBytes,
+        sourceCooldowns: exportInstallSourceCooldownEntries(sourceCooldownMap)
       };
     } catch (error) {
       const label = sourceLabel || getDownloadCandidateLabel(candidate || sourceKey);
+      if (isGoogleDriveCandidate(candidate) && isDriveQuotaMessage(error?.message)) {
+        sawDriveQuotaFailure = true;
+        const cooldownResult = applyDriveQuotaCooldownForCandidate(sourceCooldownMap, game, candidate, {
+          retryAfterHeader: error?.response?.headers?.["retry-after"],
+          retryAfterMs: error?.retryAfterMs
+        });
+        if (cooldownResult.retryAfterMs > retryAfterMsHint) {
+          retryAfterMsHint = cooldownResult.retryAfterMs;
+        }
+      }
       const retryable = isRetryableDownloadError(error);
       const canRetry = retryable && currentAttempt < maxAttemptsPerCandidate;
       if (canRetry) {
@@ -11272,7 +11660,15 @@ async function downloadFile({ game, destinationPath, onProgress, runControl }) {
   }
 
   const details = compactFailureDetails(failures).join(" | ");
-  throw new Error(`Falha ao baixar um arquivo valido. Detalhes: ${details}`);
+  const downloadError = new Error(`Falha ao baixar um arquivo valido. Detalhes: ${details}`);
+  if (sawDriveQuotaFailure) {
+    downloadError.failureCode = "DRIVE_QUOTA";
+  }
+  if (retryAfterMsHint > 0) {
+    downloadError.retryAfterMs = retryAfterMsHint;
+  }
+  downloadError.sourceCooldowns = exportInstallSourceCooldownEntries(sourceCooldownMap);
+  throw downloadError;
 }
 
 async function copyLocalArchiveToPath({ sourcePath, destinationPath, onProgress, runControl }) {
@@ -12777,6 +13173,7 @@ async function installGameNow(gameId) {
 
   const task = (async () => {
     const previousSession = activeInstallSessionsByGameId.get(gameId);
+    let sessionSourceCooldowns = normalizeInstallSourceCooldownEntries(previousSession?.sourceCooldowns);
     const shouldForceCatalogRefresh =
       previousSession?.retryable === true ||
       String(previousSession?.lastFailureCode || "").trim().toUpperCase() === "DRIVE_QUOTA";
@@ -12818,7 +13215,8 @@ async function installGameNow(gameId) {
       tempArchivePath,
       phase: "preparing",
       startedAt: installSessionTimestamp,
-      updatedAt: installSessionTimestamp
+      updatedAt: installSessionTimestamp,
+      sourceCooldowns: sessionSourceCooldowns
     }).catch(() => {});
 
     let keepTempArchiveForRetry = false;
@@ -12882,6 +13280,7 @@ async function installGameNow(gameId) {
           game,
           destinationPath: tempArchivePath,
           runControl,
+          sourceCooldowns: sessionSourceCooldowns,
           onProgress: (downloadedBytes, totalBytes, meta = {}) => {
             const percent = totalBytes > 0 ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)) : 0;
             const downloadedMb = (downloadedBytes / 1024 / 1024).toFixed(1);
@@ -12901,6 +13300,11 @@ async function installGameNow(gameId) {
           }
         });
       }
+
+      sessionSourceCooldowns = normalizeInstallSourceCooldownEntries(transferResult?.sourceCooldowns || sessionSourceCooldowns);
+      await patchActiveInstallSession(gameId, {
+        sourceCooldowns: sessionSourceCooldowns
+      }).catch(() => {});
 
       await runControl.waitIfPaused();
       if (
@@ -13071,6 +13475,11 @@ async function installGameNow(gameId) {
       const failureCode =
         extractInstallFailureCode(normalizedErrorMessage) ||
         String(error?.failureCode || "").trim().toUpperCase();
+      sessionSourceCooldowns = normalizeInstallSourceCooldownEntries(error?.sourceCooldowns || sessionSourceCooldowns);
+      const retryAfterMsHint = Math.max(
+        0,
+        Math.min(INSTALL_AUTO_RETRY_MAX_DELAY_MS, parsePositiveInteger(error?.retryAfterMs))
+      );
       keepTempArchiveForRetry =
         !usingLocalArchive && (isRetryableDownloadError(error) || failureCode === "DRIVE_QUOTA");
       preserveRetryStateAfterFailure = keepTempArchiveForRetry;
@@ -13083,7 +13492,8 @@ async function installGameNow(gameId) {
         keepTempArchiveForRetry &&
         retryCount <= INSTALL_AUTO_RETRY_MAX_ATTEMPTS &&
         !isInstallFailureCodeAutoRetryDisabled(failureCode);
-      const nextRetryAtMs = canAutoRetry ? Date.now() + computeInstallAutoRetryDelayMs(failureCode, retryCount) : 0;
+      const computedRetryDelayMs = computeInstallAutoRetryDelayMs(failureCode, retryCount);
+      const nextRetryAtMs = canAutoRetry ? Date.now() + Math.max(computedRetryDelayMs, retryAfterMsHint) : 0;
       const retryScheduleMessage = canAutoRetry
         ? buildInstallAutoRetryScheduleMessage(nextRetryAtMs, failureCode)
         : "";
@@ -13099,7 +13509,8 @@ async function installGameNow(gameId) {
           retryCount,
           nextRetryAtMs,
           lastFailureCode: failureCode,
-          lastFailureMessage: normalizedErrorMessage
+          lastFailureMessage: normalizedErrorMessage,
+          sourceCooldowns: sessionSourceCooldowns
         }).catch(() => {});
         const pausedRequest = createQueuedInstallRequest(gameId, {
           autoRetryEnabled: canAutoRetry,
@@ -13123,6 +13534,7 @@ async function installGameNow(gameId) {
           paused: true,
           state: canAutoRetry ? "paused-auto-retry" : "paused-manual-retry",
           autoRetryScheduled: canAutoRetry,
+          retryAfterMs: canAutoRetry ? Math.max(computedRetryDelayMs, retryAfterMsHint) : 0,
           retryAt:
             canAutoRetry && nextRetryAtMs > 0
               ? new Date(nextRetryAtMs).toISOString()
@@ -13133,6 +13545,8 @@ async function installGameNow(gameId) {
         const pausedError = new Error(failureMessage);
         pausedError.installPausedForRetry = true;
         pausedError.pausedOutcome = pausedOutcome;
+        pausedError.retryAfterMs = pausedOutcome.retryAfterMs;
+        pausedError.sourceCooldowns = sessionSourceCooldowns;
         throw pausedError;
       } else {
         await clearActiveInstallSession(gameId).catch(() => {});
@@ -13142,7 +13556,11 @@ async function installGameNow(gameId) {
           percent: 0,
           message: failureMessage
         });
-        throw new Error(failureMessage);
+        const hardFailure = new Error(failureMessage);
+        hardFailure.failureCode = failureCode;
+        hardFailure.retryAfterMs = retryAfterMsHint;
+        hardFailure.sourceCooldowns = sessionSourceCooldowns;
+        throw hardFailure;
       }
     } finally {
       if (!keepTempArchiveForRetry) {
