@@ -110,6 +110,8 @@ const NOTIFICATION_HISTORY_LIMIT = 15;
 const NOTYF_STACK_VISIBLE = 5;
 const NOTYF_STACK_OFFSET_Y = 18;
 const PROGRESS_RENDER_MIN_INTERVAL_MS = 120;
+const PROGRESS_STATUS_MIN_INTERVAL_MS = LOW_SPEC_DEVICE ? 1200 : 700;
+const REALTIME_SYNC_DOWNLOAD_ACTIVE_MIN_INTERVAL_MS = LOW_SPEC_DEVICE ? 90 * 1000 : 45 * 1000;
 const AUTO_UPDATE_STATE_POLL_INTERVAL_MS = LOW_SPEC_DEVICE ? 35 * 1000 : 15 * 1000;
 const AUTO_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = LOW_SPEC_DEVICE ? 2 * 60 * 1000 : 75 * 1000;
 const AUTO_UPDATE_BACKGROUND_FOCUS_DEBOUNCE_MS = LOW_SPEC_DEVICE ? 7 * 1000 : 3 * 1000;
@@ -253,6 +255,8 @@ let notyfDeckBootstrapObserver = null;
 let progressRenderTimer = null;
 let progressRenderFrame = 0;
 let lastProgressRenderAt = 0;
+let lastProgressStatusAt = 0;
+let lastProgressStatusMessage = "";
 let previousStoreGridRenderSignature = "";
 let previousStoreGridAnimationSignature = "";
 let previousLibraryGridSignature = "";
@@ -277,6 +281,27 @@ let stageSurfaceObservedHeight = 0;
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
   statusMessage.classList.toggle("status-error", isError);
+}
+
+function setProgressStatusThrottled(text, force = false) {
+  const normalized = String(text || "").trim();
+  if (!normalized) {
+    return;
+  }
+
+  const now = Date.now();
+  if (!force) {
+    if (normalized === lastProgressStatusMessage && now - lastProgressStatusAt < 2000) {
+      return;
+    }
+    if (now - lastProgressStatusAt < PROGRESS_STATUS_MIN_INTERVAL_MS) {
+      return;
+    }
+  }
+
+  lastProgressStatusAt = now;
+  lastProgressStatusMessage = normalized;
+  setStatus(normalized);
 }
 
 function parseBooleanLike(value, fallback = false) {
@@ -1063,6 +1088,47 @@ function markNotificationsAsRead() {
   updateNotificationBadge();
 }
 
+function hasActiveInstallInProgress() {
+  for (const progress of state.installProgressByGameId.values()) {
+    const phase = String(progress?.phase || "").toLowerCase();
+    if (ACTIVE_INSTALL_PHASES.has(phase)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function renderRealtimeProgressFrame() {
+  renderRailDownloads();
+
+  if (state.view === "downloads") {
+    renderDownloadsView();
+    return;
+  }
+
+  if (state.view === "store") {
+    renderStoreGrid();
+    return;
+  }
+
+  if (state.view === "library") {
+    renderLibraryGrid();
+    return;
+  }
+
+  if (state.view === "details") {
+    const selected = getGameById(state.selectedGameId);
+    if (!selected) {
+      return;
+    }
+    renderDetailsProgress(selected);
+    renderDetailsActions(selected);
+    if (detailsStatus) {
+      detailsStatus.textContent = getDetailsStatusLabel(selected);
+    }
+  }
+}
+
 function resetNotificationState() {
   state.notificationHistory = [];
   markNotificationsAsRead();
@@ -1077,7 +1143,7 @@ function scheduleProgressRenderAll() {
       progressRenderTimer = null;
     }
     lastProgressRenderAt = Date.now();
-    renderAll();
+    renderRealtimeProgressFrame();
   };
 
   const now = Date.now();
@@ -5605,6 +5671,7 @@ function startRealtimeSync() {
 
   state.realtimeSyncStarted = true;
   let lastSteamStatsSyncAt = 0;
+  let lastActiveDownloadSyncAt = 0;
 
   const syncNow = async () => {
     if (document.hidden) {
@@ -5612,10 +5679,29 @@ function startRealtimeSync() {
     }
 
     const now = Date.now();
+    const activeInstallInProgress = hasActiveInstallInProgress();
+    if (
+      activeInstallInProgress &&
+      lastActiveDownloadSyncAt > 0 &&
+      now - lastActiveDownloadSyncAt < REALTIME_SYNC_DOWNLOAD_ACTIVE_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+
     const shouldRefreshSteamStats =
       !lastSteamStatsSyncAt || now - lastSteamStatsSyncAt >= REALTIME_STEAM_STATS_SYNC_INTERVAL_MS;
 
     try {
+      if (activeInstallInProgress) {
+        await refreshGames({
+          lightweight: true,
+          includeRunningState: false,
+          includeSteamStats: false
+        });
+        lastActiveDownloadSyncAt = Date.now();
+        return;
+      }
+
       if (shouldRefreshSteamStats) {
         await refreshGames({
           lightweight: false,
@@ -6530,7 +6616,7 @@ function installEventBindings() {
     }
 
     if (ACTIVE_INSTALL_PHASES.has(payload.phase)) {
-      setStatus(payload.message || "Processando download...");
+      setProgressStatusThrottled(payload.message || "Processando download...");
     }
 
     if (payload.phase === "canceled") {

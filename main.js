@@ -236,13 +236,14 @@ const DOWNLOAD_STALL_TIMEOUT_MS = 55 * 1000;
 const DOWNLOAD_STALL_TIMEOUT_MIN_MS = 20 * 1000;
 const DOWNLOAD_STALL_TIMEOUT_MAX_MS = 8 * 60 * 1000;
 const DOWNLOAD_STALL_WATCHDOG_POLL_MS = 4000;
-const DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES = 1024 * 1024;
-const DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS = 120;
-const DOWNLOAD_PROGRESS_EMIT_MIN_DELTA_BYTES = 512 * 1024;
-const DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT = 10;
-const DOWNLOAD_PARALLEL_SEGMENTS_MAX = 16;
-const DOWNLOAD_PARALLEL_MIN_FILE_BYTES = 32 * 1024 * 1024;
-const DOWNLOAD_PARALLEL_MIN_SEGMENT_BYTES = 4 * 1024 * 1024;
+const DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES = 512 * 1024;
+const DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS = 220;
+const DOWNLOAD_PROGRESS_EMIT_MIN_DELTA_BYTES = 1024 * 1024;
+const DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT = 4;
+const DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT_LOW_SPEC = 2;
+const DOWNLOAD_PARALLEL_SEGMENTS_MAX = 8;
+const DOWNLOAD_PARALLEL_MIN_FILE_BYTES = 64 * 1024 * 1024;
+const DOWNLOAD_PARALLEL_MIN_SEGMENT_BYTES = 16 * 1024 * 1024;
 const DOWNLOAD_PARALLEL_SEGMENT_MAX_RETRIES = 3;
 const DOWNLOAD_LATENCY_PROBE_CACHE_TTL_MS = 5 * 60 * 1000;
 const DOWNLOAD_LATENCY_PROBE_DEFAULT_TIMEOUT_MS = 3500;
@@ -7709,10 +7710,22 @@ function resolveParallelDownloadMinSegmentBytes(game = {}) {
   return Math.max(1024 * 1024, Math.min(512 * 1024 * 1024, baseValue));
 }
 
+function resolveDefaultParallelDownloadEnabled() {
+  return !resolveHostLowSpecProfile();
+}
+
+function resolveDefaultParallelDownloadSegments() {
+  return resolveHostLowSpecProfile() ? DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT_LOW_SPEC : DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT;
+}
+
+function resolveParallelDownloadSegmentsMaxLimit() {
+  return resolveHostLowSpecProfile() ? Math.min(4, DOWNLOAD_PARALLEL_SEGMENTS_MAX) : DOWNLOAD_PARALLEL_SEGMENTS_MAX;
+}
+
 function resolveParallelDownloadSegments(game = {}, totalBytes = 0) {
   const enabled = parseBoolean(
     game?.downloadParallelEnabled ?? game?.download_parallel_enabled ?? game?.parallelDownloadEnabled,
-    true
+    resolveDefaultParallelDownloadEnabled()
   );
   if (!enabled) {
     return 1;
@@ -7730,11 +7743,12 @@ function resolveParallelDownloadSegments(game = {}, totalBytes = 0) {
       game?.parallelDownloadSegments ||
       game?.parallel_download_segments
   );
-  const desiredSegments = requestedSegments > 0 ? requestedSegments : DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT;
+  const desiredSegments = requestedSegments > 0 ? requestedSegments : resolveDefaultParallelDownloadSegments();
   const minSegmentBytes = resolveParallelDownloadMinSegmentBytes(game);
   const maxSegmentsBySize =
     knownTotalBytes > 0 ? Math.max(1, Math.floor(knownTotalBytes / Math.max(1, minSegmentBytes))) : desiredSegments;
-  const maxAllowed = Math.max(1, Math.min(DOWNLOAD_PARALLEL_SEGMENTS_MAX, maxSegmentsBySize));
+  const maxSegmentsLimit = resolveParallelDownloadSegmentsMaxLimit();
+  const maxAllowed = Math.max(1, Math.min(maxSegmentsLimit, maxSegmentsBySize));
   return Math.max(1, Math.min(desiredSegments, maxAllowed));
 }
 
@@ -10712,18 +10726,19 @@ async function readCatalogBundle(options = {}) {
       );
       const downloadParallelEnabled = parseBoolean(
         entry.downloadParallelEnabled ?? entry.download_parallel_enabled ?? entry.parallelDownloadEnabled,
-        true
+        resolveDefaultParallelDownloadEnabled()
       );
+      const downloadParallelSegmentsMax = resolveParallelDownloadSegmentsMaxLimit();
       const downloadParallelSegments = Math.max(
         1,
         Math.min(
-          DOWNLOAD_PARALLEL_SEGMENTS_MAX,
+          downloadParallelSegmentsMax,
           parsePositiveInteger(
             entry.downloadParallelSegments ||
               entry.download_parallel_segments ||
               entry.parallelDownloadSegments ||
               entry.parallel_download_segments
-          ) || DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT
+          ) || resolveDefaultParallelDownloadSegments()
         )
       );
       const downloadParallelMinFileBytes = Math.max(
