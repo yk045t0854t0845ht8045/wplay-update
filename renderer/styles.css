@@ -3941,6 +3941,10 @@ body.layout-centered.view-details .details-bottom {
   animation: spinBusy 1.05s linear infinite;
 }
 
+#detailsActionBtn[data-action="soon"] .hero-action-icon.icon-soon {
+  display: block;
+}
+
 .hero-progress{
   margin-top: 1rem;
   margin-left: auto;

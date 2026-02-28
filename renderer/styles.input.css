@@ -2451,6 +2451,10 @@
     animation: spinBusy 1.05s linear infinite;
   }
 
+  #detailsActionBtn[data-action="soon"] .hero-action-icon.icon-soon {
+    display: block;
+  }
+
   .hero-progress {
     @apply mt-4 ml-auto max-w-[420px];
   }
