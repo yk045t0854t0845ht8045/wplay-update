@@ -6,28 +6,28 @@ Este launcher agora consegue puxar jogos direto do Supabase em tempo real.
 
 No SQL Editor do Supabase, execute:
 
-- `docs/SUPABASE_SQL_CATALOGO_JOGOS.sql`
-- `docs/SUPABASE_SQL_STEAM_PRECO_AUTO.sql` (opcional, recomendado)
+- `docs/SUPABASE_SQL_CATALOGO_JOGOS.sql`.
+- `docs/SUPABASE_SQL_STEAM_PRECO_AUTO.sql` (opcional, recomendado).
 
 Esse SQL:
 
-1. cria tabela `public.launcher_games`
-2. cria trigger de `updated_at`
-3. cria policy de leitura para `anon/authenticated`
-4. insere (ou atualiza) o jogo `repo` (Dropbox-only)
+1. cria tabela `public.launcher_games`.
+2. cria trigger de `updated_at`.
+3. cria policy de leitura para `anon/authenticated`.
+4. insere (ou atualiza) o jogo `repo` (Dropbox-only).
 
 O SQL opcional de preco Steam:
 
-1. habilita `extensions.http`
-2. habilita `pg_cron`
-3. cria funcao para consultar `store.steampowered.com/api/appdetails`
-4. atualiza `original_price` como numero (`10.99`) e mantem `current_price` fixo como `Gratuito`
-5. cria trigger para sincronizar automaticamente no `INSERT/UPDATE` de `steam_app_id`
-6. agenda sincronizacao automatica a cada 24h (`06:00 UTC`) para capturar promocoes e mudancas de preco
+1. habilita `extensions.http`.
+2. habilita `pg_cron`.
+3. cria funcao para consultar `store.steampowered.com/api/appdetails`.
+4. atualiza `original_price` como numero (`10.99`) e mantem `current_price` fixo como `Gratuito`.
+5. cria trigger para sincronizar automaticamente no `INSERT/UPDATE` de `steam_app_id`.
+6. agenda sincronizacao automatica a cada 24h (`06:00 UTC`) para capturar promocoes e mudancas de preco.
 
 ## 2) Confirmar auth do launcher
 
-Arquivo: `config/auth.json`
+Arquivo: `config/auth.json`.
 
 ```json
 {
