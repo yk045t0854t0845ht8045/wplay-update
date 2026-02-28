@@ -117,6 +117,7 @@ const DOWNLOAD_STREAM_TIMEOUT_MS = Math.max(
   Number(process.env.WPLAY_DOWNLOAD_TIMEOUT_MS) || 45 * 60 * 1000
 );
 const DOWNLOAD_SOURCE_SELECTION_SEED = crypto.randomBytes(8).toString("hex");
+const ALLOW_LEGACY_GOOGLE_DRIVE_SOURCES = false;
 const GOOGLE_DRIVE_MAX_CONFIRM_HOPS = 6;
 const DEFENDER_SCAN_TIMEOUT_MS = 20 * 60 * 1000;
 const ARCHIVE_TOOL_TIMEOUT_MS = 25 * 60 * 1000;
@@ -237,6 +238,7 @@ const INSTALL_AUTO_RETRY_MAX_DELAY_MS = 6 * 60 * 60 * 1000;
 const INSTALL_AUTO_RETRY_GENERIC_BASE_DELAY_MS = 45 * 1000;
 const INSTALL_AUTO_RETRY_DOWNLOAD_BASE_DELAY_MS = 65 * 1000;
 const INSTALL_AUTO_RETRY_DRIVE_QUOTA_BASE_DELAY_MS = 20 * 60 * 1000;
+const INSTALL_AUTO_RETRY_DROPBOX_RATE_LIMIT_BASE_DELAY_MS = 10 * 60 * 1000;
 const INSTALL_AUTO_RETRY_JITTER_MAX_MS = 12 * 1000;
 const INSTALL_SOURCE_COOLDOWN_MAX_ENTRIES = 320;
 const INSTALL_SOURCE_COOLDOWN_QUOTA_JITTER_MAX_MS = 90 * 1000;
@@ -1377,18 +1379,10 @@ function normalizeInstallSourceCooldownKey(value) {
   if (!key) {
     return "";
   }
-  if (key.startsWith("url:") || key.startsWith("drive-file:")) {
+  if (key.startsWith("url:")) {
     return key.slice(0, 640);
   }
   return "";
-}
-
-function normalizeDriveFileIdForCooldown(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "")
-    .slice(0, 140);
 }
 
 function buildDownloadSourceUrlCooldownKey(urlValue) {
@@ -1399,26 +1393,11 @@ function buildDownloadSourceUrlCooldownKey(urlValue) {
   return `url:${normalizedUrl.slice(0, 560)}`;
 }
 
-function buildDownloadSourceDriveCooldownKey(fileId) {
-  const normalizedId = normalizeDriveFileIdForCooldown(fileId);
-  if (!normalizedId) {
-    return "";
-  }
-  return `drive-file:${normalizedId}`;
-}
-
 function getDownloadSourceCooldownKeysForCandidate(game, candidate) {
   const keys = [];
   const urlKey = buildDownloadSourceUrlCooldownKey(candidate?.url || candidate);
   if (urlKey) {
     keys.push(urlKey);
-  }
-
-  if (isGoogleDriveCandidate(candidate)) {
-    const driveId = buildDownloadSourceDriveCooldownKey(game?.googleDriveFileId || extractDriveId(candidate?.url || ""));
-    if (driveId) {
-      keys.push(driveId);
-    }
   }
 
   return [...new Set(keys)];
@@ -1606,6 +1585,21 @@ function computeDriveQuotaSourceCooldownMs(failureCount = 1, retryAfterMs = 0) {
   return Math.min(INSTALL_AUTO_RETRY_MAX_DELAY_MS, Math.max(exponentialDelayMs + jitterMs, retryAfterHintMs));
 }
 
+function computeDropboxRateLimitSourceCooldownMs(failureCount = 1, retryAfterMs = 0) {
+  const safeFailureCount = Math.max(1, Math.min(24, parsePositiveInteger(failureCount) || 1));
+  const exponentialDelayMs = Math.min(
+    INSTALL_AUTO_RETRY_MAX_DELAY_MS,
+    INSTALL_AUTO_RETRY_DROPBOX_RATE_LIMIT_BASE_DELAY_MS * 2 ** (safeFailureCount - 1)
+  );
+  const jitterCap = Math.max(
+    0,
+    Math.min(INSTALL_SOURCE_COOLDOWN_QUOTA_JITTER_MAX_MS, Math.floor(exponentialDelayMs * 0.16))
+  );
+  const jitterMs = jitterCap > 0 ? Math.floor(Math.random() * jitterCap) : 0;
+  const retryAfterHintMs = Math.max(0, parsePositiveInteger(retryAfterMs));
+  return Math.min(INSTALL_AUTO_RETRY_MAX_DELAY_MS, Math.max(exponentialDelayMs + jitterMs, retryAfterHintMs));
+}
+
 function applyDriveQuotaCooldownForCandidate(sourceCooldownMap, game, candidate, options = {}) {
   if (!(sourceCooldownMap instanceof Map)) {
     return {
@@ -1654,6 +1648,47 @@ function applyDriveQuotaCooldownForCandidate(sourceCooldownMap, game, candidate,
     blockedUntilMs,
     retryAfterMs: maxDelayMs,
     keys
+  };
+}
+
+function applyDropboxRateLimitCooldownForCandidate(sourceCooldownMap, candidate, options = {}) {
+  if (!(sourceCooldownMap instanceof Map)) {
+    return {
+      blockedUntilMs: 0,
+      retryAfterMs: 0,
+      keys: []
+    };
+  }
+
+  const retryAfterMs = Math.max(
+    0,
+    parseRetryAfterHeaderMs(options.retryAfterHeader) || parsePositiveInteger(options.retryAfterMs)
+  );
+  const key = buildDownloadSourceUrlCooldownKey(candidate?.url || candidate);
+  if (!key) {
+    return {
+      blockedUntilMs: 0,
+      retryAfterMs: 0,
+      keys: []
+    };
+  }
+
+  const nowMs = Date.now();
+  const current = sourceCooldownMap.get(key);
+  const nextFailureCount = Math.min(24, Math.max(0, parsePositiveInteger(current?.failureCount)) + 1);
+  const delayMs = computeDropboxRateLimitSourceCooldownMs(nextFailureCount, retryAfterMs);
+  const blockedUntilMs = nowMs + delayMs;
+  sourceCooldownMap.set(key, {
+    key,
+    blockedUntilMs,
+    failureCode: "DROPBOX_RATE_LIMIT",
+    failureCount: nextFailureCount
+  });
+
+  return {
+    blockedUntilMs,
+    retryAfterMs: delayMs,
+    keys: [key]
   };
 }
 
@@ -4249,7 +4284,6 @@ function readAuthConfigFileSync() {
     const supabaseAnonKey = sanitizeAuthConfigValue(source.supabaseAnonKey);
     const redirectUrl = normalizeAuthRedirectUrl(sanitizeAuthConfigValue(source.redirectUrl));
     const steamWebApiKey = normalizeSteamWebApiKey(source.steamWebApiKey || source.steam_api_key);
-    const googleApiKey = normalizeGoogleApiKey(source.googleApiKey || source.google_api_key);
 
     if (!sanitizeAuthConfigValue(merged.supabaseUrl) && supabaseUrl) {
       merged.supabaseUrl = supabaseUrl;
@@ -4262,9 +4296,6 @@ function readAuthConfigFileSync() {
     }
     if (!normalizeSteamWebApiKey(merged.steamWebApiKey || merged.steam_api_key) && steamWebApiKey) {
       merged.steamWebApiKey = steamWebApiKey;
-    }
-    if (!normalizeGoogleApiKey(merged.googleApiKey || merged.google_api_key) && googleApiKey) {
-      merged.googleApiKey = googleApiKey;
     }
   }
 
@@ -4307,10 +4338,6 @@ function normalizeSteamWebApiKey(value) {
   return sanitizeAuthConfigValue(value);
 }
 
-function normalizeGoogleApiKey(value) {
-  return sanitizeAuthConfigValue(value);
-}
-
 function normalizeAuthRedirectUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return AUTH_CALLBACK_URL_DEFAULT;
@@ -4339,19 +4366,12 @@ function resolveAuthConfig() {
   const steamWebApiKey = normalizeSteamWebApiKey(
     process.env.WPLAY_STEAM_WEB_API_KEY || fileConfig.steamWebApiKey || fileConfig.steam_api_key
   );
-  const googleApiKey = normalizeGoogleApiKey(
-    process.env.WPLAY_GOOGLE_API_KEY ||
-      process.env.WYZER_GOOGLE_API_KEY ||
-      fileConfig.googleApiKey ||
-      fileConfig.google_api_key
-  );
 
   return {
     supabaseUrl,
     supabaseAnonKey,
     redirectUrl,
-    steamWebApiKey,
-    googleApiKey
+    steamWebApiKey
   };
 }
 
@@ -7050,7 +7070,7 @@ function invalidateRemoteCatalogCache(reason = "") {
   }
 }
 
-function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
+function mapSupabaseCatalogRowToEntry(row) {
   const source = row && typeof row === "object" ? row : {};
   const payloadRaw = source.game_data && typeof source.game_data === "object"
     ? source.game_data
@@ -7096,9 +7116,8 @@ function mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey = "") {
     downloadUrl: pickFirstDefinedValue(merged, ["downloadUrl", "download_url"]),
     downloadUrls,
     downloadSources,
-    googleDriveFileId: pickFirstDefinedValue(merged, ["googleDriveFileId", "google_drive_file_id"]),
+    dropboxSharedUrl: pickFirstDefinedValue(merged, ["dropboxSharedUrl", "dropbox_shared_url", "dropboxUrl", "dropbox_url"]),
     localArchiveFile: pickFirstDefinedValue(merged, ["localArchiveFile", "local_archive_file"]),
-    googleApiKey: pickFirstDefinedValue(merged, ["googleApiKey", "google_api_key"]) || fallbackGoogleApiKey,
     installDirName: pickFirstDefinedValue(merged, ["installDirName", "install_dir_name"]),
     launchExecutable: pickFirstDefinedValue(merged, ["launchExecutable", "launch_executable"]),
     autoDetectExecutable: pickFirstDefinedValue(merged, ["autoDetectExecutable", "auto_detect_executable"]),
@@ -9150,7 +9169,7 @@ async function listFriendGameActivitiesForCurrentUser(options = {}) {
   return { entries: sorted };
 }
 
-async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {}) {
+async function fetchCatalogEntriesFromSupabase(sourceConfig) {
   const authConfig = resolveAuthConfig();
   if (!authConfig.supabaseUrl || !authConfig.supabaseAnonKey) {
     throw new Error("[CATALOG_SUPABASE_AUTH] Supabase nao configurado para catalogo remoto.");
@@ -9178,7 +9197,6 @@ async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {})
     );
   }
 
-  const fallbackGoogleApiKey = String(localSettings.googleApiKey || authConfig.googleApiKey || "").trim();
   const rows = Array.isArray(response.data) ? response.data : [];
   const fetchedSignature = buildCatalogRemoteSignature(rows, response.headers);
   if (fetchedSignature) {
@@ -9186,7 +9204,7 @@ async function fetchCatalogEntriesFromSupabase(sourceConfig, localSettings = {})
     remoteCatalogCache.remoteSignature = fetchedSignature;
   }
   const mappedEntries = rows
-    .map((row) => mapSupabaseCatalogRowToEntry(row, fallbackGoogleApiKey))
+    .map((row) => mapSupabaseCatalogRowToEntry(row))
     .filter((entry) => {
       if (!entry || typeof entry !== "object") return false;
       if (entry.enabled === false) return false;
@@ -9834,7 +9852,7 @@ async function resolveCatalogEntries(settings = {}, localEntries = [], options =
 
   remoteCatalogInFlight = (async () => {
     try {
-      const remoteEntries = await fetchCatalogEntriesFromSupabase(sourceConfig, settings);
+      const remoteEntries = await fetchCatalogEntriesFromSupabase(sourceConfig);
       const hasRemoteEntries = remoteEntries.length > 0;
       if (!hasRemoteEntries && fallbackEntries.length > 0 && !sourceConfig.allowEmptyRemote) {
         const warning =
@@ -9898,11 +9916,6 @@ async function readCatalogBundle(options = {}) {
   });
   const entries = Array.isArray(resolvedCatalog.entries) ? resolvedCatalog.entries : [];
   const catalogSourceConfig = resolvedCatalog.sourceConfig || resolveCatalogSourceConfig(settings);
-  const authConfig = resolveAuthConfig();
-
-  const globalApiKey = String(
-    settings.googleApiKey || authConfig.googleApiKey || process.env.WPLAY_GOOGLE_API_KEY || process.env.WYZER_GOOGLE_API_KEY || ""
-  ).trim();
   const defaultExecutable = String(settings.defaultExecutable || "game.exe").trim() || "game.exe";
   const installRoot = normalizeAbsolutePath(settings.installRoot || "");
 
@@ -9912,12 +9925,14 @@ async function readCatalogBundle(options = {}) {
       const id = String(entry.id || slugifyId(name, `game-${index + 1}`));
       const sizeSyncIdCandidates = normalizeCatalogSyncIdCandidates(entry.sizeSyncIdCandidates, id);
       const downloadUrl = String(entry.downloadUrl || "").trim();
-      const googleDriveFileId = String(entry.googleDriveFileId || extractDriveId(downloadUrl)).trim();
+      const dropboxSharedUrl = String(
+        entry.dropboxSharedUrl || entry.dropbox_shared_url || entry.dropboxUrl || entry.dropbox_url || ""
+      ).trim();
       const downloadUrls = normalizeStringArray(entry.downloadUrls || entry.mirrors || entry.mirrorUrls || entry.backupUrls);
       const downloadSources = normalizeDownloadSourceEntries(entry.downloadSources || entry.sources || entry.downloadMirrors);
       const localArchiveFile = String(entry.localArchiveFile || "").trim();
       const hasDownloadSource = Boolean(
-        downloadUrl || googleDriveFileId || localArchiveFile || downloadUrls.length > 0 || downloadSources.length > 0
+        downloadUrl || dropboxSharedUrl || localArchiveFile || downloadUrls.length > 0 || downloadSources.length > 0
       );
       const archivePassword = String(entry.archivePassword || "").trim();
       const checksumSha256 = String(entry.checksumSha256 || entry.sha256 || entry.archiveSha256 || "").trim().toLowerCase();
@@ -10016,9 +10031,8 @@ async function readCatalogBundle(options = {}) {
         downloadUrl,
         downloadUrls,
         downloadSources,
-        googleDriveFileId,
+        dropboxSharedUrl,
         localArchiveFile,
-        googleApiKey: String(entry.googleApiKey || globalApiKey || "").trim(),
         installDirName,
         launchExecutable,
         autoDetectExecutable: entry.autoDetectExecutable !== false,
@@ -10065,7 +10079,7 @@ async function readCatalogBundle(options = {}) {
     settings: {
       installRoot,
       defaultExecutable,
-      googleApiKey: globalApiKey,
+      downloadProvider: "dropbox",
       catalogSource: resolvedCatalog.source || "local-json",
       catalogWarning: resolvedCatalog.warning || "",
       catalogPollIntervalSeconds: catalogSourceConfig.pollIntervalSeconds,
@@ -10365,11 +10379,76 @@ function detectDownloadKindFromUrl(urlValue) {
     return "github";
   }
 
-  if (url.includes("dropbox.com")) {
+  if (url.includes("dropbox.com") || url.includes("dropboxusercontent.com")) {
     return "dropbox";
   }
 
   return "direct";
+}
+
+function buildDropboxDirectVariantUrls(rawUrl) {
+  const sourceUrl = String(rawUrl || "").trim();
+  if (!sourceUrl) {
+    return [];
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(sourceUrl);
+  } catch (_error) {
+    return [];
+  }
+
+  const host = String(parsed.hostname || "").trim().toLowerCase();
+  const isDropboxHost = host.includes("dropbox.com") || host.includes("dropboxusercontent.com");
+  if (!isDropboxHost) {
+    return [];
+  }
+
+  const variants = [];
+  const seen = new Set();
+  const push = (urlValue, label) => {
+    const value = String(urlValue || "").trim();
+    if (!value) {
+      return;
+    }
+    const key = value.toLowerCase();
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    variants.push({
+      url: value,
+      label: String(label || "").trim()
+    });
+  };
+
+  push(parsed.toString(), "dropbox-source");
+
+  if (host.includes("dropbox.com") && !host.includes("dropboxusercontent.com")) {
+    const dlVariant = new URL(parsed.toString());
+    dlVariant.searchParams.delete("raw");
+    dlVariant.searchParams.set("dl", "1");
+    push(dlVariant.toString(), "dropbox-dl1");
+
+    const rawVariant = new URL(parsed.toString());
+    rawVariant.searchParams.delete("dl");
+    rawVariant.searchParams.set("raw", "1");
+    push(rawVariant.toString(), "dropbox-raw1");
+
+    const directVariant = new URL(dlVariant.toString());
+    directVariant.hostname = "dl.dropboxusercontent.com";
+    directVariant.searchParams.delete("dl");
+    directVariant.searchParams.delete("raw");
+    push(directVariant.toString(), "dropboxusercontent-direct");
+  } else if (host.includes("dropboxusercontent.com")) {
+    const sharedVariant = new URL(parsed.toString());
+    sharedVariant.hostname = "www.dropbox.com";
+    sharedVariant.searchParams.set("dl", "1");
+    push(sharedVariant.toString(), "dropbox-shared-dl1");
+  }
+
+  return variants;
 }
 
 function getDefaultCandidatePriority(kind, urlValue) {
@@ -10377,7 +10456,13 @@ function getDefaultCandidatePriority(kind, urlValue) {
   if (normalizedKind === "github") return 16;
   if (normalizedKind === "direct") return 20;
   if (normalizedKind === "mirror") return 24;
-  if (normalizedKind === "dropbox") return 34;
+  if (normalizedKind === "dropbox") {
+    const value = String(urlValue || "").toLowerCase();
+    if (value.includes("dropboxusercontent.com")) return 30;
+    if (value.includes("raw=1")) return 31;
+    if (value.includes("dl=1")) return 32;
+    return 34;
+  }
   if (normalizedKind === "google-drive") {
     const value = String(urlValue || "").toLowerCase();
     if (value.includes("www.googleapis.com/drive/v3/files")) return 86;
@@ -10417,7 +10502,7 @@ function sortCandidatesForDistributedDownloads(candidates = [], game = {}) {
     const rightIsDrive = isGoogleDriveCandidate(right);
 
     if (leftIsDrive && rightIsDrive) {
-      // Distribute load among Google Drive variants so users don't hit only one endpoint.
+      // Legacy: distribute load among similar endpoints when multiple candidates share near priority.
       if (Math.abs(safeLeftPriority - safeRightPriority) <= 8) {
         const affinityDiff =
           getDownloadCandidateAffinityScore(safeGameId, left?.url) -
@@ -10463,7 +10548,11 @@ function normalizeDownloadCandidates(game) {
     if (seen.has(key)) return;
     seen.add(key);
 
-    const kind = String(options.kind || "").trim().toLowerCase() || detectDownloadKindFromUrl(url);
+    const detectedKind = detectDownloadKindFromUrl(url);
+    const kind = String(options.kind || "").trim().toLowerCase() || detectedKind;
+    if ((kind === "google-drive" || detectedKind === "google-drive") && !ALLOW_LEGACY_GOOGLE_DRIVE_SOURCES) {
+      return;
+    }
     const priorityRaw = Number(options.priority);
     const priority = Number.isFinite(priorityRaw) ? priorityRaw : getDefaultCandidatePriority(kind, url);
 
@@ -10473,6 +10562,20 @@ function normalizeDownloadCandidates(game) {
       kind,
       priority
     });
+
+    if (kind === "dropbox" && options.expandDropboxVariants !== false) {
+      const variants = buildDropboxDirectVariantUrls(url);
+      let variantPriority = Math.max(1, priority - 2);
+      for (const variant of variants) {
+        addCandidate(variant.url, {
+          label: variant.label,
+          kind: "dropbox",
+          priority: variantPriority,
+          expandDropboxVariants: false
+        });
+        variantPriority += 0.14;
+      }
+    }
   };
 
   if (Array.isArray(game.downloadSources)) {
@@ -10493,80 +10596,18 @@ function normalizeDownloadCandidates(game) {
     }
   }
 
+  addCandidate(game.dropboxSharedUrl, {
+    label: "dropbox-shared-url",
+    kind: "dropbox",
+    priority: 25
+  });
+
   const directDownloadKind = detectDownloadKindFromUrl(game.downloadUrl);
   addCandidate(game.downloadUrl, {
     label: "download-url",
     kind: directDownloadKind,
-    priority: directDownloadKind === "google-drive" ? 91 : 28
+    priority: directDownloadKind === "dropbox" ? 26 : 28
   });
-
-  const driveId = game.googleDriveFileId || extractDriveId(game.downloadUrl || "");
-  if (driveId) {
-    const apiUrl = buildGoogleApiDownloadUrl(driveId, game.googleApiKey);
-    if (apiUrl) {
-      addCandidate(apiUrl, {
-        label: "google-drive-api",
-        kind: "google-drive",
-        priority: 85.5
-      });
-    }
-
-    addCandidate(`https://drive.googleusercontent.com/uc?id=${driveId}&export=download`, {
-      label: "google-drive-googleusercontent",
-      kind: "google-drive",
-      priority: 87
-    });
-
-    addCandidate(`https://docs.google.com/uc?export=download&id=${driveId}`, {
-      label: "google-drive-docs-uc",
-      kind: "google-drive",
-      priority: 87.5
-    });
-
-    addCandidate(`https://docs.google.com/uc?export=download&id=${driveId}&confirm=t`, {
-      label: "google-drive-docs-uc-confirm",
-      kind: "google-drive",
-      priority: 87.7
-    });
-
-    // Mantem compatibilidade com o formato legado que funcionava melhor:
-    // driveusercontent + authuser=0 (com e sem confirm), antes do link uc padrao.
-    addCandidate(`https://drive.usercontent.google.com/download?id=${driveId}&export=download&authuser=0`, {
-      label: "google-drive-usercontent-authuser",
-      kind: "google-drive",
-      priority: 88
-    });
-
-    addCandidate(`https://drive.usercontent.google.com/download?id=${driveId}&export=download&authuser=0&confirm=t`, {
-      label: "google-drive-usercontent-authuser-confirm",
-      kind: "google-drive",
-      priority: 89
-    });
-
-    addCandidate(`https://drive.usercontent.google.com/download?id=${driveId}&export=download`, {
-      label: "google-drive-usercontent",
-      kind: "google-drive",
-      priority: 90
-    });
-
-    addCandidate(`https://drive.usercontent.google.com/download?id=${driveId}&export=download&confirm=t`, {
-      label: "google-drive-usercontent-confirm",
-      kind: "google-drive",
-      priority: 90.5
-    });
-
-    addCandidate(`https://drive.google.com/uc?export=download&id=${driveId}`, {
-      label: "google-drive-uc",
-      kind: "google-drive",
-      priority: 92
-    });
-
-    addCandidate(`https://drive.google.com/uc?export=download&id=${driveId}&confirm=t`, {
-      label: "google-drive-uc-confirm",
-      kind: "google-drive",
-      priority: 92.2
-    });
-  }
 
   candidates.sort((a, b) => a.priority - b.priority);
   return candidates;
@@ -10778,6 +10819,25 @@ function isDriveQuotaMessage(value) {
   );
 }
 
+function isDropboxRateLimitMessage(value) {
+  const lower = normalizeTextForMatch(value);
+  if (!lower) {
+    return false;
+  }
+  return (
+    lower.includes("too many requests") ||
+    lower.includes("temporarily suspended") ||
+    lower.includes("temporarily disabled") ||
+    lower.includes("traffic limit") ||
+    lower.includes("bandwidth limit") ||
+    lower.includes("downloads are temporarily disabled") ||
+    lower.includes("muitas solicitacoes") ||
+    lower.includes("temporariamente indisponivel") ||
+    lower.includes("limite de trafego") ||
+    lower.includes("limite de banda")
+  );
+}
+
 function detectDriveBlockingReason(bodyText, statusCode = 0) {
   const text = String(bodyText || "");
   const lower = normalizeTextForMatch(text);
@@ -10813,6 +10873,36 @@ function detectDriveBlockingReason(bodyText, statusCode = 0) {
 
   if (statusCode === 403 || lower.includes("access denied")) {
     return "Google Drive negou acesso ao arquivo. Verifique compartilhamento publico e API key.";
+  }
+
+  return "";
+}
+
+function detectDropboxBlockingReason(bodyText, statusCode = 0) {
+  const text = String(bodyText || "");
+  const lower = normalizeTextForMatch(text);
+
+  if (statusCode === 404 || lower.includes("we couldn't find the file you're looking for")) {
+    return "Arquivo do Dropbox nao encontrado ou link invalido.";
+  }
+
+  if (statusCode === 403 || lower.includes("access denied")) {
+    return "Dropbox negou acesso ao arquivo. Verifique permissao publica do link.";
+  }
+
+  if (statusCode === 429 || isDropboxRateLimitMessage(lower)) {
+    return "Dropbox bloqueou temporariamente este arquivo por limite de trafego/downloads.";
+  }
+
+  if (
+    lower.includes("dropbox") &&
+    (lower.includes("sign in") || lower.includes("enter your password") || lower.includes("log in"))
+  ) {
+    return "Link do Dropbox exige autenticacao. Use link publico direto com dl=1 ou raw=1.";
+  }
+
+  if (lower.includes("dropbox") && lower.includes("html")) {
+    return "Dropbox retornou pagina web em vez do arquivo. Use link direto com dl=1 ou raw=1.";
   }
 
   return "";
@@ -10949,6 +11039,7 @@ function getDownloadCandidateLabel(candidate) {
   if (value.includes("drive.usercontent.google.com")) return "driveusercontent";
   if (value.includes("drive.google.com/uc")) return "drive-uc";
   if (value.includes("www.googleapis.com/drive/v3/files")) return "drive-api";
+  if (value.includes("dl.dropboxusercontent.com")) return "dropboxusercontent";
   if (value.includes("dropbox.com")) return "dropbox";
   return "direct-url";
 }
@@ -10962,6 +11053,11 @@ function isGoogleDriveCandidate(candidate) {
     value.includes("drive.usercontent.google.com") ||
     value.includes("www.googleapis.com/drive/v3/files")
   );
+}
+
+function isDropboxCandidate(candidate) {
+  const value = String(candidate?.url || candidate || "").toLowerCase();
+  return value.includes("dropbox.com") || value.includes("dropboxusercontent.com");
 }
 
 function buildDownloadRangeHeader(resumeFromBytes = 0, metadataProbe = false) {
@@ -11002,7 +11098,7 @@ function isRetryableHttpStatus(status) {
 
 function isRetryableDownloadError(error) {
   const failureCode = String(error?.failureCode || "").trim().toUpperCase();
-  if (failureCode === "DRIVE_QUOTA") {
+  if (failureCode === "DRIVE_QUOTA" || failureCode === "DROPBOX_RATE_LIMIT") {
     return true;
   }
 
@@ -11038,6 +11134,7 @@ function isRetryableDownloadError(error) {
     lower.includes("tipo de arquivo inesperado") ||
     lower.includes("arquivo compactado valido") ||
     lower.includes("google drive nao encontrado") ||
+    lower.includes("dropbox nao encontrado") ||
     lower.includes("table_not_found")
   ) {
     return false;
@@ -11054,6 +11151,8 @@ function isRetryableDownloadError(error) {
     lower.includes("download foi interrompido") ||
     lower.includes("nao foi possivel abrir links validos de download") ||
     lower.includes("falha ao baixar um arquivo valido") ||
+    lower.includes("dropbox bloqueou temporariamente") ||
+    lower.includes("dropbox limitou temporariamente") ||
     lower.includes("incomplete") ||
     lower.includes("econn") ||
     lower.includes("enotfound")
@@ -11078,6 +11177,7 @@ async function createDownloadStream(game, options = {}) {
   const precheckFailures = [];
   const precheckFailedUrls = [];
   let driveQuotaDetected = false;
+  let dropboxRateLimitDetected = false;
   let nextRetryAtMs = 0;
   const blockedDriveIds = new Set();
   const registerFailure = (candidate, reason) => {
@@ -11096,6 +11196,8 @@ async function createDownloadStream(game, options = {}) {
       registerFailure(candidate, `fonte temporariamente bloqueada (${waitLabel})`);
       if (cooldownInfo.failureCode === "DRIVE_QUOTA") {
         driveQuotaDetected = true;
+      } else if (cooldownInfo.failureCode === "DROPBOX_RATE_LIMIT") {
+        dropboxRateLimitDetected = true;
       }
       if (!nextRetryAtMs || cooldownInfo.blockedUntilMs < nextRetryAtMs) {
         nextRetryAtMs = cooldownInfo.blockedUntilMs;
@@ -11103,8 +11205,9 @@ async function createDownloadStream(game, options = {}) {
       continue;
     }
 
-    const isDriveCandidate = isGoogleDriveCandidate(candidate);
-    const candidateDriveId = isDriveCandidate ? String(game.googleDriveFileId || extractDriveId(candidate.url) || "").trim() : "";
+    const isDriveCandidate = ALLOW_LEGACY_GOOGLE_DRIVE_SOURCES && isGoogleDriveCandidate(candidate);
+    const isDropboxSource = isDropboxCandidate(candidate);
+    const candidateDriveId = isDriveCandidate ? String(extractDriveId(candidate.url) || "").trim() : "";
     if (candidateDriveId && blockedDriveIds.has(candidateDriveId)) {
       registerFailure(candidate, "arquivo do Drive temporariamente bloqueado por limite de downloads");
       continue;
@@ -11168,6 +11271,38 @@ async function createDownloadStream(game, options = {}) {
               response.data.destroy();
             }
           }
+        } else if (isDropboxSource) {
+          try {
+            const bodyText = await readStreamAsText(response.data, 384 * 1024);
+            const dropboxReason = detectDropboxBlockingReason(bodyText, response.status);
+            if (dropboxReason) {
+              failureReason = dropboxReason;
+            }
+            if (isDropboxRateLimitMessage(dropboxReason) || response.status === 429) {
+              dropboxRateLimitDetected = true;
+              const cooldownResult = applyDropboxRateLimitCooldownForCandidate(sourceCooldownMap, candidate, {
+                retryAfterMs,
+                retryAfterHeader: response?.headers?.["retry-after"]
+              });
+              if (cooldownResult.blockedUntilMs > 0 && (!nextRetryAtMs || cooldownResult.blockedUntilMs < nextRetryAtMs)) {
+                nextRetryAtMs = cooldownResult.blockedUntilMs;
+              }
+            }
+          } catch (_bodyError) {
+            if (response.status === 429) {
+              failureReason = "Dropbox bloqueou temporariamente este arquivo por limite de trafego/downloads.";
+              dropboxRateLimitDetected = true;
+              const cooldownResult = applyDropboxRateLimitCooldownForCandidate(sourceCooldownMap, candidate, {
+                retryAfterMs,
+                retryAfterHeader: response?.headers?.["retry-after"]
+              });
+              if (cooldownResult.blockedUntilMs > 0 && (!nextRetryAtMs || cooldownResult.blockedUntilMs < nextRetryAtMs)) {
+                nextRetryAtMs = cooldownResult.blockedUntilMs;
+              }
+            } else if (response?.data && typeof response.data.destroy === "function") {
+              response.data.destroy();
+            }
+          }
         } else if (response?.data && typeof response.data.destroy === "function") {
           response.data.destroy();
         }
@@ -11176,6 +11311,15 @@ async function createDownloadStream(game, options = {}) {
         statusError.status = response.status;
         if (failureReason) {
           statusError.message = String(failureReason);
+        }
+        if (isDriveCandidate && isDriveQuotaMessage(failureReason)) {
+          statusError.failureCode = "DRIVE_QUOTA";
+        }
+        if (isDropboxSource && (isDropboxRateLimitMessage(failureReason) || response.status === 429)) {
+          statusError.failureCode = "DROPBOX_RATE_LIMIT";
+          if (retryAfterMs > 0) {
+            statusError.retryAfterMs = retryAfterMs;
+          }
         }
         registerFailure(candidate, failureReason);
         lastError = statusError;
@@ -11190,7 +11334,7 @@ async function createDownloadStream(game, options = {}) {
       const isDrive = isDriveCandidate;
 
       if (isDrive && (looksLikeHtml || looksLikeJson || looksLikePlainText)) {
-        const driveId = game.googleDriveFileId || extractDriveId(candidate.url);
+        const driveId = extractDriveId(candidate.url);
         if (!driveId) {
           response.data.destroy();
           lastError = new Error("Nao foi possivel extrair o ID do Google Drive.");
@@ -11309,6 +11453,42 @@ async function createDownloadStream(game, options = {}) {
         continue;
       }
 
+      if (isDropboxSource && looksLikeHtml) {
+        let dropboxReason = "";
+        try {
+          const bodyText = await readStreamAsText(response.data, 384 * 1024);
+          dropboxReason = detectDropboxBlockingReason(bodyText, response.status);
+          if (
+            !dropboxReason &&
+            normalizeTextForMatch(bodyText).includes("dropbox") &&
+            !String(candidate.url || "").toLowerCase().includes("dl=1") &&
+            !String(candidate.url || "").toLowerCase().includes("raw=1")
+          ) {
+            dropboxReason = "Link do Dropbox retornou pagina web. O launcher exige link direto com dl=1 ou raw=1.";
+          }
+        } catch (_bodyError) {
+          // Keep fallback below.
+        }
+        const normalizedReason = String(dropboxReason || "").trim();
+        if (normalizedReason) {
+          if (isDropboxRateLimitMessage(normalizedReason)) {
+            dropboxRateLimitDetected = true;
+            const cooldownResult = applyDropboxRateLimitCooldownForCandidate(sourceCooldownMap, candidate, {
+              retryAfterHeader: response?.headers?.["retry-after"]
+            });
+            if (cooldownResult.blockedUntilMs > 0 && (!nextRetryAtMs || cooldownResult.blockedUntilMs < nextRetryAtMs)) {
+              nextRetryAtMs = cooldownResult.blockedUntilMs;
+            }
+          }
+          lastError = new Error(normalizedReason);
+          if (dropboxRateLimitDetected) {
+            lastError.failureCode = "DROPBOX_RATE_LIMIT";
+          }
+          registerFailure(candidate, normalizedReason);
+          continue;
+        }
+      }
+
       if (looksLikeHtml) {
         response.data.destroy();
         lastError = new Error("A URL retornou HTML em vez do arquivo. Use link direto para o arquivo (.zip/.rar).");
@@ -11341,6 +11521,19 @@ async function createDownloadStream(game, options = {}) {
           nextRetryAtMs = cooldownResult.blockedUntilMs;
         }
       }
+      if (
+        isDropboxSource &&
+        (String(error?.failureCode || "").trim().toUpperCase() === "DROPBOX_RATE_LIMIT" || isDropboxRateLimitMessage(error?.message))
+      ) {
+        dropboxRateLimitDetected = true;
+        const cooldownResult = applyDropboxRateLimitCooldownForCandidate(sourceCooldownMap, candidate, {
+          retryAfterHeader: error?.response?.headers?.["retry-after"],
+          retryAfterMs: error?.retryAfterMs
+        });
+        if (cooldownResult.blockedUntilMs > 0 && (!nextRetryAtMs || cooldownResult.blockedUntilMs < nextRetryAtMs)) {
+          nextRetryAtMs = cooldownResult.blockedUntilMs;
+        }
+      }
       registerFailure(candidate, error.message);
       lastError = error;
     }
@@ -11361,6 +11554,12 @@ async function createDownloadStream(game, options = {}) {
         streamError.nextRetryAtMs = nextRetryAtMs;
         streamError.retryAfterMs = Math.max(0, nextRetryAtMs - Date.now());
       }
+    } else if (dropboxRateLimitDetected) {
+      streamError.failureCode = "DROPBOX_RATE_LIMIT";
+      if (nextRetryAtMs > Date.now()) {
+        streamError.nextRetryAtMs = nextRetryAtMs;
+        streamError.retryAfterMs = Math.max(0, nextRetryAtMs - Date.now());
+      }
     }
     streamError.sourceCooldowns = exportInstallSourceCooldownEntries(sourceCooldownMap);
     throw streamError;
@@ -11370,6 +11569,12 @@ async function createDownloadStream(game, options = {}) {
   streamError.precheckFailures = [...precheckFailures];
   if (driveQuotaDetected) {
     streamError.failureCode = "DRIVE_QUOTA";
+    if (nextRetryAtMs > Date.now()) {
+      streamError.nextRetryAtMs = nextRetryAtMs;
+      streamError.retryAfterMs = Math.max(0, nextRetryAtMs - Date.now());
+    }
+  } else if (dropboxRateLimitDetected) {
+    streamError.failureCode = "DROPBOX_RATE_LIMIT";
     if (nextRetryAtMs > Date.now()) {
       streamError.nextRetryAtMs = nextRetryAtMs;
       streamError.retryAfterMs = Math.max(0, nextRetryAtMs - Date.now());
@@ -11439,6 +11644,7 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
   const sourceCooldownMap = createInstallSourceCooldownMap(sourceCooldowns);
   let retryAfterMsHint = 0;
   let sawDriveQuotaFailure = false;
+  let sawDropboxRateLimitFailure = false;
   const maxAttemptsPerCandidate = Math.max(
     1,
     Math.min(
@@ -11466,12 +11672,15 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
       const streamFailureCode = String(error?.failureCode || "").trim().toUpperCase();
       if (streamFailureCode === "DRIVE_QUOTA") {
         sawDriveQuotaFailure = true;
+      } else if (streamFailureCode === "DROPBOX_RATE_LIMIT") {
+        sawDropboxRateLimitFailure = true;
       }
       const streamRetryAfterMs = Math.max(0, parsePositiveInteger(error?.retryAfterMs));
       if (streamRetryAfterMs > retryAfterMsHint) {
         retryAfterMsHint = streamRetryAfterMs;
       }
-      const retryableStreamError = streamFailureCode !== "DRIVE_QUOTA" && isRetryableDownloadError(error);
+      const retryableStreamError =
+        !["DRIVE_QUOTA", "DROPBOX_RATE_LIMIT"].includes(streamFailureCode) && isRetryableDownloadError(error);
       let hasRetryableCandidate = false;
       for (const url of attemptedUrls) {
         const normalizedUrl = String(url || "").trim();
@@ -11502,6 +11711,8 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
           streamOpenError.failureCode = streamFailureCode;
         } else if (sawDriveQuotaFailure) {
           streamOpenError.failureCode = "DRIVE_QUOTA";
+        } else if (sawDropboxRateLimitFailure) {
+          streamOpenError.failureCode = "DROPBOX_RATE_LIMIT";
         }
         if (retryAfterMsHint > 0) {
           streamOpenError.retryAfterMs = retryAfterMsHint;
@@ -11514,6 +11725,8 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
       }
       if (!error?.failureCode && sawDriveQuotaFailure) {
         error.failureCode = "DRIVE_QUOTA";
+      } else if (!error?.failureCode && sawDropboxRateLimitFailure) {
+        error.failureCode = "DROPBOX_RATE_LIMIT";
       }
       if (!error?.retryAfterMs && retryAfterMsHint > 0) {
         error.retryAfterMs = retryAfterMsHint;
@@ -11642,6 +11855,19 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
           retryAfterMsHint = cooldownResult.retryAfterMs;
         }
       }
+      if (
+        isDropboxCandidate(candidate) &&
+        (String(error?.failureCode || "").trim().toUpperCase() === "DROPBOX_RATE_LIMIT" || isDropboxRateLimitMessage(error?.message))
+      ) {
+        sawDropboxRateLimitFailure = true;
+        const cooldownResult = applyDropboxRateLimitCooldownForCandidate(sourceCooldownMap, candidate, {
+          retryAfterHeader: error?.response?.headers?.["retry-after"],
+          retryAfterMs: error?.retryAfterMs
+        });
+        if (cooldownResult.retryAfterMs > retryAfterMsHint) {
+          retryAfterMsHint = cooldownResult.retryAfterMs;
+        }
+      }
       const retryable = isRetryableDownloadError(error);
       const canRetry = retryable && currentAttempt < maxAttemptsPerCandidate;
       if (canRetry) {
@@ -11663,6 +11889,8 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
   const downloadError = new Error(`Falha ao baixar um arquivo valido. Detalhes: ${details}`);
   if (sawDriveQuotaFailure) {
     downloadError.failureCode = "DRIVE_QUOTA";
+  } else if (sawDropboxRateLimitFailure) {
+    downloadError.failureCode = "DROPBOX_RATE_LIMIT";
   }
   if (retryAfterMsHint > 0) {
     downloadError.retryAfterMs = retryAfterMsHint;
@@ -11796,6 +12024,16 @@ function looksLikeHtmlOrDriveText(buffer) {
     return true;
   }
   if (probe.includes("file does not exist") || probe.includes("requested file was not found")) {
+    return true;
+  }
+  if (
+    probe.includes("dropbox") &&
+    (probe.includes("too many requests") ||
+      probe.includes("temporarily suspended") ||
+      probe.includes("temporarily disabled") ||
+      probe.includes("limite de trafego") ||
+      probe.includes("limite de banda"))
+  ) {
     return true;
   }
   return false;
@@ -12299,6 +12537,8 @@ function computeInstallAutoRetryDelayMs(failureCode, retryCount = 1) {
   let baseDelayMs = INSTALL_AUTO_RETRY_GENERIC_BASE_DELAY_MS;
   if (code === "DRIVE_QUOTA") {
     baseDelayMs = INSTALL_AUTO_RETRY_DRIVE_QUOTA_BASE_DELAY_MS;
+  } else if (code === "DROPBOX_RATE_LIMIT") {
+    baseDelayMs = INSTALL_AUTO_RETRY_DROPBOX_RATE_LIMIT_BASE_DELAY_MS;
   } else if (["DOWNLOAD_FAILED", "DOWNLOAD_INTERRUPTED"].includes(code)) {
     baseDelayMs = INSTALL_AUTO_RETRY_DOWNLOAD_BASE_DELAY_MS;
   }
@@ -12357,8 +12597,10 @@ function buildInstallAutoRetryScheduleMessage(nextRetryAtMs, failureCode = "") {
   const safeCode = String(failureCode || "").trim().toUpperCase();
   const headline =
     safeCode === "DRIVE_QUOTA"
-      ? "Google Drive em limite de downloads."
-      : "Falha temporaria detectada.";
+      ? "Fonte de download em limite de trafego."
+      : safeCode === "DROPBOX_RATE_LIMIT"
+        ? "Dropbox em limite de trafego/download."
+        : "Falha temporaria detectada.";
   if (remainingMs <= 1500) {
     return `${headline} Retomada automatica em instantes.`;
   }
@@ -12398,8 +12640,15 @@ function normalizeInstallFailureMessage(error) {
   if (explicitFailureCode === "DRIVE_QUOTA") {
     return formatInstallFailure(
       "DRIVE_QUOTA",
-      "Google Drive bloqueou temporariamente este arquivo por limite de downloads.",
+      "Fonte de download bloqueou temporariamente este arquivo por limite de trafego/downloads.",
       "Tente mais tarde ou adicione uma fonte espelho em downloadSources/downloadUrls."
+    );
+  }
+  if (explicitFailureCode === "DROPBOX_RATE_LIMIT") {
+    return formatInstallFailure(
+      "DROPBOX_RATE_LIMIT",
+      "Dropbox bloqueou temporariamente este arquivo por limite de trafego/downloads.",
+      "Tente novamente mais tarde ou adicione uma fonte espelho em downloadSources/downloadUrls."
     );
   }
 
@@ -12444,19 +12693,34 @@ function normalizeInstallFailureMessage(error) {
   ) {
     return formatInstallFailure(
       "DRIVE_QUOTA",
-      "Google Drive bloqueou temporariamente este arquivo por limite de downloads.",
+      "Fonte de download bloqueou temporariamente este arquivo por limite de trafego/downloads.",
       "Tente mais tarde ou adicione uma fonte espelho em downloadSources/downloadUrls."
+    );
+  }
+  if (
+    lower.includes("dropbox bloqueou temporariamente") ||
+    lower.includes("dropbox limitou temporariamente") ||
+    lower.includes("dropbox em limite de trafego") ||
+    lower.includes("limite de trafego") ||
+    lower.includes("limite de banda") ||
+    lower.includes("too many requests")
+  ) {
+    return formatInstallFailure(
+      "DROPBOX_RATE_LIMIT",
+      "Dropbox bloqueou temporariamente este arquivo por limite de trafego/downloads.",
+      "Tente novamente mais tarde ou adicione uma fonte espelho em downloadSources/downloadUrls."
     );
   }
   if (
     lower.includes("sem permissao publica") ||
     lower.includes("google drive negou acesso") ||
+    lower.includes("dropbox negou acesso") ||
     lower.includes("access denied")
   ) {
     return formatInstallFailure(
       "DRIVE_ACCESS",
-      "Google Drive negou acesso ao arquivo.",
-      "Confirme compartilhamento publico do arquivo e a googleApiKey."
+      "A fonte de download negou acesso ao arquivo.",
+      "Confirme que o link do Dropbox esta publico e em formato direto (dl=1 ou raw=1)."
     );
   }
   if (lower.includes("retornou html") || lower.includes("retorno html sem arquivo")) {

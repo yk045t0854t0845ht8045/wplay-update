@@ -2,7 +2,7 @@
   "settings": {
     "installRoot": "C:\\wyzer_games",
     "defaultExecutable": "game.exe",
-    "googleApiKey": "",
+    "downloadProvider": "dropbox",
     "__commentCatalog": "Catalogo profissional em tempo real via Supabase (tabela public.launcher_games). games[] abaixo vira fallback/local exemplo.",
     "catalog": {
       "provider": "supabase",
@@ -20,25 +20,25 @@
       "id": "repo",
       "name": "R.E.P.O.",
       "archivePassword": "online-fix.me",
-      "downloadUrl": "https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0",
-      "googleDriveFileId": "1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu",
+      "dropboxSharedUrl": "https://www.dropbox.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY&dl=0",
+      "downloadUrl": "https://www.dropbox.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY&dl=1",
       "downloadSources": [
         {
-          "url": "https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0",
-          "label": "driveusercontent-repo",
-          "kind": "google-drive",
+          "url": "https://www.dropbox.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY&dl=1",
+          "label": "dropbox-dl1",
+          "kind": "dropbox",
           "priority": 5
         },
         {
-          "url": "https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0&confirm=t",
-          "label": "driveusercontent-confirm",
-          "kind": "google-drive",
+          "url": "https://www.dropbox.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY&raw=1",
+          "label": "dropbox-raw1",
+          "kind": "dropbox",
           "priority": 6
         },
         {
-          "url": "https://drive.google.com/uc?export=download&id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu",
-          "label": "drive-uc-fallback",
-          "kind": "google-drive",
+          "url": "https://dl.dropboxusercontent.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY",
+          "label": "dropbox-direct",
+          "kind": "dropbox",
           "priority": 8
         }
       ],
@@ -77,19 +77,19 @@
       "description": "Descricao curta",
       "section": "Catalogo",
       "archive_type": "zip",
-      "download_url": "https://drive.usercontent.google.com/download?id=ID_DO_ARQUIVO&export=download&authuser=0",
-      "google_drive_file_id": "ID_DO_ARQUIVO",
+      "dropbox_shared_url": "https://www.dropbox.com/scl/fi/ID_DO_ARQUIVO/NOME_DO_ARQUIVO.zip?rlkey=SUA_CHAVE&dl=0",
+      "download_url": "https://www.dropbox.com/scl/fi/ID_DO_ARQUIVO/NOME_DO_ARQUIVO.zip?rlkey=SUA_CHAVE&dl=1",
       "download_sources": [
         {
-          "url": "https://drive.usercontent.google.com/download?id=ID_DO_ARQUIVO&export=download&authuser=0",
-          "label": "driveusercontent",
-          "kind": "google-drive",
+          "url": "https://www.dropbox.com/scl/fi/ID_DO_ARQUIVO/NOME_DO_ARQUIVO.zip?rlkey=SUA_CHAVE&dl=1",
+          "label": "dropbox-dl1",
+          "kind": "dropbox",
           "priority": 5
         },
         {
-          "url": "https://drive.google.com/uc?export=download&id=ID_DO_ARQUIVO",
-          "label": "drive-uc-fallback",
-          "kind": "google-drive",
+          "url": "https://www.dropbox.com/scl/fi/ID_DO_ARQUIVO/NOME_DO_ARQUIVO.zip?rlkey=SUA_CHAVE&raw=1",
+          "label": "dropbox-raw1",
+          "kind": "dropbox",
           "priority": 8
         }
       ],

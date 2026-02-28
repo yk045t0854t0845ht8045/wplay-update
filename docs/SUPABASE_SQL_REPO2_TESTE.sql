@@ -1,4 +1,4 @@
--- REPO oficial (Drive only, com confirmacao automatica)
+-- REPO oficial (Dropbox-only, com links diretos robustos)
 -- Execute no SQL Editor do Supabase.
 
 delete from public.launcher_games
@@ -13,10 +13,10 @@ insert into public.launcher_games (
   archive_type,
   archive_password,
   checksum_sha256,
+  dropbox_shared_url,
   download_url,
   download_urls,
   download_sources,
-  google_drive_file_id,
   install_dir_name,
   launch_executable,
   image_url,
@@ -42,34 +42,34 @@ insert into public.launcher_games (
   'repo',
   'R.E.P.O.',
   'Catalogo',
-  'Build de teste do REPO via Google Drive usercontent para validar fluxo de confirmacao automatica de arquivo grande.',
-  'Versao de teste para validar download via Google Drive com pagina de aviso de virus e confirmacao automatica no launcher.',
+  'Build de teste do REPO via Dropbox para validar fluxo profissional de download direto.',
+  'Versao de teste para validar download via Dropbox com resiliencia de fontes e retomada.',
   'rar',
   'online-fix.me',
   'c09b27ed29370ea971e6c1e03bca7dc1ff59f73d391c11dd8f0ff8cbb9fd850e',
-  'https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0',
+  'https://www.dropbox.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY&dl=0',
+  'https://www.dropbox.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY&dl=1',
   '[]'::jsonb,
   '[
     {
-      "url": "https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0",
-      "label": "driveusercontent-repo",
-      "kind": "google-drive",
+      "url": "https://www.dropbox.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY&dl=1",
+      "label": "dropbox-dl1",
+      "kind": "dropbox",
       "priority": 5
     },
     {
-      "url": "https://drive.usercontent.google.com/download?id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu&export=download&authuser=0&confirm=t",
-      "label": "driveusercontent-confirm",
-      "kind": "google-drive",
+      "url": "https://www.dropbox.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY&raw=1",
+      "label": "dropbox-raw1",
+      "kind": "dropbox",
       "priority": 6
     },
     {
-      "url": "https://drive.google.com/uc?export=download&id=1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu",
-      "label": "drive-uc-fallback",
-      "kind": "google-drive",
+      "url": "https://dl.dropboxusercontent.com/scl/fi/SEU_FILE_ID/repo.rar?rlkey=SEU_RLKEY",
+      "label": "dropbox-direct",
+      "kind": "dropbox",
       "priority": 8
     }
   ]'::jsonb,
-  '1zDiy1yX_uuKgKIeIj4vmkgCa0p-qtHyu',
   'REPO',
   E'REPO\\REPO.EXE',
   'https://imgur.com/CkC4BWy.png',
@@ -105,10 +105,10 @@ set
   archive_type = excluded.archive_type,
   archive_password = excluded.archive_password,
   checksum_sha256 = excluded.checksum_sha256,
+  dropbox_shared_url = excluded.dropbox_shared_url,
   download_url = excluded.download_url,
   download_urls = excluded.download_urls,
   download_sources = excluded.download_sources,
-  google_drive_file_id = excluded.google_drive_file_id,
   install_dir_name = excluded.install_dir_name,
   launch_executable = excluded.launch_executable,
   image_url = excluded.image_url,

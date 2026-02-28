@@ -14,7 +14,7 @@ Esse SQL:
 1. cria tabela `public.launcher_games`
 2. cria trigger de `updated_at`
 3. cria policy de leitura para `anon/authenticated`
-4. insere (ou atualiza) o jogo `repo` (Drive-only)
+4. insere (ou atualiza) o jogo `repo` (Dropbox-only)
 
 O SQL opcional de preco Steam:
 
@@ -66,7 +66,7 @@ Exemplo rapido:
 
 ```sql
 insert into public.launcher_games (
-  id, name, section, archive_type, download_url, download_sources, google_drive_file_id,
+  id, name, section, archive_type, dropbox_shared_url, download_url, download_sources,
   install_dir_name, launch_executable, enabled, sort_order
 )
 values (
@@ -74,12 +74,12 @@ values (
   'Meu Jogo',
   'Catalogo',
   'zip',
-  'https://drive.usercontent.google.com/download?id=ID_DO_ARQUIVO&export=download&authuser=0',
+  'https://www.dropbox.com/scl/fi/ID_DO_ARQUIVO/NOME_DO_ARQUIVO.zip?rlkey=SUA_CHAVE&dl=0',
+  'https://www.dropbox.com/scl/fi/ID_DO_ARQUIVO/NOME_DO_ARQUIVO.zip?rlkey=SUA_CHAVE&dl=1',
   '[
-    {"url":"https://drive.usercontent.google.com/download?id=ID_DO_ARQUIVO&export=download&authuser=0","label":"driveusercontent","kind":"google-drive","priority":5},
-    {"url":"https://drive.google.com/uc?export=download&id=ID_DO_ARQUIVO","label":"drive-uc-fallback","kind":"google-drive","priority":8}
+    {"url":"https://www.dropbox.com/scl/fi/ID_DO_ARQUIVO/NOME_DO_ARQUIVO.zip?rlkey=SUA_CHAVE&dl=1","label":"dropbox-dl1","kind":"dropbox","priority":5},
+    {"url":"https://www.dropbox.com/scl/fi/ID_DO_ARQUIVO/NOME_DO_ARQUIVO.zip?rlkey=SUA_CHAVE&raw=1","label":"dropbox-raw1","kind":"dropbox","priority":8}
   ]'::jsonb,
-  'ID_DO_ARQUIVO',
   'MEU_JOGO',
   E'MEU_JOGO\\JOGO.EXE',
   true,
@@ -88,9 +88,9 @@ values (
 on conflict (id) do update
 set
   name = excluded.name,
+  dropbox_shared_url = excluded.dropbox_shared_url,
   download_url = excluded.download_url,
   download_sources = excluded.download_sources,
-  google_drive_file_id = excluded.google_drive_file_id,
   install_dir_name = excluded.install_dir_name,
   launch_executable = excluded.launch_executable,
   enabled = excluded.enabled,
@@ -119,13 +119,13 @@ from cron.job
 where jobname = 'wplay_sync_steam_prices_daily';
 ```
 
-## 6) Upsert pronto: REPO oficial (Google Drive)
+## 6) Upsert pronto: REPO oficial (Dropbox)
 
-Para inserir/atualizar o `REPO` oficial usando link `drive.usercontent`, execute:
+Para inserir/atualizar o `REPO` oficial com links diretos do Dropbox, execute:
 
 - `docs/SUPABASE_SQL_REPO2_TESTE.sql`
 
-Esse SQL remove `repo2` antigo (se existir) e sobe o `repo` oficial com `download_sources` priorizando Drive + fallbacks.
+Esse SQL remove `repo2` antigo (se existir) e sobe o `repo` oficial com `download_sources` priorizando Dropbox + fallbacks.
 
 ## 7) Sem atualizar launcher a cada mudanca
 
