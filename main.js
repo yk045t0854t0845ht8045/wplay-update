@@ -91,6 +91,7 @@ const INSTALL_ROOT_NAME = "wyzer_games";
 const TEMP_DIR_NAME = "_wyzer_temp";
 const MANIFEST_FILE_NAME = ".wyzer_manifest.json";
 const INSTALL_SESSION_STATE_FILE_NAME = "launcher.active-installs.json";
+const DOWNLOAD_SOURCE_PERFORMANCE_STATE_FILE_NAME = "launcher.download-source-performance.json";
 const PLAYTIME_STATE_FILE_NAME = "launcher.playtime.json";
 const CATALOG_SIZE_CACHE_FILE_NAME = "launcher.catalog-size-cache.json";
 const RUNTIME_CONFIG_FILE_NAME = "launcher.runtime.json";
@@ -231,6 +232,29 @@ const DOWNLOAD_RESUME_MIN_BYTES = 256 * 1024;
 const DOWNLOAD_CANDIDATE_MAX_ATTEMPTS = 4;
 const DOWNLOAD_RETRY_BASE_DELAY_MS = 1250;
 const DOWNLOAD_RETRY_MAX_DELAY_MS = 9000;
+const DOWNLOAD_STALL_TIMEOUT_MS = 55 * 1000;
+const DOWNLOAD_STALL_TIMEOUT_MIN_MS = 20 * 1000;
+const DOWNLOAD_STALL_TIMEOUT_MAX_MS = 8 * 60 * 1000;
+const DOWNLOAD_STALL_WATCHDOG_POLL_MS = 4000;
+const DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES = 1024 * 1024;
+const DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS = 120;
+const DOWNLOAD_PROGRESS_EMIT_MIN_DELTA_BYTES = 512 * 1024;
+const DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT = 10;
+const DOWNLOAD_PARALLEL_SEGMENTS_MAX = 16;
+const DOWNLOAD_PARALLEL_MIN_FILE_BYTES = 32 * 1024 * 1024;
+const DOWNLOAD_PARALLEL_MIN_SEGMENT_BYTES = 4 * 1024 * 1024;
+const DOWNLOAD_PARALLEL_SEGMENT_MAX_RETRIES = 3;
+const DOWNLOAD_LATENCY_PROBE_CACHE_TTL_MS = 5 * 60 * 1000;
+const DOWNLOAD_LATENCY_PROBE_DEFAULT_TIMEOUT_MS = 3500;
+const DOWNLOAD_LATENCY_PROBE_DEFAULT_LIMIT = 4;
+const DOWNLOAD_LATENCY_PROBE_CACHE_MAX_ENTRIES = 1800;
+const DOWNLOAD_SOURCE_PERFORMANCE_MAX_RECORDS = 1200;
+const DOWNLOAD_SOURCE_PERFORMANCE_STALE_TTL_MS = 45 * 24 * 60 * 60 * 1000;
+const DOWNLOAD_SOURCE_PERFORMANCE_RECENT_FAILURE_WINDOW_MS = 20 * 60 * 1000;
+const DOWNLOAD_SOURCE_PERFORMANCE_QUOTA_PENALTY_WINDOW_MS = 90 * 60 * 1000;
+const INSTALL_DISK_MIN_BUFFER_BYTES = 320 * 1024 * 1024;
+const INSTALL_DISK_MIN_REQUIRED_BYTES = 420 * 1024 * 1024;
+const INSTALL_DISK_BUFFER_RATIO = 0.18;
 const INSTALL_AUTO_RETRY_MONITOR_MIN_DELAY_MS = 800;
 const INSTALL_AUTO_RETRY_MONITOR_IDLE_DELAY_MS = 60 * 1000;
 const INSTALL_AUTO_RETRY_MAX_ATTEMPTS = 12;
@@ -248,6 +272,8 @@ const INSTALL_AUTO_RETRY_DISABLED_CODES = new Set([
   "INSTALL_PATH_INVALID",
   "DRIVE_ACCESS",
   "INVALID_DOWNLOAD_LINK",
+  "INSTALL_PATH_PERMISSION",
+  "INSUFFICIENT_DISK_SPACE",
   "CHECKSUM_MISMATCH",
   "ARCHIVE_PASSWORD",
   "RAR_TOOL_UNSUPPORTED",
@@ -322,6 +348,11 @@ let installRequestSequence = 0;
 const activeUninstalls = new Set();
 const installSizeCache = new Map();
 let installSessionPersistQueue = Promise.resolve();
+const downloadSourcePerformanceByKey = new Map();
+let downloadSourcePerformanceStateLoaded = false;
+let downloadSourcePerformancePersistQueue = Promise.resolve();
+let downloadSourcePerformancePersistTimer = null;
+const downloadSourceLatencyProbeCacheByKey = new Map();
 const sevenZipExecutableCache = {
   path: ""
 };
@@ -641,6 +672,14 @@ function getInstallSessionStateFilePath() {
     return "";
   }
   return path.join(baseDir, INSTALL_SESSION_STATE_FILE_NAME);
+}
+
+function getDownloadSourcePerformanceStateFilePath() {
+  const baseDir = resolveRuntimeStateDirectory();
+  if (!baseDir) {
+    return "";
+  }
+  return path.join(baseDir, DOWNLOAD_SOURCE_PERFORMANCE_STATE_FILE_NAME);
 }
 
 function getPlaytimeStateFilePath() {
@@ -1391,6 +1430,368 @@ function buildDownloadSourceUrlCooldownKey(urlValue) {
     return "";
   }
   return `url:${normalizedUrl.slice(0, 560)}`;
+}
+
+function normalizeDownloadSourcePerformanceKey(value) {
+  const normalized = normalizeInstallSourceCooldownKey(value);
+  if (!normalized || !normalized.startsWith("url:")) {
+    return "";
+  }
+  return normalized.slice(0, 640);
+}
+
+function buildDownloadSourcePerformanceKey(urlValue) {
+  return normalizeDownloadSourcePerformanceKey(buildDownloadSourceUrlCooldownKey(urlValue));
+}
+
+function normalizeDownloadSourcePerformanceRecord(rawRecord) {
+  if (!rawRecord || typeof rawRecord !== "object") {
+    return null;
+  }
+
+  const key =
+    normalizeDownloadSourcePerformanceKey(rawRecord.key) ||
+    buildDownloadSourcePerformanceKey(rawRecord.url || rawRecord.sourceUrl || rawRecord.source_url);
+  if (!key) {
+    return null;
+  }
+
+  const safeUrl = String(rawRecord.url || rawRecord.sourceUrl || rawRecord.source_url || "")
+    .trim()
+    .toLowerCase()
+    .slice(0, 560);
+  const safeHost = String(rawRecord.host || "").trim().toLowerCase().slice(0, 180);
+  const nowMs = Date.now();
+  const updatedAtMs = toValidTimestampMs(rawRecord.updatedAtMs || rawRecord.updated_at_ms || rawRecord.updatedAt) || nowMs;
+  const lastSuccessAtMs = toValidTimestampMs(
+    rawRecord.lastSuccessAtMs || rawRecord.last_success_at_ms || rawRecord.lastSuccessAt
+  );
+  const lastFailureAtMs = toValidTimestampMs(
+    rawRecord.lastFailureAtMs || rawRecord.last_failure_at_ms || rawRecord.lastFailureAt
+  );
+
+  return {
+    key,
+    url: safeUrl,
+    host: safeHost,
+    successCount: Math.max(0, parsePositiveInteger(rawRecord.successCount || rawRecord.success_count)),
+    failureCount: Math.max(0, parsePositiveInteger(rawRecord.failureCount || rawRecord.failure_count)),
+    recentFailureStreak: Math.max(
+      0,
+      parsePositiveInteger(rawRecord.recentFailureStreak || rawRecord.recent_failure_streak)
+    ),
+    bytesDownloaded: Math.max(0, parseSizeBytes(rawRecord.bytesDownloaded || rawRecord.bytes_downloaded)),
+    totalDurationMs: Math.max(0, parsePositiveInteger(rawRecord.totalDurationMs || rawRecord.total_duration_ms)),
+    emaSpeedBps: Math.max(0, Number(rawRecord.emaSpeedBps || rawRecord.ema_speed_bps || 0)),
+    bestSpeedBps: Math.max(0, Number(rawRecord.bestSpeedBps || rawRecord.best_speed_bps || 0)),
+    lastSpeedBps: Math.max(0, Number(rawRecord.lastSpeedBps || rawRecord.last_speed_bps || 0)),
+    lastFailureCode: String(rawRecord.lastFailureCode || rawRecord.last_failure_code || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9_]/g, "")
+      .slice(0, 64),
+    lastFailureMessage: trimProcessOutput(rawRecord.lastFailureMessage || rawRecord.last_failure_message || "", 220),
+    lastSuccessAtMs,
+    lastFailureAtMs,
+    updatedAtMs
+  };
+}
+
+function getDownloadSourcePerformanceSnapshotForPersistence() {
+  const nowMs = Date.now();
+  const staleCutoffMs = nowMs - DOWNLOAD_SOURCE_PERFORMANCE_STALE_TTL_MS;
+  const records = [];
+  for (const record of downloadSourcePerformanceByKey.values()) {
+    const normalized = normalizeDownloadSourcePerformanceRecord(record);
+    if (!normalized) {
+      continue;
+    }
+    const lastActivityAtMs = Math.max(
+      normalized.updatedAtMs,
+      normalized.lastSuccessAtMs || 0,
+      normalized.lastFailureAtMs || 0
+    );
+    if (lastActivityAtMs < staleCutoffMs) {
+      continue;
+    }
+    records.push(normalized);
+  }
+
+  records.sort((left, right) => {
+    const rightActivity = Math.max(right.updatedAtMs, right.lastSuccessAtMs || 0, right.lastFailureAtMs || 0);
+    const leftActivity = Math.max(left.updatedAtMs, left.lastSuccessAtMs || 0, left.lastFailureAtMs || 0);
+    return rightActivity - leftActivity;
+  });
+  return records.slice(0, DOWNLOAD_SOURCE_PERFORMANCE_MAX_RECORDS);
+}
+
+function readDownloadSourcePerformanceStateSync() {
+  const filePath = getDownloadSourcePerformanceStateFilePath();
+  if (!filePath) {
+    return [];
+  }
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      return [];
+    }
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const records = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.records) ? parsed.records : [];
+    return records
+      .map((record) => normalizeDownloadSourcePerformanceRecord(record))
+      .filter(Boolean);
+  } catch (error) {
+    appendStartupLog(`[DOWNLOAD_SOURCE_PERF_READ_ERROR] ${formatStartupErrorForLog(error)}`);
+    return [];
+  }
+}
+
+function ensureDownloadSourcePerformanceStateLoadedSync() {
+  if (downloadSourcePerformanceStateLoaded) {
+    return;
+  }
+
+  downloadSourcePerformanceByKey.clear();
+  const records = readDownloadSourcePerformanceStateSync();
+  for (const record of records) {
+    downloadSourcePerformanceByKey.set(record.key, record);
+  }
+  downloadSourcePerformanceStateLoaded = true;
+}
+
+async function writeDownloadSourcePerformanceStateToDisk() {
+  const filePath = getDownloadSourcePerformanceStateFilePath();
+  if (!filePath) {
+    return;
+  }
+
+  const records = getDownloadSourcePerformanceSnapshotForPersistence();
+  if (records.length === 0) {
+    await fsp.rm(filePath, { force: true }).catch(() => {});
+    return;
+  }
+
+  try {
+    await fsp.mkdir(path.dirname(filePath), { recursive: true });
+    await fsp.writeFile(
+      filePath,
+      JSON.stringify(
+        {
+          updatedAt: new Date().toISOString(),
+          records
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    appendStartupLog(`[DOWNLOAD_SOURCE_PERF_WRITE_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function queuePersistDownloadSourcePerformanceState() {
+  downloadSourcePerformancePersistQueue = downloadSourcePerformancePersistQueue
+    .catch(() => {})
+    .then(async () => {
+      await writeDownloadSourcePerformanceStateToDisk();
+    });
+  return downloadSourcePerformancePersistQueue;
+}
+
+function schedulePersistDownloadSourcePerformanceState(delayMs = 1600) {
+  const safeDelayMs = Math.max(200, Math.min(6000, parsePositiveInteger(delayMs) || 1600));
+  if (downloadSourcePerformancePersistTimer) {
+    clearTimeout(downloadSourcePerformancePersistTimer);
+    downloadSourcePerformancePersistTimer = null;
+  }
+  downloadSourcePerformancePersistTimer = setTimeout(() => {
+    downloadSourcePerformancePersistTimer = null;
+    void queuePersistDownloadSourcePerformanceState();
+  }, safeDelayMs);
+  if (typeof downloadSourcePerformancePersistTimer?.unref === "function") {
+    downloadSourcePerformancePersistTimer.unref();
+  }
+}
+
+function flushDownloadSourcePerformanceStateSync() {
+  const filePath = getDownloadSourcePerformanceStateFilePath();
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    const records = getDownloadSourcePerformanceSnapshotForPersistence();
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    if (records.length === 0) {
+      fs.rmSync(filePath, { force: true });
+      return;
+    }
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          updatedAt: new Date().toISOString(),
+          records
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    appendStartupLog(`[DOWNLOAD_SOURCE_PERF_FLUSH_ERROR] ${formatStartupErrorForLog(error)}`);
+  }
+}
+
+function getDownloadSourcePerformanceRecordByCandidate(candidate) {
+  ensureDownloadSourcePerformanceStateLoadedSync();
+  const key = buildDownloadSourcePerformanceKey(candidate?.url || candidate);
+  if (!key) {
+    return null;
+  }
+  return downloadSourcePerformanceByKey.get(key) || null;
+}
+
+function getDownloadSourcePerformancePriorityOffset(candidate) {
+  const record = getDownloadSourcePerformanceRecordByCandidate(candidate);
+  if (!record) {
+    return 0;
+  }
+
+  const nowMs = Date.now();
+  const successCount = Math.max(0, Number(record.successCount || 0));
+  const failureCount = Math.max(0, Number(record.failureCount || 0));
+  const recentFailureStreak = Math.max(0, Number(record.recentFailureStreak || 0));
+  const emaSpeedBps = Math.max(0, Number(record.emaSpeedBps || 0));
+  const lastSuccessAtMs = Math.max(0, Number(record.lastSuccessAtMs || 0));
+  const lastFailureAtMs = Math.max(0, Number(record.lastFailureAtMs || 0));
+  const lastFailureCode = String(record.lastFailureCode || "").trim().toUpperCase();
+
+  let offset = 0;
+  const speedMbps = emaSpeedBps / (1024 * 1024);
+  if (speedMbps > 0) {
+    offset -= Math.min(14, speedMbps * 0.62);
+  }
+
+  if (successCount > 0) {
+    offset -= Math.min(7, Math.log2(successCount + 1) * 1.65);
+  }
+
+  if (failureCount > 0) {
+    offset += Math.min(8, Math.log2(failureCount + 1) * 2.2);
+  }
+
+  if (recentFailureStreak > 0) {
+    offset += Math.min(18, recentFailureStreak * 2.8);
+  }
+
+  if (lastFailureAtMs > 0 && nowMs - lastFailureAtMs <= DOWNLOAD_SOURCE_PERFORMANCE_RECENT_FAILURE_WINDOW_MS) {
+    offset += 8;
+  }
+  if (
+    lastFailureAtMs > 0 &&
+    nowMs - lastFailureAtMs <= DOWNLOAD_SOURCE_PERFORMANCE_QUOTA_PENALTY_WINDOW_MS &&
+    (lastFailureCode === "DRIVE_QUOTA" || lastFailureCode === "DROPBOX_RATE_LIMIT")
+  ) {
+    offset += 14;
+  }
+
+  if (lastSuccessAtMs > 0 && nowMs - lastSuccessAtMs <= 15 * 60 * 1000) {
+    offset -= 2.5;
+  }
+
+  return Math.max(-24, Math.min(28, offset));
+}
+
+function updateDownloadSourcePerformanceRecord(candidateOrUrl, updater) {
+  ensureDownloadSourcePerformanceStateLoadedSync();
+  const safeUrl = String(candidateOrUrl?.url || candidateOrUrl || "").trim().toLowerCase();
+  const key = buildDownloadSourcePerformanceKey(safeUrl);
+  if (!key) {
+    return null;
+  }
+
+  const nowMs = Date.now();
+  const baseRecord =
+    downloadSourcePerformanceByKey.get(key) ||
+    normalizeDownloadSourcePerformanceRecord({
+      key,
+      url: safeUrl,
+      host: (() => {
+        try {
+          return new URL(safeUrl).hostname.toLowerCase();
+        } catch (_error) {
+          return "";
+        }
+      })(),
+      updatedAtMs: nowMs
+    });
+  if (!baseRecord) {
+    return null;
+  }
+
+  const nextRecord = normalizeDownloadSourcePerformanceRecord(
+    updater && typeof updater === "function" ? updater({ ...baseRecord }) : baseRecord
+  );
+  if (!nextRecord) {
+    return null;
+  }
+  nextRecord.updatedAtMs = nowMs;
+  downloadSourcePerformanceByKey.set(key, nextRecord);
+  schedulePersistDownloadSourcePerformanceState();
+  return nextRecord;
+}
+
+function noteDownloadSourcePerformanceSuccess(candidateOrUrl, payload = {}) {
+  const safePayload = payload && typeof payload === "object" ? payload : {};
+  const downloadedBytes = Math.max(0, parseSizeBytes(safePayload.downloadedBytes || safePayload.bytes));
+  const durationMs = Math.max(1, parsePositiveInteger(safePayload.durationMs || safePayload.duration_ms));
+  const explicitSpeedBps = Math.max(0, Number(safePayload.speedBps || safePayload.speed_bps || 0));
+  const measuredSpeedBps = explicitSpeedBps > 0 ? explicitSpeedBps : downloadedBytes > 0 ? (downloadedBytes * 1000) / durationMs : 0;
+  const nowMs = Date.now();
+  updateDownloadSourcePerformanceRecord(candidateOrUrl, (record) => {
+    const previousEmaSpeed = Math.max(0, Number(record.emaSpeedBps || 0));
+    const nextEmaSpeed =
+      measuredSpeedBps > 0
+        ? previousEmaSpeed > 0
+          ? previousEmaSpeed * 0.72 + measuredSpeedBps * 0.28
+          : measuredSpeedBps
+        : previousEmaSpeed;
+    return {
+      ...record,
+      successCount: Math.max(0, Number(record.successCount || 0)) + 1,
+      recentFailureStreak: 0,
+      bytesDownloaded: Math.max(0, Number(record.bytesDownloaded || 0)) + downloadedBytes,
+      totalDurationMs: Math.max(0, Number(record.totalDurationMs || 0)) + durationMs,
+      emaSpeedBps: nextEmaSpeed,
+      lastSpeedBps: measuredSpeedBps > 0 ? measuredSpeedBps : Math.max(0, Number(record.lastSpeedBps || 0)),
+      bestSpeedBps: Math.max(Math.max(0, Number(record.bestSpeedBps || 0)), measuredSpeedBps),
+      lastSuccessAtMs: nowMs,
+      lastFailureCode: "",
+      lastFailureMessage: ""
+    };
+  });
+}
+
+function noteDownloadSourcePerformanceFailure(candidateOrUrl, payload = {}) {
+  const safePayload = payload && typeof payload === "object" ? payload : {};
+  const failureCode = String(safePayload.failureCode || safePayload.failure_code || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, "")
+    .slice(0, 64);
+  const failureMessage = trimProcessOutput(safePayload.message || safePayload.errorMessage || "", 220);
+  const nowMs = Date.now();
+  updateDownloadSourcePerformanceRecord(candidateOrUrl, (record) => ({
+    ...record,
+    failureCount: Math.max(0, Number(record.failureCount || 0)) + 1,
+    recentFailureStreak: Math.max(0, Number(record.recentFailureStreak || 0)) + 1,
+    lastFailureAtMs: nowMs,
+    lastFailureCode: failureCode || String(record.lastFailureCode || ""),
+    lastFailureMessage: failureMessage || String(record.lastFailureMessage || "")
+  }));
 }
 
 function getDownloadSourceCooldownKeysForCandidate(game, candidate) {
@@ -7113,6 +7514,35 @@ function mapSupabaseCatalogRowToEntry(row) {
       "maxDownloadRetries",
       "max_download_retries"
     ]),
+    downloadParallelEnabled: pickFirstDefinedValue(merged, [
+      "downloadParallelEnabled",
+      "download_parallel_enabled",
+      "parallelDownloadEnabled",
+      "parallel_download_enabled"
+    ]),
+    downloadParallelSegments: pickFirstDefinedValue(merged, [
+      "downloadParallelSegments",
+      "download_parallel_segments",
+      "parallelDownloadSegments",
+      "parallel_download_segments"
+    ]),
+    downloadParallelMinFileBytes: pickFirstDefinedValue(merged, [
+      "downloadParallelMinFileBytes",
+      "download_parallel_min_file_bytes"
+    ]),
+    downloadParallelMinSegmentBytes: pickFirstDefinedValue(merged, [
+      "downloadParallelMinSegmentBytes",
+      "download_parallel_min_segment_bytes"
+    ]),
+    downloadStallTimeoutMs: pickFirstDefinedValue(merged, ["downloadStallTimeoutMs", "download_stall_timeout_ms"]),
+    downloadProgressEmitIntervalMs: pickFirstDefinedValue(merged, [
+      "downloadProgressEmitIntervalMs",
+      "download_progress_emit_interval_ms"
+    ]),
+    downloadProgressEmitMinDeltaBytes: pickFirstDefinedValue(merged, [
+      "downloadProgressEmitMinDeltaBytes",
+      "download_progress_emit_min_delta_bytes"
+    ]),
     downloadUrl: pickFirstDefinedValue(merged, ["downloadUrl", "download_url"]),
     downloadUrls,
     downloadSources,
@@ -7218,6 +7648,159 @@ function formatTransferSpeedShort(bytesPerSecond) {
   if (value < 1024) return `${Math.round(value)} B/s`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB/s`;
   return `${(value / (1024 * 1024)).toFixed(2)} MB/s`;
+}
+
+function resolveDownloadProgressEmitIntervalMs(game = {}) {
+  const configured = parsePositiveInteger(game?.downloadProgressEmitIntervalMs || game?.download_progress_emit_interval_ms);
+  const baseValue = configured > 0 ? configured : DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS;
+  return Math.max(60, Math.min(1000, baseValue));
+}
+
+function resolveDownloadProgressEmitMinDeltaBytes(game = {}) {
+  const configured = parsePositiveInteger(game?.downloadProgressEmitMinDeltaBytes || game?.download_progress_emit_min_delta_bytes);
+  const baseValue = configured > 0 ? configured : DOWNLOAD_PROGRESS_EMIT_MIN_DELTA_BYTES;
+  return Math.max(64 * 1024, Math.min(8 * 1024 * 1024, baseValue));
+}
+
+function createThrottledTransferProgressNotifier(onProgress, options = {}) {
+  if (typeof onProgress !== "function") {
+    return () => {};
+  }
+
+  const safeOptions = options && typeof options === "object" ? options : {};
+  const intervalMs = Math.max(0, parsePositiveInteger(safeOptions.intervalMs));
+  const minDeltaBytes = Math.max(0, parsePositiveInteger(safeOptions.minDeltaBytes));
+  let lastEmitAtMs = 0;
+  let lastEmitBytes = Math.max(0, parseSizeBytes(safeOptions.initialBytes));
+
+  return (downloadedBytes, totalBytes, meta = {}, force = false) => {
+    const downloaded = Math.max(0, parseSizeBytes(downloadedBytes));
+    const total = Math.max(0, parseSizeBytes(totalBytes));
+    const nowMs = Date.now();
+    const elapsedMs = Math.max(0, nowMs - lastEmitAtMs);
+    const deltaBytes = Math.max(0, downloaded - lastEmitBytes);
+    const completed = total > 0 && downloaded >= total;
+    const shouldEmit =
+      force ||
+      lastEmitAtMs <= 0 ||
+      (intervalMs > 0 && elapsedMs >= intervalMs) ||
+      (minDeltaBytes > 0 && deltaBytes >= minDeltaBytes) ||
+      completed;
+    if (!shouldEmit) {
+      return;
+    }
+    lastEmitAtMs = nowMs;
+    lastEmitBytes = downloaded;
+    onProgress(downloaded, total, meta);
+  };
+}
+
+function resolveParallelDownloadMinFileBytes(game = {}) {
+  const configured = parsePositiveInteger(game?.downloadParallelMinFileBytes || game?.download_parallel_min_file_bytes);
+  const baseValue = configured > 0 ? configured : DOWNLOAD_PARALLEL_MIN_FILE_BYTES;
+  return Math.max(8 * 1024 * 1024, Math.min(10 * 1024 * 1024 * 1024, baseValue));
+}
+
+function resolveParallelDownloadMinSegmentBytes(game = {}) {
+  const configured = parsePositiveInteger(
+    game?.downloadParallelMinSegmentBytes || game?.download_parallel_min_segment_bytes
+  );
+  const baseValue = configured > 0 ? configured : DOWNLOAD_PARALLEL_MIN_SEGMENT_BYTES;
+  return Math.max(1024 * 1024, Math.min(512 * 1024 * 1024, baseValue));
+}
+
+function resolveParallelDownloadSegments(game = {}, totalBytes = 0) {
+  const enabled = parseBoolean(
+    game?.downloadParallelEnabled ?? game?.download_parallel_enabled ?? game?.parallelDownloadEnabled,
+    true
+  );
+  if (!enabled) {
+    return 1;
+  }
+
+  const knownTotalBytes = Math.max(0, parseSizeBytes(totalBytes));
+  const minFileBytes = resolveParallelDownloadMinFileBytes(game);
+  if (knownTotalBytes > 0 && knownTotalBytes < minFileBytes) {
+    return 1;
+  }
+
+  const requestedSegments = parsePositiveInteger(
+    game?.downloadParallelSegments ||
+      game?.download_parallel_segments ||
+      game?.parallelDownloadSegments ||
+      game?.parallel_download_segments
+  );
+  const desiredSegments = requestedSegments > 0 ? requestedSegments : DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT;
+  const minSegmentBytes = resolveParallelDownloadMinSegmentBytes(game);
+  const maxSegmentsBySize =
+    knownTotalBytes > 0 ? Math.max(1, Math.floor(knownTotalBytes / Math.max(1, minSegmentBytes))) : desiredSegments;
+  const maxAllowed = Math.max(1, Math.min(DOWNLOAD_PARALLEL_SEGMENTS_MAX, maxSegmentsBySize));
+  return Math.max(1, Math.min(desiredSegments, maxAllowed));
+}
+
+function responseSupportsRangeRequests(response) {
+  const acceptRanges = String(response?.headers?.["accept-ranges"] || "").toLowerCase();
+  const contentRange = String(response?.headers?.["content-range"] || "").toLowerCase();
+  if (acceptRanges.includes("bytes")) {
+    return true;
+  }
+  return contentRange.includes("bytes");
+}
+
+function canUseParallelRangeDownloadForCandidate(game, candidate, response, totalBytes, resumeStartBytes = 0) {
+  const safeTotalBytes = Math.max(0, parseSizeBytes(totalBytes));
+  const safeResumeBytes = Math.max(0, parseSizeBytes(resumeStartBytes));
+  if (safeTotalBytes <= 0) {
+    return false;
+  }
+  if (safeResumeBytes > 0) {
+    return false;
+  }
+  if (isGoogleDriveCandidate(candidate)) {
+    return false;
+  }
+  const segments = resolveParallelDownloadSegments(game, safeTotalBytes);
+  if (segments <= 1) {
+    return false;
+  }
+  return responseSupportsRangeRequests(response);
+}
+
+function buildParallelDownloadRanges(startByte, endByte, segmentCount) {
+  const safeStart = Math.max(0, Math.floor(Number(startByte) || 0));
+  const safeEnd = Math.max(safeStart, Math.floor(Number(endByte) || 0));
+  const safeSegments = Math.max(1, Math.floor(Number(segmentCount) || 1));
+  const totalBytes = safeEnd - safeStart + 1;
+  if (totalBytes <= 1 || safeSegments <= 1) {
+    return [
+      {
+        index: 0,
+        start: safeStart,
+        end: safeEnd
+      }
+    ];
+  }
+
+  const baseSize = Math.floor(totalBytes / safeSegments);
+  const remainder = totalBytes % safeSegments;
+  const ranges = [];
+  let cursor = safeStart;
+  for (let index = 0; index < safeSegments; index += 1) {
+    const extra = index < remainder ? 1 : 0;
+    const segmentSize = baseSize + extra;
+    const segmentStart = cursor;
+    const segmentEnd = Math.min(safeEnd, segmentStart + Math.max(1, segmentSize) - 1);
+    ranges.push({
+      index,
+      start: segmentStart,
+      end: segmentEnd
+    });
+    cursor = segmentEnd + 1;
+    if (cursor > safeEnd) {
+      break;
+    }
+  }
+  return ranges;
 }
 
 function pushUniqueFailure(target, value) {
@@ -7369,6 +7952,184 @@ async function getFileSizeIfExists(targetPath) {
   } catch (_error) {
     return 0;
   }
+}
+
+async function ensureDirectoryWriteAccess(targetDir) {
+  const normalizedTarget = normalizeAbsolutePath(targetDir);
+  if (!normalizedTarget) {
+    throw new Error("Caminho de escrita invalido.");
+  }
+  await fsp.mkdir(normalizedTarget, { recursive: true });
+  const probeName = `.origin_write_probe_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.tmp`;
+  const probePath = path.join(normalizedTarget, probeName);
+  try {
+    await fsp.writeFile(probePath, "origin-write-probe", { encoding: "utf8", flag: "wx" });
+  } finally {
+    await fsp.rm(probePath, { force: true }).catch(() => {});
+  }
+}
+
+async function getFreeDiskBytesForPath(targetPath) {
+  if (typeof fsp.statfs !== "function") {
+    return 0;
+  }
+  const normalizedTarget = normalizeAbsolutePath(targetPath);
+  if (!normalizedTarget) {
+    return 0;
+  }
+  try {
+    const stats = await fsp.statfs(normalizedTarget);
+    const blockSize = Number(stats?.bsize || stats?.frsize || 0);
+    const availableBlocks = Number(stats?.bavail ?? stats?.bfree ?? 0);
+    if (!Number.isFinite(blockSize) || blockSize <= 0 || !Number.isFinite(availableBlocks) || availableBlocks < 0) {
+      return 0;
+    }
+    const freeBytes = Math.floor(blockSize * availableBlocks);
+    return Number.isFinite(freeBytes) && freeBytes > 0 ? freeBytes : 0;
+  } catch (_error) {
+    return 0;
+  }
+}
+
+function resolveKnownInstallArchiveBytes(game, localArchiveBytes = 0) {
+  const candidates = [
+    localArchiveBytes,
+    game?.catalogSizeBytesField,
+    game?.catalogSizeBytes,
+    game?.sizeBytes,
+    game?.size
+  ];
+  for (const candidate of candidates) {
+    const parsed = parseSizeBytes(candidate);
+    if (parsed > 0) {
+      return parsed;
+    }
+  }
+  return 0;
+}
+
+function estimateRequiredFreeBytesForInstall(game, knownArchiveBytes = 0, existingPartialArchiveBytes = 0) {
+  const safeArchiveBytes = Math.max(0, parseSizeBytes(knownArchiveBytes));
+  if (safeArchiveBytes <= 0) {
+    return {
+      knownArchiveBytes: 0,
+      remainingArchiveBytes: 0,
+      expectedInstallBytes: 0,
+      safetyBufferBytes: 0,
+      requiredFreeBytes: 0
+    };
+  }
+
+  const safePartialBytes = Math.max(0, parseSizeBytes(existingPartialArchiveBytes));
+  const remainingArchiveBytes = Math.max(0, safeArchiveBytes - safePartialBytes);
+  const archiveType = normalizeArchiveType(game?.archiveType);
+  const installMultiplier = archiveType === "none" ? 1.05 : 1.35;
+  const expectedInstallBytes = Math.max(safeArchiveBytes, Math.ceil(safeArchiveBytes * installMultiplier));
+  const safetyBufferBytes = Math.max(INSTALL_DISK_MIN_BUFFER_BYTES, Math.ceil(safeArchiveBytes * INSTALL_DISK_BUFFER_RATIO));
+  const requiredFreeBytes = Math.max(
+    INSTALL_DISK_MIN_REQUIRED_BYTES,
+    remainingArchiveBytes + expectedInstallBytes + safetyBufferBytes
+  );
+  return {
+    knownArchiveBytes: safeArchiveBytes,
+    remainingArchiveBytes,
+    expectedInstallBytes,
+    safetyBufferBytes,
+    requiredFreeBytes
+  };
+}
+
+function resolveDownloadStallTimeoutMs(game) {
+  const configuredTimeoutMs = parsePositiveInteger(game?.downloadStallTimeoutMs || game?.download_stall_timeout_ms);
+  const rawTimeoutMs = configuredTimeoutMs > 0 ? configuredTimeoutMs : DOWNLOAD_STALL_TIMEOUT_MS;
+  return Math.max(DOWNLOAD_STALL_TIMEOUT_MIN_MS, Math.min(DOWNLOAD_STALL_TIMEOUT_MAX_MS, rawTimeoutMs));
+}
+
+async function runInstallPreflightChecks(options = {}) {
+  const safeOptions = options && typeof options === "object" ? options : {};
+  const game = safeOptions.game && typeof safeOptions.game === "object" ? safeOptions.game : {};
+  const installRoot = normalizeAbsolutePath(safeOptions.installRoot || "");
+  const tempDir = normalizeAbsolutePath(safeOptions.tempDir || "");
+  const usingLocalArchive = safeOptions.usingLocalArchive === true;
+  const localArchivePath = String(safeOptions.localArchivePath || "").trim();
+  const existingPartialArchiveBytes = Math.max(0, parseSizeBytes(safeOptions.existingPartialArchiveBytes));
+
+  if (!installRoot || !tempDir) {
+    const invalidPathError = new Error(
+      formatInstallFailure(
+        "INSTALL_PATH_INVALID",
+        "Foi detectado um caminho de instalacao invalido.",
+        "Revise a pasta de instalacao configurada no launcher."
+      )
+    );
+    invalidPathError.failureCode = "INSTALL_PATH_INVALID";
+    throw invalidPathError;
+  }
+
+  try {
+    await ensureDirectoryWriteAccess(installRoot);
+    await ensureDirectoryWriteAccess(tempDir);
+  } catch (error) {
+    const writeAccessError = new Error(
+      formatInstallFailure(
+        "INSTALL_PATH_PERMISSION",
+        "O launcher nao conseguiu gravar na pasta de instalacao selecionada.",
+        "Execute o launcher como administrador ou selecione outra pasta de instalacao."
+      )
+    );
+    writeAccessError.failureCode = "INSTALL_PATH_PERMISSION";
+    writeAccessError.cause = error;
+    throw writeAccessError;
+  }
+
+  let localArchiveBytes = 0;
+  if (usingLocalArchive) {
+    try {
+      const localStat = await fsp.stat(localArchivePath);
+      if (!localStat.isFile() || Number(localStat.size || 0) <= 0) {
+        throw new Error("Arquivo local invalido.");
+      }
+      localArchiveBytes = Math.floor(Number(localStat.size || 0));
+    } catch (error) {
+      const localArchiveError = new Error(
+        formatInstallFailure(
+          "SOURCE_NOT_CONFIGURED",
+          "Arquivo local configurado para instalacao nao foi encontrado ou esta invalido.",
+          "Revise localArchiveFile no catalogo e confirme o arquivo no disco."
+        )
+      );
+      localArchiveError.failureCode = "SOURCE_NOT_CONFIGURED";
+      localArchiveError.cause = error;
+      throw localArchiveError;
+    }
+  }
+
+  const knownArchiveBytes = resolveKnownInstallArchiveBytes(game, localArchiveBytes);
+  const sizeBudget = estimateRequiredFreeBytesForInstall(game, knownArchiveBytes, existingPartialArchiveBytes);
+  const freeBytes = await getFreeDiskBytesForPath(installRoot);
+  if (sizeBudget.requiredFreeBytes > 0 && freeBytes > 0 && freeBytes < sizeBudget.requiredFreeBytes) {
+    const requiredLabel = formatBytesShort(sizeBudget.requiredFreeBytes);
+    const freeLabel = formatBytesShort(freeBytes);
+    const diskError = new Error(
+      formatInstallFailure(
+        "INSUFFICIENT_DISK_SPACE",
+        "Espaco em disco insuficiente para concluir a instalacao.",
+        `Necessario aproximadamente ${requiredLabel}; disponivel ${freeLabel}.`
+      )
+    );
+    diskError.failureCode = "INSUFFICIENT_DISK_SPACE";
+    diskError.requiredBytes = sizeBudget.requiredFreeBytes;
+    diskError.freeBytes = freeBytes;
+    throw diskError;
+  }
+
+  return {
+    ok: true,
+    checkedFreeSpace: freeBytes > 0,
+    freeBytes,
+    knownArchiveBytes: sizeBudget.knownArchiveBytes,
+    requiredFreeBytes: sizeBudget.requiredFreeBytes
+  };
 }
 
 function getInstallSizeCacheKey(installDir) {
@@ -9949,6 +10710,55 @@ async function readCatalogBundle(options = {}) {
           ) || DOWNLOAD_CANDIDATE_MAX_ATTEMPTS
         )
       );
+      const downloadParallelEnabled = parseBoolean(
+        entry.downloadParallelEnabled ?? entry.download_parallel_enabled ?? entry.parallelDownloadEnabled,
+        true
+      );
+      const downloadParallelSegments = Math.max(
+        1,
+        Math.min(
+          DOWNLOAD_PARALLEL_SEGMENTS_MAX,
+          parsePositiveInteger(
+            entry.downloadParallelSegments ||
+              entry.download_parallel_segments ||
+              entry.parallelDownloadSegments ||
+              entry.parallel_download_segments
+          ) || DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT
+        )
+      );
+      const downloadParallelMinFileBytes = Math.max(
+        8 * 1024 * 1024,
+        parsePositiveInteger(entry.downloadParallelMinFileBytes || entry.download_parallel_min_file_bytes) ||
+          DOWNLOAD_PARALLEL_MIN_FILE_BYTES
+      );
+      const downloadParallelMinSegmentBytes = Math.max(
+        1024 * 1024,
+        parsePositiveInteger(entry.downloadParallelMinSegmentBytes || entry.download_parallel_min_segment_bytes) ||
+          DOWNLOAD_PARALLEL_MIN_SEGMENT_BYTES
+      );
+      const downloadStallTimeoutMs = Math.max(
+        DOWNLOAD_STALL_TIMEOUT_MIN_MS,
+        Math.min(
+          DOWNLOAD_STALL_TIMEOUT_MAX_MS,
+          parsePositiveInteger(entry.downloadStallTimeoutMs || entry.download_stall_timeout_ms) || DOWNLOAD_STALL_TIMEOUT_MS
+        )
+      );
+      const downloadProgressEmitIntervalMs = Math.max(
+        60,
+        Math.min(
+          1000,
+          parsePositiveInteger(entry.downloadProgressEmitIntervalMs || entry.download_progress_emit_interval_ms) ||
+            DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS
+        )
+      );
+      const downloadProgressEmitMinDeltaBytes = Math.max(
+        64 * 1024,
+        Math.min(
+          8 * 1024 * 1024,
+          parsePositiveInteger(entry.downloadProgressEmitMinDeltaBytes || entry.download_progress_emit_min_delta_bytes) ||
+            DOWNLOAD_PROGRESS_EMIT_MIN_DELTA_BYTES
+        )
+      );
       const launchExecutable = String(entry.launchExecutable || defaultExecutable).trim() || "game.exe";
       const installDirName = String(entry.installDirName || name).trim() || name;
       const section = String(entry.section || "Jogos gratis").trim() || "Jogos gratis";
@@ -10028,6 +10838,13 @@ async function readCatalogBundle(options = {}) {
         archivePassword,
         checksumSha256,
         downloadMaxAttempts,
+        downloadParallelEnabled,
+        downloadParallelSegments,
+        downloadParallelMinFileBytes,
+        downloadParallelMinSegmentBytes,
+        downloadStallTimeoutMs,
+        downloadProgressEmitIntervalMs,
+        downloadProgressEmitMinDeltaBytes,
         downloadUrl,
         downloadUrls,
         downloadSources,
@@ -10491,6 +11308,155 @@ function getDownloadCandidateAffinityScore(gameId, candidateUrl) {
   return hashTextToUnsignedInt(`${DOWNLOAD_SOURCE_SELECTION_SEED}|${safeGameId}|${safeUrl}`);
 }
 
+function resolveDownloadLatencyProbeLimit(game = {}) {
+  const configured = parsePositiveInteger(game?.downloadLatencyProbeLimit || game?.download_latency_probe_limit);
+  const baseValue = configured > 0 ? configured : DOWNLOAD_LATENCY_PROBE_DEFAULT_LIMIT;
+  return Math.max(1, Math.min(8, baseValue));
+}
+
+function resolveDownloadLatencyProbeTimeoutMs(game = {}) {
+  const configured = parsePositiveInteger(game?.downloadLatencyProbeTimeoutMs || game?.download_latency_probe_timeout_ms);
+  const baseValue = configured > 0 ? configured : DOWNLOAD_LATENCY_PROBE_DEFAULT_TIMEOUT_MS;
+  return Math.max(1200, Math.min(8000, baseValue));
+}
+
+function isLatencyProbeEligibleCandidate(candidate) {
+  return !isGoogleDriveCandidate(candidate);
+}
+
+async function measureDownloadCandidateLatencyMs(candidate, timeoutMs) {
+  const startedAtMs = Date.now();
+  let response = null;
+  try {
+    response = await axios({
+      method: "GET",
+      url: candidate.url,
+      responseType: "stream",
+      maxRedirects: 6,
+      timeout: Math.max(1200, Number(timeoutMs) || DOWNLOAD_LATENCY_PROBE_DEFAULT_TIMEOUT_MS),
+      maxBodyLength: 1024 * 1024,
+      maxContentLength: 1024 * 1024,
+      validateStatus: () => true,
+      headers: {
+        "User-Agent": "Origin/2.0",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        Range: "bytes=0-0"
+      }
+    });
+    const status = Number(response?.status || 0);
+    const latencyMs = Math.max(1, Date.now() - startedAtMs);
+    if (status >= 400) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return latencyMs;
+  } catch (_error) {
+    return Number.POSITIVE_INFINITY;
+  } finally {
+    try {
+      if (response?.data && typeof response.data.destroy === "function") {
+        response.data.destroy();
+      }
+    } catch (_error) {
+      // Ignore probe stream close failures.
+    }
+  }
+}
+
+async function rankDownloadCandidatesByLatencyProbe(candidates = [], game = {}) {
+  const source = Array.isArray(candidates) ? candidates : [];
+  if (source.length <= 1) {
+    return source;
+  }
+
+  const enabled = parseBoolean(
+    game?.downloadLatencyProbeEnabled ?? game?.download_latency_probe_enabled ?? game?.latencyProbeEnabled,
+    true
+  );
+  if (!enabled) {
+    return source;
+  }
+
+  const probeLimit = resolveDownloadLatencyProbeLimit(game);
+  const probeTimeoutMs = resolveDownloadLatencyProbeTimeoutMs(game);
+  const nowMs = Date.now();
+  const staged = source.map((candidate, index) => ({
+    candidate,
+    index,
+    key: buildDownloadSourcePerformanceKey(candidate?.url || candidate),
+    latencyMs: Number.POSITIVE_INFINITY
+  }));
+
+  let probeCount = 0;
+  const pendingProbes = [];
+  for (const entry of staged) {
+    if (probeCount >= probeLimit) {
+      break;
+    }
+    if (!isLatencyProbeEligibleCandidate(entry.candidate)) {
+      continue;
+    }
+    const cacheEntry = entry.key ? downloadSourceLatencyProbeCacheByKey.get(entry.key) : null;
+    const cachedLatency =
+      cacheEntry &&
+      Number.isFinite(Number(cacheEntry.latencyMs)) &&
+      Number(cacheEntry.latencyMs) > 0 &&
+      nowMs - Number(cacheEntry.measuredAtMs || 0) <= DOWNLOAD_LATENCY_PROBE_CACHE_TTL_MS
+        ? Number(cacheEntry.latencyMs)
+        : 0;
+    if (cachedLatency > 0) {
+      entry.latencyMs = cachedLatency;
+      continue;
+    }
+    probeCount += 1;
+    pendingProbes.push(
+      (async () => {
+        const measuredLatencyMs = await measureDownloadCandidateLatencyMs(entry.candidate, probeTimeoutMs);
+        entry.latencyMs = measuredLatencyMs;
+        if (entry.key) {
+          downloadSourceLatencyProbeCacheByKey.set(entry.key, {
+            latencyMs: measuredLatencyMs,
+            measuredAtMs: Date.now()
+          });
+        }
+      })()
+    );
+  }
+
+  if (pendingProbes.length > 0) {
+    await Promise.allSettled(pendingProbes);
+  }
+
+  if (downloadSourceLatencyProbeCacheByKey.size > DOWNLOAD_LATENCY_PROBE_CACHE_MAX_ENTRIES) {
+    const staleCutoffMs = Date.now() - DOWNLOAD_LATENCY_PROBE_CACHE_TTL_MS;
+    for (const [key, entry] of downloadSourceLatencyProbeCacheByKey.entries()) {
+      if (downloadSourceLatencyProbeCacheByKey.size <= DOWNLOAD_LATENCY_PROBE_CACHE_MAX_ENTRIES) {
+        break;
+      }
+      const measuredAtMs = Number(entry?.measuredAtMs || 0);
+      if (measuredAtMs <= 0 || measuredAtMs < staleCutoffMs) {
+        downloadSourceLatencyProbeCacheByKey.delete(key);
+      }
+    }
+  }
+
+  return [...staged]
+    .sort((left, right) => {
+      const leftLatency = Number(left.latencyMs);
+      const rightLatency = Number(right.latencyMs);
+      const leftKnown = Number.isFinite(leftLatency) && leftLatency > 0 && leftLatency < Number.POSITIVE_INFINITY;
+      const rightKnown = Number.isFinite(rightLatency) && rightLatency > 0 && rightLatency < Number.POSITIVE_INFINITY;
+      if (leftKnown && rightKnown) {
+        if (Math.abs(leftLatency - rightLatency) >= 16) {
+          return leftLatency - rightLatency;
+        }
+      } else if (leftKnown !== rightKnown) {
+        return leftKnown ? -1 : 1;
+      }
+      return left.index - right.index;
+    })
+    .map((entry) => entry.candidate);
+}
+
 function sortCandidatesForDistributedDownloads(candidates = [], game = {}) {
   const safeGameId = String(game?.id || game?.name || "").trim();
   return [...candidates].sort((left, right) => {
@@ -10498,10 +11464,14 @@ function sortCandidatesForDistributedDownloads(candidates = [], game = {}) {
     const rightPriority = Number(right?.priority);
     const safeLeftPriority = Number.isFinite(leftPriority) ? leftPriority : 9999;
     const safeRightPriority = Number.isFinite(rightPriority) ? rightPriority : 9999;
+    const leftPerfOffset = getDownloadSourcePerformancePriorityOffset(left);
+    const rightPerfOffset = getDownloadSourcePerformancePriorityOffset(right);
+    const leftAdjustedPriority = safeLeftPriority + leftPerfOffset;
+    const rightAdjustedPriority = safeRightPriority + rightPerfOffset;
     const leftIsDrive = isGoogleDriveCandidate(left);
     const rightIsDrive = isGoogleDriveCandidate(right);
 
-    if (leftIsDrive && rightIsDrive) {
+    if (Math.abs(leftAdjustedPriority - rightAdjustedPriority) <= 0.45 && leftIsDrive && rightIsDrive) {
       // Legacy: distribute load among similar endpoints when multiple candidates share near priority.
       if (Math.abs(safeLeftPriority - safeRightPriority) <= 8) {
         const affinityDiff =
@@ -10511,6 +11481,10 @@ function sortCandidatesForDistributedDownloads(candidates = [], game = {}) {
           return affinityDiff;
         }
       }
+    }
+
+    if (leftAdjustedPriority !== rightAdjustedPriority) {
+      return leftAdjustedPriority - rightAdjustedPriority;
     }
 
     if (safeLeftPriority !== safeRightPriority) {
@@ -11098,7 +12072,7 @@ function isRetryableHttpStatus(status) {
 
 function isRetryableDownloadError(error) {
   const failureCode = String(error?.failureCode || "").trim().toUpperCase();
-  if (failureCode === "DRIVE_QUOTA" || failureCode === "DROPBOX_RATE_LIMIT") {
+  if (failureCode === "DRIVE_QUOTA" || failureCode === "DROPBOX_RATE_LIMIT" || failureCode === "DOWNLOAD_STALLED") {
     return true;
   }
 
@@ -11144,6 +12118,8 @@ function isRetryableDownloadError(error) {
     lower.includes("temporari") ||
     lower.includes("timeout") ||
     lower.includes("timed out") ||
+    lower.includes("sem progresso") ||
+    lower.includes("download stalled") ||
     lower.includes("network") ||
     lower.includes("socket hang up") ||
     lower.includes("stream has been aborted") ||
@@ -11167,8 +12143,11 @@ async function createDownloadStream(game, options = {}) {
   const requestedRangeHeader = buildDownloadRangeHeader(resumeFromBytes, metadataProbe);
   const requestTimeoutMs = Math.max(3_000, Number(options.timeoutMs) || DOWNLOAD_STREAM_TIMEOUT_MS);
   const sourceCooldownMap = options?.sourceCooldownMap instanceof Map ? options.sourceCooldownMap : new Map();
-  const orderedCandidates = sortCandidatesForDistributedDownloads(normalizeDownloadCandidates(game), game);
-  const candidates = orderedCandidates.filter((candidate) => !skipped.has(String(candidate.url).toLowerCase()));
+  const priorityOrderedCandidates = sortCandidatesForDistributedDownloads(normalizeDownloadCandidates(game), game);
+  const latencyRankedCandidates = await rankDownloadCandidatesByLatencyProbe(priorityOrderedCandidates, game).catch(
+    () => priorityOrderedCandidates
+  );
+  const candidates = latencyRankedCandidates.filter((candidate) => !skipped.has(String(candidate.url).toLowerCase()));
   if (!candidates.length) {
     throw new Error("Nenhuma fonte de download disponivel para tentativa.");
   }
@@ -11614,9 +12593,35 @@ async function verifyDownloadedChecksum(archivePath, expectedSha256 = "") {
   return computed;
 }
 
-function createPauseAwarePassThroughTransform(runControl, onChunk) {
+function createPauseAwarePassThroughTransform(runControl, onChunk, options = {}) {
+  const safeOptions = options && typeof options === "object" ? options : {};
+  const writableHighWaterMark = parsePositiveInteger(safeOptions.writableHighWaterMark);
+  const readableHighWaterMark = parsePositiveInteger(safeOptions.readableHighWaterMark);
+  const supportsFastPath =
+    runControl &&
+    typeof runControl.isPaused === "function" &&
+    typeof runControl.isCanceled === "function" &&
+    typeof runControl.waitIfPaused === "function";
+
   return new Transform({
+    ...(writableHighWaterMark > 0 ? { writableHighWaterMark } : {}),
+    ...(readableHighWaterMark > 0 ? { readableHighWaterMark } : {}),
     transform(chunk, _encoding, callback) {
+      if (supportsFastPath) {
+        try {
+          if (!runControl.isPaused() && !runControl.isCanceled()) {
+            if (typeof onChunk === "function") {
+              onChunk(chunk);
+            }
+            callback(null, chunk);
+            return;
+          }
+        } catch (error) {
+          callback(error);
+          return;
+        }
+      }
+
       Promise.resolve()
         .then(async () => {
           if (runControl && typeof runControl.waitIfPaused === "function") {
@@ -11632,6 +12637,267 @@ function createPauseAwarePassThroughTransform(runControl, onChunk) {
   });
 }
 
+async function downloadFileWithParallelRanges({
+  game,
+  destinationPath,
+  sourceUrl,
+  sourceLabel,
+  totalBytes,
+  runControl,
+  onProgress,
+  refreshProgressTimestamp,
+  requestTimeoutMs = DOWNLOAD_STREAM_TIMEOUT_MS
+}) {
+  const safeTotalBytes = Math.max(0, parseSizeBytes(totalBytes));
+  if (safeTotalBytes <= 0) {
+    throw new Error("Nao foi possivel calcular o tamanho total para download segmentado.");
+  }
+
+  const segmentsToUse = resolveParallelDownloadSegments(game, safeTotalBytes);
+  if (segmentsToUse <= 1) {
+    throw new Error("Download segmentado indisponivel para este arquivo.");
+  }
+
+  const ranges = buildParallelDownloadRanges(0, safeTotalBytes - 1, segmentsToUse);
+  if (ranges.length <= 1) {
+    throw new Error("Nao foi possivel dividir o download em segmentos paralelos.");
+  }
+
+  const emitProgress = createThrottledTransferProgressNotifier(onProgress, {
+    intervalMs: resolveDownloadProgressEmitIntervalMs(game),
+    minDeltaBytes: resolveDownloadProgressEmitMinDeltaBytes(game),
+    initialBytes: 0
+  });
+
+  await fsp.rm(destinationPath, { force: true }).catch(() => {});
+  const bootstrapHandle = await fsp.open(destinationPath, "w");
+  try {
+    await bootstrapHandle.truncate(safeTotalBytes);
+  } finally {
+    await bootstrapHandle.close().catch(() => {});
+  }
+
+  let downloadedBytes = 0;
+  let lastSampleAt = Date.now();
+  let lastSampleBytes = 0;
+  let lastSpeedBps = 0;
+  const transferStartedAtMs = Date.now();
+  const requestControllers = new Set();
+  let terminalError = null;
+
+  const abortAllRequests = (reason = "parallel-download-abort") => {
+    for (const controller of requestControllers) {
+      try {
+        controller.abort(reason);
+      } catch (_error) {
+        // Ignore abort failures.
+      }
+    }
+  };
+
+  const reportProgress = (deltaBytes, force = false) => {
+    const safeDelta = Math.max(0, parseSizeBytes(deltaBytes));
+    downloadedBytes += safeDelta;
+    const now = Date.now();
+    const elapsedMs = Math.max(1, now - lastSampleAt);
+    const deltaSampleBytes = Math.max(0, downloadedBytes - lastSampleBytes);
+    const instantBps = (deltaSampleBytes * 1000) / elapsedMs;
+    if (Number.isFinite(instantBps) && instantBps >= 0) {
+      lastSpeedBps = lastSpeedBps > 0 ? lastSpeedBps * 0.65 + instantBps * 0.35 : instantBps;
+    }
+    lastSampleAt = now;
+    lastSampleBytes = downloadedBytes;
+    if (typeof refreshProgressTimestamp === "function") {
+      refreshProgressTimestamp();
+    }
+    emitProgress(
+      downloadedBytes,
+      safeTotalBytes,
+      {
+        speedBps: Math.max(0, lastSpeedBps),
+        sourceLabel,
+        sourceUrl,
+        segmented: true,
+        segments: ranges.length
+      },
+      force
+    );
+  };
+
+  const isRetryableSegmentError = (error) => {
+    const normalizedFailureCode = String(error?.failureCode || "").trim().toUpperCase();
+    if (normalizedFailureCode === "DROPBOX_RATE_LIMIT" || normalizedFailureCode === "DRIVE_QUOTA") {
+      return true;
+    }
+    if (isRetryableDownloadError(error)) {
+      return true;
+    }
+    return isRetryableHttpStatus(parseHttpStatusFromErrorValue(error));
+  };
+
+  const downloadSegmentRange = async (range) => {
+    const segmentLength = range.end - range.start + 1;
+    let retryAttempt = 0;
+    while (retryAttempt <= DOWNLOAD_PARALLEL_SEGMENT_MAX_RETRIES) {
+      if (terminalError) {
+        throw terminalError;
+      }
+      if (runControl && typeof runControl.waitIfPaused === "function") {
+        await runControl.waitIfPaused();
+      }
+
+      const controller = new AbortController();
+      requestControllers.add(controller);
+      let attemptBytesWritten = 0;
+      let response = null;
+      try {
+        response = await axios({
+          method: "GET",
+          url: sourceUrl,
+          responseType: "stream",
+          maxRedirects: 8,
+          timeout: Math.max(3_000, Number(requestTimeoutMs) || DOWNLOAD_STREAM_TIMEOUT_MS),
+          maxBodyLength: Infinity,
+          maxContentLength: Infinity,
+          validateStatus: () => true,
+          decompress: false,
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "Origin/2.0",
+            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+            Range: `bytes=${range.start}-${range.end}`
+          }
+        });
+
+        const status = Number(response?.status || 0);
+        if (status >= 400) {
+          if (response?.data && typeof response.data.destroy === "function") {
+            response.data.destroy();
+          }
+          const statusError = new Error(`HTTP ${status} durante download segmentado.`);
+          statusError.status = status;
+          statusError.response = {
+            status,
+            headers: response?.headers || {}
+          };
+          if (isDropboxCandidate(sourceUrl) && status === 429) {
+            statusError.failureCode = "DROPBOX_RATE_LIMIT";
+          }
+          throw statusError;
+        }
+
+        if (status !== 206) {
+          if (response?.data && typeof response.data.destroy === "function") {
+            response.data.destroy();
+          }
+          const unsupportedError = new Error(`Servidor nao aceitou Range para segmento ${range.index + 1}.`);
+          unsupportedError.status = status;
+          unsupportedError.failureCode = "DOWNLOAD_PARALLEL_UNSUPPORTED";
+          throw unsupportedError;
+        }
+
+        const progressTransform = createPauseAwarePassThroughTransform(runControl, (chunk) => {
+          const chunkBytes = parseSizeBytes(chunk?.length);
+          if (chunkBytes <= 0) {
+            return;
+          }
+          attemptBytesWritten += chunkBytes;
+          reportProgress(chunkBytes, false);
+        }, {
+          writableHighWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES,
+          readableHighWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES
+        });
+
+        await pipeline(
+          response.data,
+          progressTransform,
+          fs.createWriteStream(destinationPath, {
+            flags: "r+",
+            start: range.start,
+            highWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES
+          })
+        );
+
+        if (attemptBytesWritten !== segmentLength) {
+          const partialError = new Error(
+            `Segmento ${range.index + 1} incompleto (${attemptBytesWritten}/${segmentLength} bytes).`
+          );
+          partialError.failureCode = "DOWNLOAD_INTERRUPTED";
+          throw partialError;
+        }
+
+        return;
+      } catch (error) {
+        if (attemptBytesWritten > 0) {
+          downloadedBytes = Math.max(0, downloadedBytes - attemptBytesWritten);
+          lastSampleBytes = Math.min(lastSampleBytes, downloadedBytes);
+        }
+
+        const shouldRetry =
+          retryAttempt < DOWNLOAD_PARALLEL_SEGMENT_MAX_RETRIES &&
+          isRetryableSegmentError(error) &&
+          !terminalError;
+        if (!shouldRetry) {
+          throw error;
+        }
+        retryAttempt += 1;
+        const retryDelayMs = computeDownloadRetryDelayMs(retryAttempt);
+        await waitForMilliseconds(retryDelayMs);
+      } finally {
+        requestControllers.delete(controller);
+      }
+    }
+  };
+
+  let nextRangeIndex = 0;
+  const workerCount = Math.min(ranges.length, segmentsToUse);
+  const workers = Array.from({ length: workerCount }, () => (async () => {
+    while (true) {
+      if (terminalError) {
+        throw terminalError;
+      }
+      const currentIndex = nextRangeIndex;
+      nextRangeIndex += 1;
+      if (currentIndex >= ranges.length) {
+        return;
+      }
+      const range = ranges[currentIndex];
+      try {
+        await downloadSegmentRange(range);
+      } catch (error) {
+        if (!terminalError) {
+          terminalError = error;
+          abortAllRequests("parallel-segment-error");
+        }
+        throw error;
+      }
+    }
+  })());
+
+  try {
+    await Promise.all(workers);
+  } catch (error) {
+    const parallelError = error instanceof Error ? error : new Error(String(error || "Falha no download segmentado."));
+    if (!parallelError.failureCode && String(parallelError?.message || "").toLowerCase().includes("range")) {
+      parallelError.failureCode = "DOWNLOAD_PARALLEL_UNSUPPORTED";
+    }
+    throw parallelError;
+  } finally {
+    abortAllRequests("parallel-download-complete");
+  }
+
+  reportProgress(0, true);
+  const transferDurationMs = Math.max(1, Date.now() - transferStartedAtMs);
+  const averageSpeedBps = safeTotalBytes > 0 ? (safeTotalBytes * 1000) / transferDurationMs : Math.max(0, lastSpeedBps);
+  return {
+    downloadedBytes: safeTotalBytes,
+    totalBytes: safeTotalBytes,
+    segmentsUsed: workerCount,
+    durationMs: transferDurationMs,
+    averageSpeedBps
+  };
+}
+
 async function downloadFile({ game, destinationPath, onProgress, runControl, sourceCooldowns = [] }) {
   const allCandidates = normalizeDownloadCandidates(game);
   if (!allCandidates.length) {
@@ -11639,6 +12905,7 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
   }
 
   const blockedCandidates = new Set();
+  const parallelDisabledSourceUrls = new Set();
   const attemptCountBySourceUrl = new Map();
   const failures = [];
   const sourceCooldownMap = createInstallSourceCooldownMap(sourceCooldowns);
@@ -11670,6 +12937,12 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
     } catch (error) {
       const attemptedUrls = Array.isArray(error?.attemptedUrls) ? error.attemptedUrls : [];
       const streamFailureCode = String(error?.failureCode || "").trim().toUpperCase();
+      for (const attemptedUrl of attemptedUrls) {
+        noteDownloadSourcePerformanceFailure(attemptedUrl, {
+          failureCode: streamFailureCode || "DOWNLOAD_STREAM_OPEN_FAILED",
+          message: String(error?.message || "Falha ao abrir stream de download.")
+        });
+      }
       if (streamFailureCode === "DRIVE_QUOTA") {
         sawDriveQuotaFailure = true;
       } else if (streamFailureCode === "DROPBOX_RATE_LIMIT") {
@@ -11735,7 +13008,7 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
       throw error;
     }
 
-    const {
+    let {
       response,
       sourceUrl,
       candidate,
@@ -11757,6 +13030,7 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
     const sourceKey = String(sourceUrl || "").trim();
     const currentAttempt = Math.max(0, Number(attemptCountBySourceUrl.get(sourceKey) || 0)) + 1;
     attemptCountBySourceUrl.set(sourceKey, currentAttempt);
+    const candidateAttemptStartedAtMs = Date.now();
 
     const resumeStartBytes =
       resumeAccepted === true && Number(resumeRequestedBytes) >= DOWNLOAD_RESUME_MIN_BYTES
@@ -11780,19 +13054,89 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
     let lastSampleAt = Date.now();
     let lastSampleBytes = downloadedBytes;
     let lastSpeedBps = 0;
+    let lastProgressAtMs = Date.now();
+    let progressTransform = null;
+    let stallWatchdogTimer = null;
+    let stallWatchdogTriggered = false;
     const sourceLabel = getDownloadCandidateLabel(candidate);
+    const emitProgress = createThrottledTransferProgressNotifier(onProgress, {
+      intervalMs: resolveDownloadProgressEmitIntervalMs(game),
+      minDeltaBytes: resolveDownloadProgressEmitMinDeltaBytes(game),
+      initialBytes: downloadedBytes
+    });
+    const stallTimeoutMs = resolveDownloadStallTimeoutMs(game);
+    const stallWatchdogPollMs = Math.max(
+      1200,
+      Math.min(DOWNLOAD_STALL_WATCHDOG_POLL_MS, Math.floor(stallTimeoutMs / 3))
+    );
+    const refreshProgressTimestamp = () => {
+      lastProgressAtMs = Date.now();
+    };
+    const stopStallWatchdog = () => {
+      if (!stallWatchdogTimer) {
+        return;
+      }
+      clearInterval(stallWatchdogTimer);
+      stallWatchdogTimer = null;
+    };
+    const triggerStallWatchdog = () => {
+      if (stallWatchdogTriggered) {
+        return;
+      }
+      stallWatchdogTriggered = true;
+      const stallSeconds = Math.max(1, Math.round(stallTimeoutMs / 1000));
+      const stalledError = new Error(`Download sem progresso por ${stallSeconds}s.`);
+      stalledError.code = "ETIMEDOUT";
+      stalledError.failureCode = "DOWNLOAD_STALLED";
+      stalledError.retryAfterMs = computeDownloadRetryDelayMs(currentAttempt);
+      try {
+        progressTransform?.destroy(stalledError);
+      } catch (_error) {
+        // Ignore transform abort errors.
+      }
+      try {
+        response?.data?.destroy(stalledError);
+      } catch (_error) {
+        // Ignore stream abort errors.
+      }
+    };
+    const startStallWatchdog = () => {
+      stopStallWatchdog();
+      if (!Number.isFinite(stallTimeoutMs) || stallTimeoutMs <= 0) {
+        return;
+      }
+      stallWatchdogTimer = setInterval(() => {
+        if (stallWatchdogTriggered) {
+          return;
+        }
+        if (runControl?.isCanceled?.()) {
+          return;
+        }
+        if (runControl?.isPaused?.()) {
+          refreshProgressTimestamp();
+          return;
+        }
+        if (Date.now() - lastProgressAtMs < stallTimeoutMs) {
+          return;
+        }
+        triggerStallWatchdog();
+      }, stallWatchdogPollMs);
+      if (typeof stallWatchdogTimer?.unref === "function") {
+        stallWatchdogTimer.unref();
+      }
+    };
 
-    if (downloadedBytes > 0 && typeof onProgress === "function") {
-      onProgress(downloadedBytes, totalBytes, {
+    if (downloadedBytes > 0) {
+      emitProgress(downloadedBytes, totalBytes, {
         speedBps: 0,
         sourceLabel,
         sourceUrl,
         resumed: true,
         resumedBytes: downloadedBytes
-      });
+      }, true);
     }
 
-    const progressTransform = createPauseAwarePassThroughTransform(runControl, (chunk) => {
+    progressTransform = createPauseAwarePassThroughTransform(runControl, (chunk) => {
       downloadedBytes += chunk.length;
       const now = Date.now();
       const elapsedMs = Math.max(1, now - lastSampleAt);
@@ -11803,29 +13147,108 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
       }
       lastSampleAt = now;
       lastSampleBytes = downloadedBytes;
-
-      if (typeof onProgress === "function") {
-        onProgress(downloadedBytes, totalBytes, {
-          speedBps: Math.max(0, lastSpeedBps),
-          sourceLabel,
-          sourceUrl
-        });
-      }
+      refreshProgressTimestamp();
+      emitProgress(downloadedBytes, totalBytes, {
+        speedBps: Math.max(0, lastSpeedBps),
+        sourceLabel,
+        sourceUrl
+      });
+    }, {
+      writableHighWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES,
+      readableHighWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES
     });
 
     try {
-      await pipeline(
-        response.data,
-        progressTransform,
-        fs.createWriteStream(
-          destinationPath,
+      const allowParallelForSource = !parallelDisabledSourceUrls.has(sourceKey);
+      const canUseParallelDownload =
+        allowParallelForSource &&
+        canUseParallelRangeDownloadForCandidate(game, candidate, response, totalBytes, resumeStartBytes);
+      let completedWithParallel = false;
+      if (canUseParallelDownload) {
+        if (response?.data && typeof response.data.destroy === "function") {
+          response.data.destroy();
+        }
+        try {
+          const parallelResult = await downloadFileWithParallelRanges({
+            game,
+            destinationPath,
+            sourceUrl,
+            sourceLabel,
+            totalBytes,
+            runControl,
+            onProgress,
+            refreshProgressTimestamp
+          });
+          completedWithParallel = true;
+          downloadedBytes = Math.max(downloadedBytes, parseSizeBytes(parallelResult?.downloadedBytes || totalBytes));
+          noteDownloadSourcePerformanceSuccess(candidate, {
+            downloadedBytes: parseSizeBytes(parallelResult?.downloadedBytes || totalBytes),
+            durationMs: Math.max(1, Date.now() - candidateAttemptStartedAtMs),
+            speedBps: Number(parallelResult?.averageSpeedBps || 0)
+          });
+        } catch (parallelError) {
+          const parallelFailureCode = String(parallelError?.failureCode || "").trim().toUpperCase();
+          const canFallbackToSingle =
+            parallelFailureCode === "DOWNLOAD_PARALLEL_UNSUPPORTED" || parallelFailureCode === "DOWNLOAD_INTERRUPTED";
+          if (!canFallbackToSingle) {
+            throw parallelError;
+          }
+          parallelDisabledSourceUrls.add(sourceKey);
+          downloadedBytes = resumeStartBytes;
+          lastSampleAt = Date.now();
+          lastSampleBytes = downloadedBytes;
+          lastSpeedBps = 0;
+          const fallbackResponse = await axios({
+            method: "GET",
+            url: sourceUrl,
+            responseType: "stream",
+            maxRedirects: 8,
+            timeout: Math.max(3_000, Number(DOWNLOAD_STREAM_TIMEOUT_MS)),
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+            validateStatus: () => true,
+            headers: {
+              "User-Agent": "Origin/2.0",
+              "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8"
+            }
+          });
+          if (Number(fallbackResponse?.status || 0) >= 400) {
+            const fallbackError = new Error(`HTTP ${fallbackResponse.status} ao reabrir stream principal.`);
+            fallbackError.status = Number(fallbackResponse.status || 0);
+            fallbackError.response = {
+              status: fallbackResponse.status,
+              headers: fallbackResponse?.headers || {}
+            };
+            throw fallbackError;
+          }
+          response = fallbackResponse;
+        }
+      }
+
+      if (!completedWithParallel) {
+        const writeStreamOptions =
           resumeStartBytes > 0
             ? {
-                flags: "a"
+                flags: "a",
+                highWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES
               }
-            : {}
-        )
-      );
+            : {
+                highWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES
+              };
+        startStallWatchdog();
+        await pipeline(
+          response.data,
+          progressTransform,
+          fs.createWriteStream(destinationPath, writeStreamOptions)
+        );
+      }
+
+      emitProgress(downloadedBytes, totalBytes, {
+        speedBps: Math.max(0, lastSpeedBps),
+        sourceLabel,
+        sourceUrl,
+        completed: true
+      }, true);
       if (totalBytes > 0 && downloadedBytes > 0 && downloadedBytes < totalBytes) {
         throw new Error(`Download incompleto (${downloadedBytes}/${totalBytes} bytes).`);
       }
@@ -11833,6 +13256,11 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
       if (normalizeArchiveType(game.archiveType) !== "none") {
         await testArchiveIntegrity(destinationPath, game);
       }
+      noteDownloadSourcePerformanceSuccess(candidate, {
+        downloadedBytes: Math.max(0, downloadedBytes - resumeStartBytes),
+        durationMs: Math.max(1, Date.now() - candidateAttemptStartedAtMs),
+        speedBps: Math.max(0, lastSpeedBps)
+      });
       clearInstallSourceCooldownForCandidate(sourceCooldownMap, game, candidate);
       return {
         sourceUrl,
@@ -11844,6 +13272,17 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
         sourceCooldowns: exportInstallSourceCooldownEntries(sourceCooldownMap)
       };
     } catch (error) {
+      const normalizedFailureCode = String(error?.failureCode || "").trim().toUpperCase();
+      if (normalizedFailureCode === "DOWNLOAD_STALLED") {
+        const retryDelay = Math.max(1200, computeDownloadRetryDelayMs(currentAttempt));
+        if (retryDelay > retryAfterMsHint) {
+          retryAfterMsHint = retryDelay;
+        }
+      }
+      noteDownloadSourcePerformanceFailure(candidate, {
+        failureCode: normalizedFailureCode || "DOWNLOAD_FAILED",
+        message: String(error?.message || "Falha na transferencia do arquivo.")
+      });
       const label = sourceLabel || getDownloadCandidateLabel(candidate || sourceKey);
       if (isGoogleDriveCandidate(candidate) && isDriveQuotaMessage(error?.message)) {
         sawDriveQuotaFailure = true;
@@ -11877,11 +13316,15 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
         continue;
       }
 
-      await fsp.rm(destinationPath, { force: true }).catch(() => {});
+      if (!retryable) {
+        await fsp.rm(destinationPath, { force: true }).catch(() => {});
+      }
       pushUniqueFailure(failures, `${label}: ${String(error?.message || "falha desconhecida")}`);
       if (sourceKey) {
         blockedCandidates.add(sourceKey);
       }
+    } finally {
+      stopStallWatchdog();
     }
   }
 
@@ -11909,11 +13352,18 @@ async function copyLocalArchiveToPath({ sourcePath, destinationPath, onProgress,
   let lastSampleAt = Date.now();
   let lastSampleBytes = 0;
   let lastSpeedBps = 0;
+  const emitProgress = createThrottledTransferProgressNotifier(onProgress, {
+    intervalMs: resolveDownloadProgressEmitIntervalMs({}),
+    minDeltaBytes: resolveDownloadProgressEmitMinDeltaBytes({}),
+    initialBytes: 0
+  });
   if (runControl && typeof runControl.waitIfPaused === "function") {
     await runControl.waitIfPaused();
   }
 
-  const input = fs.createReadStream(sourcePath);
+  const input = fs.createReadStream(sourcePath, {
+    highWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES
+  });
   const progressTransform = createPauseAwarePassThroughTransform(runControl, (chunk) => {
     copiedBytes += chunk.length;
     const now = Date.now();
@@ -11925,17 +13375,29 @@ async function copyLocalArchiveToPath({ sourcePath, destinationPath, onProgress,
     }
     lastSampleAt = now;
     lastSampleBytes = copiedBytes;
-
-    if (typeof onProgress === "function") {
-      onProgress(copiedBytes, stat.size, {
-        speedBps: Math.max(0, lastSpeedBps),
-        sourceLabel: "arquivo-local",
-        sourceUrl: sourcePath
-      });
-    }
+    emitProgress(copiedBytes, stat.size, {
+      speedBps: Math.max(0, lastSpeedBps),
+      sourceLabel: "arquivo-local",
+      sourceUrl: sourcePath
+    });
+  }, {
+    writableHighWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES,
+    readableHighWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES
   });
 
-  await pipeline(input, progressTransform, fs.createWriteStream(destinationPath));
+  await pipeline(
+    input,
+    progressTransform,
+    fs.createWriteStream(destinationPath, {
+      highWaterMark: DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES
+    })
+  );
+  emitProgress(copiedBytes, stat.size, {
+    speedBps: Math.max(0, lastSpeedBps),
+    sourceLabel: "arquivo-local",
+    sourceUrl: sourcePath,
+    completed: true
+  }, true);
   return {
     sourcePath,
     totalBytes: stat.size,
@@ -12539,7 +14001,7 @@ function computeInstallAutoRetryDelayMs(failureCode, retryCount = 1) {
     baseDelayMs = INSTALL_AUTO_RETRY_DRIVE_QUOTA_BASE_DELAY_MS;
   } else if (code === "DROPBOX_RATE_LIMIT") {
     baseDelayMs = INSTALL_AUTO_RETRY_DROPBOX_RATE_LIMIT_BASE_DELAY_MS;
-  } else if (["DOWNLOAD_FAILED", "DOWNLOAD_INTERRUPTED"].includes(code)) {
+  } else if (["DOWNLOAD_FAILED", "DOWNLOAD_INTERRUPTED", "DOWNLOAD_STALLED"].includes(code)) {
     baseDelayMs = INSTALL_AUTO_RETRY_DOWNLOAD_BASE_DELAY_MS;
   }
 
@@ -12651,6 +14113,20 @@ function normalizeInstallFailureMessage(error) {
       "Tente novamente mais tarde ou adicione uma fonte espelho em downloadSources/downloadUrls."
     );
   }
+  if (explicitFailureCode === "DOWNLOAD_STALLED") {
+    return formatInstallFailure(
+      "DOWNLOAD_STALLED",
+      "Conexao sem progresso detectada durante o download.",
+      "O launcher vai tentar novamente e trocar de fonte automaticamente."
+    );
+  }
+  if (explicitFailureCode === "DOWNLOAD_PARALLEL_UNSUPPORTED") {
+    return formatInstallFailure(
+      "DOWNLOAD_PARALLEL_UNSUPPORTED",
+      "Servidor nao suportou download segmentado para este arquivo.",
+      "O launcher alterna automaticamente para modo de conexao unica quando necessario."
+    );
+  }
 
   const raw = String(error?.message || "Falha inesperada durante a instalacao.")
     .replace(/\s+/g, " ")
@@ -12681,6 +14157,30 @@ function normalizeInstallFailureMessage(error) {
       "INSTALL_PATH_INVALID",
       "Foi detectado um caminho de instalacao inseguro para este jogo.",
       "Revise installDirName e launchExecutable para evitar caminhos fora da pasta de jogos."
+    );
+  }
+  if (
+    lower.includes("nao conseguiu gravar na pasta de instalacao") ||
+    lower.includes("install_path_permission") ||
+    lower.includes("acesso negado") ||
+    lower.includes("eacces") ||
+    lower.includes("eperm")
+  ) {
+    return formatInstallFailure(
+      "INSTALL_PATH_PERMISSION",
+      "O launcher nao conseguiu gravar na pasta de instalacao selecionada.",
+      "Execute o launcher como administrador ou selecione outra pasta de instalacao."
+    );
+  }
+  if (
+    lower.includes("espaco em disco insuficiente") ||
+    lower.includes("insufficient_disk_space") ||
+    lower.includes("no space left")
+  ) {
+    return formatInstallFailure(
+      "INSUFFICIENT_DISK_SPACE",
+      "Espaco em disco insuficiente para concluir a instalacao.",
+      "Libere espaco ou escolha outra pasta de instalacao."
     );
   }
   if (
@@ -12734,6 +14234,8 @@ function normalizeInstallFailureMessage(error) {
     lower.includes("download incompleto") ||
     lower.includes("timeout") ||
     lower.includes("timed out") ||
+    lower.includes("sem progresso") ||
+    lower.includes("download stalled") ||
     detailLower.includes("timeout")
   ) {
     return formatInstallFailure(
@@ -13485,18 +14987,44 @@ async function installGameNow(gameId) {
 
     let keepTempArchiveForRetry = false;
     let preserveRetryStateAfterFailure = false;
+    let installDirPreparedForInstall = false;
     try {
+      await runControl.waitIfPaused();
+      emitInstallTaskProgress({
+        gameId,
+        phase: "preparing",
+        percent: 1,
+        message: "Validando pasta de instalacao e espaco em disco..."
+      });
+      const preflight = await runInstallPreflightChecks({
+        game,
+        installRoot,
+        tempDir,
+        usingLocalArchive,
+        localArchivePath,
+        existingPartialArchiveBytes
+      });
+      if (preflight.checkedFreeSpace && preflight.requiredFreeBytes > 0) {
+        emitInstallTaskProgress({
+          gameId,
+          phase: "preparing",
+          percent: 3,
+          message: `Pre-check concluido. Espaco livre: ${formatBytesShort(preflight.freeBytes)}.`
+        });
+      }
+
       if (usingLocalArchive) {
         await fsp.rm(tempArchivePath, { force: true }).catch(() => {});
       }
       await fsp.rm(installDir, { recursive: true, force: true }).catch(() => {});
       await fsp.mkdir(installDir, { recursive: true });
+      installDirPreparedForInstall = true;
       await runControl.waitIfPaused();
 
       emitInstallTaskProgress({
         gameId,
         phase: "preparing",
-        percent: 0,
+        percent: 6,
         message: "Preparando instalacao..."
       });
 
@@ -13712,10 +15240,12 @@ async function installGameNow(gameId) {
         installDir
       };
     } catch (error) {
-      await fsp.rm(installDir, { recursive: true, force: true }).catch(() => {});
-      const cacheKey = getInstallSizeCacheKey(installDir);
-      if (cacheKey) {
-        installSizeCache.delete(cacheKey);
+      if (installDirPreparedForInstall) {
+        await fsp.rm(installDir, { recursive: true, force: true }).catch(() => {});
+        const cacheKey = getInstallSizeCacheKey(installDir);
+        if (cacheKey) {
+          installSizeCache.delete(cacheKey);
+        }
       }
       const canceledByUser = isInstallCanceledError(error);
       if (canceledByUser) {
@@ -15738,6 +17268,7 @@ if (!hasSingleInstanceLock) {
     appendStartupLog("[APP] whenReady iniciado.");
     await ensurePersistedAuthConfigFile().catch(() => {});
     await ensurePersistedUpdaterConfigFile().catch(() => {});
+    ensureDownloadSourcePerformanceStateLoadedSync();
     ensureCatalogSizeCacheLoadedSync();
     ensureSocialActivityBackgroundMonitorStarted();
     ensureCatalogRealtimeMonitorStarted();
@@ -15893,6 +17424,10 @@ if (!hasSingleInstanceLock) {
       clearTimeout(playtimeSyncTimer);
       playtimeSyncTimer = null;
     }
+    if (downloadSourcePerformancePersistTimer) {
+      clearTimeout(downloadSourcePerformancePersistTimer);
+      downloadSourcePerformancePersistTimer = null;
+    }
     const steamSession = getSteamSessionSnapshot();
     const userId = normalizeSteamId(steamSession?.steamId || steamSession?.user?.id);
     if (userId) {
@@ -15900,6 +17435,7 @@ if (!hasSingleInstanceLock) {
     }
     flushCatalogSizeCacheSync();
     flushActiveInstallSessionsSync();
+    flushDownloadSourcePerformanceStateSync();
     flushPlaytimeStateSync();
     flushSocialActivityPublishQueueSync();
     destroyUpdateSplashWindow();

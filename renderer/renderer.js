@@ -3655,6 +3655,16 @@ function getDownloadPhaseLabel(progress) {
   return "Processando";
 }
 
+function formatDownloadSourceLabelForUi(value) {
+  const label = String(value || "").trim();
+  if (!label) return "";
+  const normalized = label.toLowerCase();
+  if (normalized.includes("dropbox")) {
+    return "Origin Cloud";
+  }
+  return label;
+}
+
 function getDownloadPhaseOrder(progress) {
   const phase = String(progress?.phase || "").toLowerCase();
   if (phase === "downloading") return 1;
@@ -3840,11 +3850,62 @@ function formatBytesPerSecond(bytesPerSecond) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB/s`;
 }
 
+function formatEtaLabelFromSeconds(totalSeconds) {
+  const safeSeconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  if (!Number.isFinite(safeSeconds) || safeSeconds <= 0) return "";
+  if (safeSeconds < 60) {
+    return `${safeSeconds}s restantes`;
+  }
+
+  const minutes = Math.floor(safeSeconds / 60);
+  if (minutes < 60) {
+    return `${minutes}min restantes`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    return `${days}d restantes`;
+  }
+  if (remainingMinutes > 0) {
+    return `${hours}h ${remainingMinutes}min restantes`;
+  }
+  return `${hours}h restantes`;
+}
+
 function getDownloadSpeedForGame(gameId) {
   const speedData = state.downloadSpeedByGameId.get(gameId);
   if (!speedData) return 0;
   const speed = Number(speedData.bps || 0);
   return Number.isFinite(speed) && speed > 0 ? speed : 0;
+}
+
+function getDownloadEtaText(progress, speedBps) {
+  const speed = Number(speedBps || 0);
+  if (!Number.isFinite(speed) || speed <= 0) return "";
+  const totalBytes = Number(progress?.totalBytes || 0);
+  const downloadedBytes = Number(progress?.downloadedBytes || 0);
+  if (!Number.isFinite(totalBytes) || totalBytes <= 0) return "";
+  if (!Number.isFinite(downloadedBytes) || downloadedBytes < 0) return "";
+  const remainingBytes = Math.max(0, totalBytes - downloadedBytes);
+  if (remainingBytes <= 0) return "";
+  const etaSeconds = remainingBytes / speed;
+  if (!Number.isFinite(etaSeconds) || etaSeconds <= 0 || etaSeconds > 3 * 24 * 60 * 60) {
+    return "";
+  }
+  return formatEtaLabelFromSeconds(etaSeconds);
+}
+
+function buildDownloadSpeedLabel(gameId, progress) {
+  const phase = String(progress?.phase || "").toLowerCase();
+  if (phase === "paused") return "Pausado";
+  if (phase !== "downloading") return "--";
+  const speed = getDownloadSpeedForGame(gameId);
+  if (speed <= 0) return "Conectando...";
+  const speedLabel = formatBytesPerSecond(speed);
+  const etaLabel = getDownloadEtaText(progress, speed);
+  return etaLabel ? `${speedLabel} • ${etaLabel}` : speedLabel;
 }
 
 function renderRailDownloads() {
@@ -3907,14 +3968,9 @@ function patchDownloadsRuntimeProgress(activeDownloads) {
       progress?.phase === "extracting" ||
       (progress?.phase === "downloading" && !hasKnownTotalBytes);
     const phaseText = getDownloadPhaseLabel(progress);
-    const sourceLabel = String(progress?.sourceLabel || "").trim();
+    const sourceLabel = formatDownloadSourceLabelForUi(progress?.sourceLabel);
     const queuePosition = Number(progress?.queuePosition || 0);
-    const speedText =
-      progress?.phase === "downloading"
-        ? formatBytesPerSecond(getDownloadSpeedForGame(gameId))
-        : progress?.phase === "paused"
-          ? "Pausado"
-          : "--";
+    const speedText = buildDownloadSpeedLabel(gameId, progress);
     const phaseLabel =
       progress?.phase === "queued" && queuePosition > 0
         ? `${phaseText} • #${queuePosition}`
@@ -4001,14 +4057,9 @@ function renderDownloadsView() {
         (progress?.phase === "downloading" && !hasKnownTotalBytes);
       const indeterminateClass = isIndeterminate ? "is-indeterminate" : "";
       const phaseText = getDownloadPhaseLabel(progress);
-      const sourceLabel = String(progress?.sourceLabel || "").trim();
+      const sourceLabel = formatDownloadSourceLabelForUi(progress?.sourceLabel);
       const queuePosition = Number(progress?.queuePosition || 0);
-      const speedText =
-        progress?.phase === "downloading"
-          ? formatBytesPerSecond(getDownloadSpeedForGame(gameId))
-          : progress?.phase === "paused"
-            ? "Pausado"
-            : "--";
+      const speedText = buildDownloadSpeedLabel(gameId, progress);
       const phaseLabel =
         progress?.phase === "queued" && queuePosition > 0
           ? `${phaseText} • #${queuePosition}`
