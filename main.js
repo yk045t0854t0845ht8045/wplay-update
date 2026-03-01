@@ -122,6 +122,9 @@ const ALLOW_LEGACY_GOOGLE_DRIVE_SOURCES = false;
 const GOOGLE_DRIVE_MAX_CONFIRM_HOPS = 6;
 const DEFENDER_SCAN_TIMEOUT_MS = 20 * 60 * 1000;
 const ARCHIVE_TOOL_TIMEOUT_MS = 25 * 60 * 1000;
+const INSTALL_DIR_COMPACT_THRESHOLD = 24;
+const INSTALL_DIR_COMPACT_SLUG_LENGTH = 14;
+const INSTALL_DIR_COMPACT_HASH_LENGTH = 6;
 const AUTO_UPDATE_MIN_CHECK_INTERVAL_MS = 15 * 1000;
 const AUTO_UPDATE_DEFAULT_CHECK_INTERVAL_MS = 45 * 1000;
 const AUTO_UPDATE_CHECK_COOLDOWN_MS = 12 * 1000;
@@ -6877,6 +6880,18 @@ function sanitizeFolderName(name) {
     .slice(0, 80) || "jogo";
 }
 
+function buildCompactInstallDirName(game) {
+  const sourceName = sanitizeFolderName(game?.installDirName || game?.name || game?.id || "jogo");
+  const slugSource = game?.id || sourceName;
+  const baseSlug = slugifyId(slugSource, "game").slice(0, INSTALL_DIR_COMPACT_SLUG_LENGTH) || "game";
+  const hash = crypto
+    .createHash("sha1")
+    .update(String(sourceName || "jogo"), "utf8")
+    .digest("hex")
+    .slice(0, INSTALL_DIR_COMPACT_HASH_LENGTH);
+  return sanitizeFolderName(`${baseSlug}-${hash}`).slice(0, INSTALL_DIR_COMPACT_THRESHOLD) || "game";
+}
+
 function slugifyId(input, fallback = "game") {
   const base = String(input || "")
     .toLowerCase()
@@ -11060,7 +11075,32 @@ function getCurrentInstallRoot(settings = {}) {
 }
 
 function getGameInstallDir(game, installRoot) {
-  return path.join(installRoot, sanitizeFolderName(game.installDirName || game.name));
+  const preferredName = sanitizeFolderName(game?.installDirName || game?.name || game?.id || "jogo");
+  const prefersCompact = preferredName.length > INSTALL_DIR_COMPACT_THRESHOLD;
+  if (!prefersCompact) {
+    return path.join(installRoot, preferredName);
+  }
+
+  const compactName = buildCompactInstallDirName(game);
+  const preferredDir = path.join(installRoot, preferredName);
+  const compactDir = path.join(installRoot, compactName);
+
+  // Backward compatibility: if an old install already exists with the long folder name, keep using it.
+  try {
+    if (fs.existsSync(preferredDir)) {
+      return preferredDir;
+    }
+  } catch (_error) {
+    // Ignore and continue with compact path fallback.
+  }
+  try {
+    if (fs.existsSync(compactDir)) {
+      return compactDir;
+    }
+  } catch (_error) {
+    // Ignore and keep deterministic compact path.
+  }
+  return compactDir;
 }
 
 async function readInstallManifest(installDir) {
@@ -13778,6 +13818,25 @@ function normalizeExtractionErrorMessage(rawOutput, fallback) {
   return fallback || output;
 }
 
+function isLikelyExtractionPathError(rawMessage) {
+  const lower = normalizeTextForMatch(rawMessage || "");
+  if (!lower) {
+    return false;
+  }
+  return (
+    (lower.includes("cannot create") &&
+      (lower.includes("sintaxe do nome do arquivo") ||
+        lower.includes("filename or directory name or volume label syntax is incorrect") ||
+        lower.includes("nome do diretorio") ||
+        lower.includes("volume label"))) ||
+    lower.includes("path too long") ||
+    lower.includes("filename too long") ||
+    lower.includes("nome do arquivo muito grande") ||
+    lower.includes("nome do arquivo e muito grande") ||
+    lower.includes("long path")
+  );
+}
+
 async function runSevenZip(args, fallbackMessage) {
   const sevenZipPath = await resolveSevenZipExecutablePath();
   await new Promise((resolve, reject) => {
@@ -13871,8 +13930,18 @@ async function extractArchive(archivePath, targetDir, game) {
     const winRarPath = await resolveWinRarExecutablePath();
     if (winRarPath) {
       const args = ["x", archivePath, `${targetDir}${path.sep}`, "-idq", "-o+", "-y", buildWinRarPasswordArg(archivePassword)];
-      await runWinRar(args, "Falha ao extrair arquivo RAR.");
-      return;
+      try {
+        await runWinRar(args, "Falha ao extrair arquivo RAR.");
+        return;
+      } catch (error) {
+        const rawMessage = String(error?.message || "").trim();
+        if (!isLikelyExtractionPathError(rawMessage)) {
+          throw error;
+        }
+
+        // WinRAR can fail with deep/nested paths; retry extraction with 7-Zip.
+        await fsp.mkdir(targetDir, { recursive: true }).catch(() => {});
+      }
     }
   }
 
@@ -13886,6 +13955,11 @@ async function extractArchive(archivePath, targetDir, game) {
     await runSevenZip(args, "Falha ao extrair arquivo.");
   } catch (error) {
     const lower = String(error?.message || "").toLowerCase();
+    if (isLikelyExtractionPathError(lower)) {
+      throw new Error(
+        "Falha ao extrair: caminho interno muito longo para este jogo. Use installDirName mais curto (ex.: jogo curto) ou publique o pacote com menos pastas aninhadas."
+      );
+    }
     if (
       archiveType === "rar" &&
       (lower.includes("cannot open the file as archive") ||
@@ -14257,6 +14331,19 @@ function normalizeInstallFailureMessage(error) {
       "INSTALL_PATH_INVALID",
       "Foi detectado um caminho de instalacao inseguro para este jogo.",
       "Revise installDirName e launchExecutable para evitar caminhos fora da pasta de jogos."
+    );
+  }
+  if (
+    lower.includes("caminho interno muito longo") ||
+    lower.includes("path too long") ||
+    lower.includes("filename too long") ||
+    lower.includes("nome do arquivo muito grande") ||
+    lower.includes("sintaxe do nome do arquivo")
+  ) {
+    return formatInstallFailure(
+      "INSTALL_PATH_TOO_LONG",
+      "A extracao falhou porque os caminhos internos do pacote ficaram longos demais.",
+      "Use installDirName mais curto (ex.: jogo-curto) e evite pacotes com muitas pastas aninhadas."
     );
   }
   if (
