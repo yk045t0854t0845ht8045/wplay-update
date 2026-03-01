@@ -331,6 +331,25 @@ function sanitizeMaintenanceBannerText(value, fallback = "", maxLength = 240) {
   return `${nextValue.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
 }
 
+function parseMaintenanceDataObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value;
+  }
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch (_error) {
+    // Ignore invalid JSON and return empty object.
+  }
+  return {};
+}
+
 function normalizeMaintenanceVariant(value, fallback = "alert") {
   const fallbackValue = ["message", "alert", "critical"].includes(String(fallback || "").trim())
     ? String(fallback || "").trim()
@@ -344,7 +363,13 @@ function normalizeMaintenanceVariant(value, fallback = "alert") {
   if (["message", "messages", "mensagem", "mensagens", "azul", "blue", "info", "informativo"].includes(normalized)) {
     return "message";
   }
+  if (normalized.includes("azul") || normalized.includes("blue") || normalized.includes("mensagem")) {
+    return "message";
+  }
   if (["alert", "alerts", "alerta", "alertas", "warning", "warn", "amarelo", "yellow", "aviso", "avisos"].includes(normalized)) {
+    return "alert";
+  }
+  if (normalized.includes("amarelo") || normalized.includes("yellow") || normalized.includes("alert")) {
     return "alert";
   }
   if (
@@ -368,6 +393,15 @@ function normalizeMaintenanceVariant(value, fallback = "alert") {
   ) {
     return "critical";
   }
+  if (
+    normalized.includes("critical") ||
+    normalized.includes("critic") ||
+    normalized.includes("vermelho") ||
+    normalized.includes("red") ||
+    normalized.includes("erro")
+  ) {
+    return "critical";
+  }
   if (["message", "alert", "critical"].includes(normalized)) {
     return normalized;
   }
@@ -387,7 +421,7 @@ function getMaintenanceStateSignature(value) {
 
 function normalizeMaintenanceStatePayload(payload = {}, fallbackState = state.maintenance) {
   const source = payload && typeof payload === "object" ? payload : {};
-  const nestedData = source.data && typeof source.data === "object" ? source.data : {};
+  const nestedData = parseMaintenanceDataObject(source.data);
   const merged = {
     ...nestedData,
     ...source
