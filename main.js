@@ -329,6 +329,7 @@ const maintenanceState = {
   enabled: false,
   title: "Manutencao programada",
   message: "Pode haver instabilidades temporarias durante este periodo.",
+  variant: "alert",
   updatedAt: ""
 };
 let maintenanceStateSignature = "";
@@ -7368,12 +7369,56 @@ function sanitizeMaintenanceBannerText(value, fallback = "", maxLength = 240) {
   return `${nextValue.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
 }
 
+function normalizeMaintenanceBannerVariant(value, fallback = "alert") {
+  const fallbackValue = ["message", "alert", "critical"].includes(String(fallback || "").trim())
+    ? String(fallback || "").trim()
+    : "alert";
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (!normalized) return fallbackValue;
+  if (["message", "messages", "mensagem", "mensagens", "azul", "blue", "info", "informativo"].includes(normalized)) {
+    return "message";
+  }
+  if (["alert", "alerts", "alerta", "alertas", "warning", "warn", "amarelo", "yellow", "aviso", "avisos"].includes(normalized)) {
+    return "alert";
+  }
+  if (
+    [
+      "critical",
+      "critico",
+      "critica",
+      "criticos",
+      "criticas",
+      "vermelho",
+      "red",
+      "erro",
+      "erros",
+      "error",
+      "errors",
+      "parada",
+      "paradas",
+      "falha",
+      "falhas"
+    ].includes(normalized)
+  ) {
+    return "critical";
+  }
+  if (["message", "alert", "critical"].includes(normalized)) {
+    return normalized;
+  }
+  return fallbackValue;
+}
+
 function buildMaintenanceStateSignature(value = maintenanceState) {
   const source = value && typeof value === "object" ? value : {};
   return [
     source.enabled === true ? "1" : "0",
     String(source.title || "").trim(),
     String(source.message || "").trim(),
+    String(source.variant || "").trim(),
     String(source.updatedAt || source.updated_at || "").trim()
   ].join("|");
 }
@@ -7411,6 +7456,10 @@ function normalizeMaintenanceStatePayload(payload = {}, fallbackState = maintena
       280
     ) ||
     "Pode haver instabilidades temporarias durante este periodo.";
+  const variant = normalizeMaintenanceBannerVariant(
+    pickFirstDefinedValue(merged, ["variant", "bannerVariant", "banner_variant", "type", "tone", "level", "category"]),
+    normalizeMaintenanceBannerVariant(fallback.variant, "alert")
+  );
   const updatedAt = String(pickFirstDefinedValue(merged, ["updatedAt", "updated_at", "created_at", "createdAt"]) || "")
     .trim();
 
@@ -7418,6 +7467,7 @@ function normalizeMaintenanceStatePayload(payload = {}, fallbackState = maintena
     enabled,
     title,
     message,
+    variant,
     updatedAt
   };
 }
@@ -10255,6 +10305,7 @@ async function pollMaintenanceStateInBackground(silent = true) {
           enabled: false,
           title: maintenanceState.title || "Manutencao programada",
           message: maintenanceState.message || "Pode haver instabilidades temporarias durante este periodo.",
+          variant: maintenanceState.variant || "alert",
           updatedAt: maintenanceState.updatedAt || ""
         },
         true

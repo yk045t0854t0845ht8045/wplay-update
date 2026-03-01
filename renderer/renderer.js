@@ -224,6 +224,7 @@ const state = {
     enabled: false,
     title: "Manutencao programada",
     message: "Pode haver instabilidades temporarias durante este periodo.",
+    variant: "alert",
     updatedAt: "",
     signature: ""
   },
@@ -330,12 +331,56 @@ function sanitizeMaintenanceBannerText(value, fallback = "", maxLength = 240) {
   return `${nextValue.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
 }
 
+function normalizeMaintenanceVariant(value, fallback = "alert") {
+  const fallbackValue = ["message", "alert", "critical"].includes(String(fallback || "").trim())
+    ? String(fallback || "").trim()
+    : "alert";
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (!normalized) return fallbackValue;
+  if (["message", "messages", "mensagem", "mensagens", "azul", "blue", "info", "informativo"].includes(normalized)) {
+    return "message";
+  }
+  if (["alert", "alerts", "alerta", "alertas", "warning", "warn", "amarelo", "yellow", "aviso", "avisos"].includes(normalized)) {
+    return "alert";
+  }
+  if (
+    [
+      "critical",
+      "critico",
+      "critica",
+      "criticos",
+      "criticas",
+      "vermelho",
+      "red",
+      "erro",
+      "erros",
+      "error",
+      "errors",
+      "parada",
+      "paradas",
+      "falha",
+      "falhas"
+    ].includes(normalized)
+  ) {
+    return "critical";
+  }
+  if (["message", "alert", "critical"].includes(normalized)) {
+    return normalized;
+  }
+  return fallbackValue;
+}
+
 function getMaintenanceStateSignature(value) {
   const source = value && typeof value === "object" ? value : {};
   return [
     source.enabled === true ? "1" : "0",
     String(source.title || "").trim(),
     String(source.message || "").trim(),
+    String(source.variant || "").trim(),
     String(source.updatedAt || "").trim()
   ].join("|");
 }
@@ -372,11 +417,16 @@ function normalizeMaintenanceStatePayload(payload = {}, fallbackState = state.ma
       280
     ) ||
     "Pode haver instabilidades temporarias durante este periodo.";
+  const variant = normalizeMaintenanceVariant(
+    merged.variant ?? merged.bannerVariant ?? merged.banner_variant ?? merged.type ?? merged.tone ?? merged.level ?? merged.category,
+    normalizeMaintenanceVariant(fallback.variant, "alert")
+  );
   const updatedAt = String(merged.updatedAt || merged.updated_at || merged.created_at || merged.createdAt || "").trim();
   return {
     enabled,
     title,
     message,
+    variant,
     updatedAt
   };
 }
@@ -395,6 +445,12 @@ function renderMaintenanceBanner() {
     maintenanceBannerMessage.textContent = normalized.message;
   }
 
+  maintenanceBanner.classList.remove(
+    "maintenance-banner--message",
+    "maintenance-banner--alert",
+    "maintenance-banner--critical"
+  );
+  maintenanceBanner.classList.add(`maintenance-banner--${normalized.variant || "alert"}`);
   maintenanceBanner.classList.toggle("is-visible", shouldShow);
   maintenanceBanner.setAttribute("aria-hidden", shouldShow ? "false" : "true");
   document.body.classList.toggle("maintenance-mode-on", shouldShow);
