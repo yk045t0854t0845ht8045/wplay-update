@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("launcherApi", {
   createGameShortcut: (gameId) => ipcRenderer.invoke("launcher:create-game-shortcut", gameId),
   openExternalUrl: (urlValue) => ipcRenderer.invoke("launcher:open-external-url", urlValue),
   openSteamClient: () => ipcRenderer.invoke("launcher:open-steam-client"),
+  generatePixDonationQr: (amount) => ipcRenderer.invoke("launcher:pix-generate-donate-qr", amount),
   showGameStartedToast: (payload) => ipcRenderer.invoke("launcher:show-game-start-toast", payload),
   authGetSession: () => ipcRenderer.invoke("launcher:auth-get-session"),
   authLoginSteam: () => ipcRenderer.invoke("launcher:auth-login-steam"),

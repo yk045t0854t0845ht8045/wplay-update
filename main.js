@@ -76,10 +76,18 @@ const { app, BrowserWindow, ipcMain, shell, dialog, safeStorage, session, screen
 const fsp = require("fs/promises");
 const crypto = require("crypto");
 const http = require("http");
+const https = require("https");
+const { pathToFileURL } = require("url");
 const { Transform } = require("stream");
 const { pipeline } = require("stream/promises");
 const axios = require("axios");
 const { path7za } = require("7zip-bin");
+let QRCode = null;
+try {
+  QRCode = require("qrcode");
+} catch (_error) {
+  QRCode = null;
+}
 let autoUpdater = null;
 try {
   ({ autoUpdater } = require("electron-updater"));
@@ -239,15 +247,19 @@ const DOWNLOAD_STALL_TIMEOUT_MS = 55 * 1000;
 const DOWNLOAD_STALL_TIMEOUT_MIN_MS = 20 * 1000;
 const DOWNLOAD_STALL_TIMEOUT_MAX_MS = 8 * 60 * 1000;
 const DOWNLOAD_STALL_WATCHDOG_POLL_MS = 4000;
-const DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES = 512 * 1024;
+const DOWNLOAD_STREAM_HIGH_WATER_MARK_BYTES = 2 * 1024 * 1024;
 const DOWNLOAD_PROGRESS_EMIT_INTERVAL_MS = 220;
 const DOWNLOAD_PROGRESS_EMIT_MIN_DELTA_BYTES = 1024 * 1024;
-const DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT = 4;
-const DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT_LOW_SPEC = 2;
-const DOWNLOAD_PARALLEL_SEGMENTS_MAX = 8;
-const DOWNLOAD_PARALLEL_MIN_FILE_BYTES = 64 * 1024 * 1024;
-const DOWNLOAD_PARALLEL_MIN_SEGMENT_BYTES = 16 * 1024 * 1024;
-const DOWNLOAD_PARALLEL_SEGMENT_MAX_RETRIES = 3;
+const DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT = 12;
+const DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT_LOW_SPEC = 6;
+const DOWNLOAD_PARALLEL_SEGMENTS_MAX = 48;
+const DOWNLOAD_PARALLEL_MIN_FILE_BYTES = 16 * 1024 * 1024;
+const DOWNLOAD_PARALLEL_MIN_SEGMENT_BYTES = 4 * 1024 * 1024;
+const DOWNLOAD_PARALLEL_SEGMENT_MAX_RETRIES = 5;
+const DOWNLOAD_PARALLEL_HUGE_FILE_THRESHOLD_BYTES = 2 * 1024 * 1024 * 1024;
+const DOWNLOAD_PARALLEL_VERY_HUGE_FILE_THRESHOLD_BYTES = 4 * 1024 * 1024 * 1024;
+const DOWNLOAD_PARALLEL_METADATA_PROBE_TIMEOUT_MS = 7 * 1000;
+const DOWNLOAD_PARALLEL_METADATA_PROBE_SAMPLE_RANGE_BYTES = 64 * 1024;
 const DOWNLOAD_LATENCY_PROBE_CACHE_TTL_MS = 5 * 60 * 1000;
 const DOWNLOAD_LATENCY_PROBE_DEFAULT_TIMEOUT_MS = 3500;
 const DOWNLOAD_LATENCY_PROBE_DEFAULT_LIMIT = 4;
@@ -290,6 +302,18 @@ const SOCIAL_ACTIVITY_PUBLISH_MAX_RETRIES = 6;
 const SOCIAL_ACTIVITY_PUBLISH_RETRY_BASE_MS = 2000;
 const SOCIAL_ACTIVITY_PUBLISH_RETRY_MAX_MS = 10 * 60 * 1000;
 const SOCIAL_ACTIVITY_RUNTIME_TRANSITION_DEBOUNCE_MS = 30 * 1000;
+const DONATE_PIX_KEY = "4f82c043-4c35-4f26-ae6e-1d8f99068889";
+const DONATE_PIX_GUI = "BR.GOV.BCB.PIX";
+const DONATE_PIX_CURRENCY_CODE = "986";
+const DONATE_PIX_COUNTRY_CODE = "BR";
+const DONATE_PIX_MERCHANT_NAME = "ORIGIN LAUNCHER";
+const DONATE_PIX_MERCHANT_CITY = "SAO PAULO";
+const DONATE_PIX_DESCRIPTION = "APOIE O ORIGIN LAUNCHER";
+const DONATE_PIX_MIN_AMOUNT = 1;
+const DONATE_PIX_MAX_AMOUNT = 100000;
+const DONATE_PIX_TEMP_ROOT_DIR_NAME = "origin-launcher";
+const DONATE_PIX_TEMP_DIR_NAME = "pix-donate";
+const DONATE_PIX_QR_SIZE = 420;
 
 let mainWindow = null;
 let updateSplashWindow = null;
@@ -427,6 +451,22 @@ const hostPerformanceProfileCache = {
   resolved: false,
   lowSpec: false
 };
+const hostCpuCountCache = {
+  resolved: false,
+  count: 0
+};
+const DOWNLOAD_HTTP_AGENT = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 1_500,
+  maxSockets: 256,
+  maxFreeSockets: 64
+});
+const DOWNLOAD_HTTPS_AGENT = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 1_500,
+  maxSockets: 256,
+  maxFreeSockets: 64
+});
 const runtimeStartupHealthState = {
   safeMode: false,
   failureCount: 0,
@@ -473,6 +513,8 @@ const playtimeRemoteCache = {
   inFlight: null
 };
 const processHintsCacheByInstallDir = new Map();
+const donatePixQrCacheByAmount = new Map();
+let donatePixTempDirPrepared = false;
 
 function isElectronBinaryPath(executablePath = process.execPath) {
   const execName = path.basename(String(executablePath || "")).trim().toLowerCase();
@@ -2611,6 +2653,30 @@ function resolveHostLowSpecProfile() {
   hostPerformanceProfileCache.resolved = true;
   hostPerformanceProfileCache.lowSpec = lowSpec;
   return lowSpec;
+}
+
+function getHostCpuCount() {
+  if (hostCpuCountCache.resolved) {
+    return hostCpuCountCache.count;
+  }
+  let cpuCount = 0;
+  try {
+    cpuCount = Array.isArray(os.cpus()) ? os.cpus().length : 0;
+  } catch (_error) {
+    cpuCount = 0;
+  }
+  hostCpuCountCache.resolved = true;
+  hostCpuCountCache.count = Math.max(0, Math.trunc(Number(cpuCount) || 0));
+  return hostCpuCountCache.count;
+}
+
+function getDownloadAxiosTransportConfig(extra = {}) {
+  const safeExtra = extra && typeof extra === "object" ? extra : {};
+  return {
+    httpAgent: DOWNLOAD_HTTP_AGENT,
+    httpsAgent: DOWNLOAD_HTTPS_AGENT,
+    ...safeExtra
+  };
 }
 
 function getStartupLogPath() {
@@ -5109,6 +5175,206 @@ function parsePositiveInteger(value) {
     return 0;
   }
   return Math.floor(parsed);
+}
+
+function parseDonatePixAmount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  const rounded = Math.round(parsed * 100) / 100;
+  if (rounded < DONATE_PIX_MIN_AMOUNT || rounded > DONATE_PIX_MAX_AMOUNT) {
+    return 0;
+  }
+  return rounded;
+}
+
+function sanitizeDonatePixField(value, maxBytes) {
+  const safeMaxBytes = Math.max(1, Math.min(99, parsePositiveInteger(maxBytes) || 99));
+  const normalized = String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9 /.:(),+-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+  if (!normalized) {
+    return "";
+  }
+  let output = "";
+  for (const char of normalized) {
+    const candidate = `${output}${char}`;
+    if (Buffer.byteLength(candidate, "utf8") > safeMaxBytes) {
+      break;
+    }
+    output = candidate;
+  }
+  return output.trim();
+}
+
+function buildDonatePixTlv(tag, value) {
+  const safeTag = String(tag || "").trim().padStart(2, "0").slice(0, 2);
+  const safeValue = String(value || "");
+  const byteLength = Buffer.byteLength(safeValue, "utf8");
+  if (byteLength > 99) {
+    throw new Error(`Campo PIX ${safeTag} excedeu 99 bytes.`);
+  }
+  return `${safeTag}${String(byteLength).padStart(2, "0")}${safeValue}`;
+}
+
+function computePixCrc16(payload) {
+  let crc = 0xffff;
+  const bytes = Buffer.from(String(payload || ""), "utf8");
+  for (const byte of bytes) {
+    crc ^= byte << 8;
+    for (let bit = 0; bit < 8; bit += 1) {
+      if ((crc & 0x8000) !== 0) {
+        crc = ((crc << 1) ^ 0x1021) & 0xffff;
+      } else {
+        crc = (crc << 1) & 0xffff;
+      }
+    }
+  }
+  return crc.toString(16).toUpperCase().padStart(4, "0");
+}
+
+function buildDonatePixPayload(amount) {
+  const safeAmount = parseDonatePixAmount(amount);
+  if (!safeAmount) {
+    throw new Error("Valor de contribuicao invalido para gerar o PIX.");
+  }
+
+  const pixKey = String(DONATE_PIX_KEY || "").trim();
+  if (!pixKey) {
+    throw new Error("Chave PIX indisponivel no launcher.");
+  }
+
+  const merchantName = sanitizeDonatePixField(DONATE_PIX_MERCHANT_NAME, 25) || "ORIGIN LAUNCHER";
+  const merchantCity = sanitizeDonatePixField(DONATE_PIX_MERCHANT_CITY, 15) || "SAO PAULO";
+  const description = sanitizeDonatePixField(DONATE_PIX_DESCRIPTION, 50);
+
+  const merchantAccountInfo = [
+    buildDonatePixTlv("00", DONATE_PIX_GUI),
+    buildDonatePixTlv("01", pixKey),
+    description ? buildDonatePixTlv("02", description) : ""
+  ].join("");
+  const additionalDataField = buildDonatePixTlv("05", "***");
+  const payloadWithoutCrc = [
+    buildDonatePixTlv("00", "01"),
+    buildDonatePixTlv("26", merchantAccountInfo),
+    buildDonatePixTlv("52", "0000"),
+    buildDonatePixTlv("53", DONATE_PIX_CURRENCY_CODE),
+    buildDonatePixTlv("54", safeAmount.toFixed(2)),
+    buildDonatePixTlv("58", DONATE_PIX_COUNTRY_CODE),
+    buildDonatePixTlv("59", merchantName),
+    buildDonatePixTlv("60", merchantCity),
+    buildDonatePixTlv("62", additionalDataField),
+    "6304"
+  ].join("");
+  const crc16 = computePixCrc16(payloadWithoutCrc);
+  return `${payloadWithoutCrc}${crc16}`;
+}
+
+function getDonatePixTempDirPath() {
+  return path.join(os.tmpdir(), DONATE_PIX_TEMP_ROOT_DIR_NAME, DONATE_PIX_TEMP_DIR_NAME);
+}
+
+function cleanupDonatePixTempFilesSync() {
+  const tempDir = getDonatePixTempDirPath();
+  try {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  } catch (_error) {
+    // Ignore temp cleanup failures.
+  }
+  donatePixQrCacheByAmount.clear();
+  donatePixTempDirPrepared = false;
+}
+
+function ensureDonatePixTempDirReady() {
+  const tempDir = getDonatePixTempDirPath();
+  if (donatePixTempDirPrepared && fs.existsSync(tempDir)) {
+    return tempDir;
+  }
+  fs.mkdirSync(tempDir, { recursive: true });
+  donatePixTempDirPrepared = true;
+  return tempDir;
+}
+
+function prepareDonatePixTempFilesForSession() {
+  cleanupDonatePixTempFilesSync();
+  try {
+    ensureDonatePixTempDirReady();
+    return true;
+  } catch (error) {
+    appendStartupLog(`[DONATE_PIX_TEMP_INIT_ERROR] ${formatStartupErrorForLog(error)}`);
+    return false;
+  }
+}
+
+async function generateDonatePixQrImage(amount) {
+  const safeAmount = parseDonatePixAmount(amount);
+  if (!safeAmount) {
+    return {
+      ok: false,
+      error: "Valor de contribuicao invalido."
+    };
+  }
+
+  if (!QRCode || typeof QRCode.toFile !== "function") {
+    return {
+      ok: false,
+      error: "Gerador de QR Code indisponivel nesta versao do launcher."
+    };
+  }
+
+  const amountKey = safeAmount.toFixed(2);
+  const cachedEntry = donatePixQrCacheByAmount.get(amountKey);
+  if (cachedEntry?.filePath && fs.existsSync(cachedEntry.filePath)) {
+    return {
+      ok: true,
+      amount: safeAmount,
+      imageUrl: `${pathToFileURL(cachedEntry.filePath).toString()}?v=${Number(cachedEntry.generatedAt || Date.now())}`,
+      filePath: cachedEntry.filePath,
+      pixCopyPaste: String(cachedEntry.pixCopyPaste || "")
+    };
+  }
+
+  try {
+    const pixPayload = buildDonatePixPayload(safeAmount);
+    const tempDir = ensureDonatePixTempDirReady();
+    const safeAmountSlug = amountKey.replace(".", "-");
+    const fileName = `pix-doacao-${safeAmountSlug}.png`;
+    const filePath = path.join(tempDir, fileName);
+    await QRCode.toFile(filePath, pixPayload, {
+      type: "png",
+      width: DONATE_PIX_QR_SIZE,
+      margin: 1,
+      errorCorrectionLevel: "M",
+      color: {
+        dark: "#0C111BFF",
+        light: "#FFFFFFFF"
+      }
+    });
+    const generatedAt = Date.now();
+    donatePixQrCacheByAmount.set(amountKey, {
+      filePath,
+      generatedAt,
+      pixCopyPaste: pixPayload
+    });
+    return {
+      ok: true,
+      amount: safeAmount,
+      imageUrl: `${pathToFileURL(filePath).toString()}?v=${generatedAt}`,
+      filePath,
+      pixCopyPaste: pixPayload
+    };
+  } catch (error) {
+    appendStartupLog(`[DONATE_PIX_QR_ERROR] ${formatStartupErrorForLog(error)}`);
+    return {
+      ok: false,
+      error: `Falha ao gerar QR Code PIX: ${String(error?.message || "erro desconhecido")}`
+    };
+  }
 }
 
 function parseBoolean(value, fallback = false) {
@@ -7626,6 +7892,11 @@ function mapSupabaseCatalogRowToEntry(row) {
       "parallelDownloadSegments",
       "parallel_download_segments"
     ]),
+    downloadParallelSegmentsMax: pickFirstDefinedValue(merged, [
+      "downloadParallelSegmentsMax",
+      "download_parallel_segments_max",
+      "parallelDownloadSegmentsMax"
+    ]),
     downloadParallelMinFileBytes: pickFirstDefinedValue(merged, [
       "downloadParallelMinFileBytes",
       "download_parallel_min_file_bytes"
@@ -7633,6 +7904,10 @@ function mapSupabaseCatalogRowToEntry(row) {
     downloadParallelMinSegmentBytes: pickFirstDefinedValue(merged, [
       "downloadParallelMinSegmentBytes",
       "download_parallel_min_segment_bytes"
+    ]),
+    downloadParallelProbeTimeoutMs: pickFirstDefinedValue(merged, [
+      "downloadParallelProbeTimeoutMs",
+      "download_parallel_probe_timeout_ms"
     ]),
     downloadStallTimeoutMs: pickFirstDefinedValue(merged, ["downloadStallTimeoutMs", "download_stall_timeout_ms"]),
     downloadProgressEmitIntervalMs: pickFirstDefinedValue(merged, [
@@ -7810,15 +8085,77 @@ function resolveParallelDownloadMinSegmentBytes(game = {}) {
 }
 
 function resolveDefaultParallelDownloadEnabled() {
-  return !resolveHostLowSpecProfile();
+  const disabledByEnv = parseBoolean(
+    process.env.WPLAY_DISABLE_PARALLEL_DOWNLOAD || process.env.WPLAY_DOWNLOAD_PARALLEL_DISABLED,
+    false
+  );
+  if (disabledByEnv) {
+    return false;
+  }
+  return true;
 }
 
 function resolveDefaultParallelDownloadSegments() {
-  return resolveHostLowSpecProfile() ? DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT_LOW_SPEC : DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT;
+  const lowSpec = resolveHostLowSpecProfile();
+  if (lowSpec) {
+    return DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT_LOW_SPEC;
+  }
+  const cpuCount = getHostCpuCount();
+  if (cpuCount >= 24) {
+    return Math.min(DOWNLOAD_PARALLEL_SEGMENTS_MAX, DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT + 12);
+  }
+  if (cpuCount >= 20) {
+    return Math.min(DOWNLOAD_PARALLEL_SEGMENTS_MAX, DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT + 9);
+  }
+  if (cpuCount >= 16) {
+    return Math.min(DOWNLOAD_PARALLEL_SEGMENTS_MAX, DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT + 7);
+  }
+  if (cpuCount >= 12) {
+    return Math.min(DOWNLOAD_PARALLEL_SEGMENTS_MAX, DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT + 5);
+  }
+  if (cpuCount >= 8) {
+    return Math.min(DOWNLOAD_PARALLEL_SEGMENTS_MAX, DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT + 3);
+  }
+  return DOWNLOAD_PARALLEL_SEGMENTS_DEFAULT;
 }
 
-function resolveParallelDownloadSegmentsMaxLimit() {
-  return resolveHostLowSpecProfile() ? Math.min(4, DOWNLOAD_PARALLEL_SEGMENTS_MAX) : DOWNLOAD_PARALLEL_SEGMENTS_MAX;
+function resolveParallelDownloadSegmentsMaxLimit(game = {}) {
+  const configuredMax = parsePositiveInteger(
+    game?.downloadParallelSegmentsMax ||
+      game?.download_parallel_segments_max ||
+      game?.parallelDownloadSegmentsMax ||
+      process.env.WPLAY_DOWNLOAD_PARALLEL_SEGMENTS_MAX
+  );
+  const hardLimit = Math.max(
+    4,
+    Math.min(DOWNLOAD_PARALLEL_SEGMENTS_MAX, configuredMax > 0 ? configuredMax : DOWNLOAD_PARALLEL_SEGMENTS_MAX)
+  );
+  if (resolveHostLowSpecProfile()) {
+    return Math.min(16, hardLimit);
+  }
+  const cpuCount = getHostCpuCount();
+  if (cpuCount >= 24) {
+    return hardLimit;
+  }
+  if (cpuCount >= 20) {
+    return Math.min(hardLimit, 44);
+  }
+  if (cpuCount >= 16) {
+    return Math.min(hardLimit, 40);
+  }
+  if (cpuCount >= 12) {
+    return Math.min(hardLimit, 32);
+  }
+  if (cpuCount >= 8) {
+    return Math.min(hardLimit, 24);
+  }
+  return Math.min(hardLimit, 20);
+}
+
+function resolveParallelMetadataProbeTimeoutMs(game = {}) {
+  const configured = parsePositiveInteger(game?.downloadParallelProbeTimeoutMs || game?.download_parallel_probe_timeout_ms);
+  const baseValue = configured > 0 ? configured : DOWNLOAD_PARALLEL_METADATA_PROBE_TIMEOUT_MS;
+  return Math.max(1200, Math.min(12_000, baseValue));
 }
 
 function resolveParallelDownloadSegments(game = {}, totalBytes = 0) {
@@ -7842,11 +8179,17 @@ function resolveParallelDownloadSegments(game = {}, totalBytes = 0) {
       game?.parallelDownloadSegments ||
       game?.parallel_download_segments
   );
-  const desiredSegments = requestedSegments > 0 ? requestedSegments : resolveDefaultParallelDownloadSegments();
+  let desiredSegments = requestedSegments > 0 ? requestedSegments : resolveDefaultParallelDownloadSegments();
+  if (requestedSegments <= 0 && knownTotalBytes >= DOWNLOAD_PARALLEL_HUGE_FILE_THRESHOLD_BYTES) {
+    desiredSegments += 4;
+  }
+  if (requestedSegments <= 0 && knownTotalBytes >= DOWNLOAD_PARALLEL_VERY_HUGE_FILE_THRESHOLD_BYTES) {
+    desiredSegments += 6;
+  }
   const minSegmentBytes = resolveParallelDownloadMinSegmentBytes(game);
   const maxSegmentsBySize =
     knownTotalBytes > 0 ? Math.max(1, Math.floor(knownTotalBytes / Math.max(1, minSegmentBytes))) : desiredSegments;
-  const maxSegmentsLimit = resolveParallelDownloadSegmentsMaxLimit();
+  const maxSegmentsLimit = resolveParallelDownloadSegmentsMaxLimit(game);
   const maxAllowed = Math.max(1, Math.min(maxSegmentsLimit, maxSegmentsBySize));
   return Math.max(1, Math.min(desiredSegments, maxAllowed));
 }
@@ -7860,7 +8203,7 @@ function responseSupportsRangeRequests(response) {
   return contentRange.includes("bytes");
 }
 
-function canUseParallelRangeDownloadForCandidate(game, candidate, response, totalBytes, resumeStartBytes = 0) {
+function canUseParallelRangeDownloadForCandidate(game, candidate, response, totalBytes, resumeStartBytes = 0, metadataProbe = null) {
   const safeTotalBytes = Math.max(0, parseSizeBytes(totalBytes));
   const safeResumeBytes = Math.max(0, parseSizeBytes(resumeStartBytes));
   if (safeTotalBytes <= 0) {
@@ -7876,7 +8219,77 @@ function canUseParallelRangeDownloadForCandidate(game, candidate, response, tota
   if (segments <= 1) {
     return false;
   }
-  return responseSupportsRangeRequests(response);
+  const acceptRangesHeader = String(response?.headers?.["accept-ranges"] || "").toLowerCase();
+  const probeAcceptRanges = String(metadataProbe?.acceptRanges || "").toLowerCase();
+  const probeExplicitNoRange = metadataProbe?.acceptRangesNone === true || probeAcceptRanges.includes("none");
+  if (acceptRangesHeader.includes("none") || probeExplicitNoRange) {
+    return false;
+  }
+  if (responseSupportsRangeRequests(response) || metadataProbe?.acceptsRangeRequests === true) {
+    return true;
+  }
+  if (metadataProbe?.probed === true && metadataProbe?.acceptsRangeRequests === false) {
+    return false;
+  }
+  // Some CDNs support Range but omit `accept-ranges` on the initial stream response.
+  return true;
+}
+
+async function probeParallelDownloadMetadata(sourceUrl, timeoutMs = DOWNLOAD_PARALLEL_METADATA_PROBE_TIMEOUT_MS) {
+  const targetUrl = String(sourceUrl || "").trim();
+  if (!targetUrl) {
+    return null;
+  }
+
+  let response = null;
+  try {
+    const sampleEnd = Math.max(0, DOWNLOAD_PARALLEL_METADATA_PROBE_SAMPLE_RANGE_BYTES - 1);
+    response = await axios(getDownloadAxiosTransportConfig({
+      method: "GET",
+      url: targetUrl,
+      responseType: "stream",
+      maxRedirects: 8,
+      timeout: Math.max(1200, Number(timeoutMs) || DOWNLOAD_PARALLEL_METADATA_PROBE_TIMEOUT_MS),
+      maxBodyLength: 1024 * 1024,
+      maxContentLength: 1024 * 1024,
+      validateStatus: () => true,
+      decompress: false,
+      headers: {
+        "User-Agent": "Origin/2.0",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        Range: `bytes=0-${sampleEnd}`
+      }
+    }));
+    const status = Number(response?.status || 0);
+    const headers = response?.headers || {};
+    const acceptRanges = String(headers["accept-ranges"] || "").toLowerCase();
+    const contentRange = String(headers["content-range"] || "").toLowerCase();
+    return {
+      probed: true,
+      status,
+      totalBytes: extractTotalBytesFromHeaders(headers),
+      acceptRanges,
+      acceptRangesNone: acceptRanges.includes("none"),
+      acceptsRangeRequests: status === 206 || contentRange.includes("bytes") || acceptRanges.includes("bytes")
+    };
+  } catch (_error) {
+    return {
+      probed: true,
+      status: 0,
+      totalBytes: 0,
+      acceptRanges: "",
+      acceptRangesNone: false,
+      acceptsRangeRequests: false
+    };
+  } finally {
+    try {
+      if (response?.data && typeof response.data.destroy === "function") {
+        response.data.destroy();
+      }
+    } catch (_error) {
+      // Ignore stream cleanup failures.
+    }
+  }
 }
 
 function buildParallelDownloadRanges(startByte, endByte, segmentCount) {
@@ -10828,7 +11241,7 @@ async function readCatalogBundle(options = {}) {
         entry.downloadParallelEnabled ?? entry.download_parallel_enabled ?? entry.parallelDownloadEnabled,
         resolveDefaultParallelDownloadEnabled()
       );
-      const downloadParallelSegmentsMax = resolveParallelDownloadSegmentsMaxLimit();
+      const downloadParallelSegmentsMax = resolveParallelDownloadSegmentsMaxLimit(entry);
       const downloadParallelSegments = Math.max(
         1,
         Math.min(
@@ -10841,6 +11254,7 @@ async function readCatalogBundle(options = {}) {
           ) || resolveDefaultParallelDownloadSegments()
         )
       );
+      const downloadParallelProbeTimeoutMs = resolveParallelMetadataProbeTimeoutMs(entry);
       const downloadParallelMinFileBytes = Math.max(
         8 * 1024 * 1024,
         parsePositiveInteger(entry.downloadParallelMinFileBytes || entry.download_parallel_min_file_bytes) ||
@@ -10955,8 +11369,10 @@ async function readCatalogBundle(options = {}) {
         downloadMaxAttempts,
         downloadParallelEnabled,
         downloadParallelSegments,
+        downloadParallelSegmentsMax,
         downloadParallelMinFileBytes,
         downloadParallelMinSegmentBytes,
+        downloadParallelProbeTimeoutMs,
         downloadStallTimeoutMs,
         downloadProgressEmitIntervalMs,
         downloadProgressEmitMinDeltaBytes,
@@ -11468,7 +11884,7 @@ async function measureDownloadCandidateLatencyMs(candidate, timeoutMs) {
   const startedAtMs = Date.now();
   let response = null;
   try {
-    response = await axios({
+    response = await axios(getDownloadAxiosTransportConfig({
       method: "GET",
       url: candidate.url,
       responseType: "stream",
@@ -11477,12 +11893,13 @@ async function measureDownloadCandidateLatencyMs(candidate, timeoutMs) {
       maxBodyLength: 1024 * 1024,
       maxContentLength: 1024 * 1024,
       validateStatus: () => true,
+      decompress: false,
       headers: {
         "User-Agent": "Origin/2.0",
         "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
         Range: "bytes=0-0"
       }
-    });
+    }));
     const status = Number(response?.status || 0);
     const latencyMs = Math.max(1, Date.now() - startedAtMs);
     if (status >= 400) {
@@ -12333,7 +12750,7 @@ async function createDownloadStream(game, options = {}) {
     }
 
     try {
-      const response = await axios({
+      const response = await axios(getDownloadAxiosTransportConfig({
         method: "GET",
         url: candidate.url,
         responseType: "stream",
@@ -12342,12 +12759,13 @@ async function createDownloadStream(game, options = {}) {
         maxBodyLength: Infinity,
         maxContentLength: Infinity,
         validateStatus: () => true,
+        decompress: false,
         headers: {
           "User-Agent": "Origin/2.0",
           "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
           ...(requestedRangeHeader ? { Range: requestedRangeHeader } : {})
         }
-      });
+      }));
 
       if (response.status >= 400) {
         let failureReason = `HTTP ${response.status}`;
@@ -12531,7 +12949,7 @@ async function createDownloadStream(game, options = {}) {
           }
           visitedConfirmUrls.add(confirmKey);
 
-          const confirmedResponse = await axios({
+          const confirmedResponse = await axios(getDownloadAxiosTransportConfig({
             method: "GET",
             url: confirmUrl,
             responseType: "stream",
@@ -12540,13 +12958,14 @@ async function createDownloadStream(game, options = {}) {
             maxBodyLength: Infinity,
             maxContentLength: Infinity,
             validateStatus: () => true,
+            decompress: false,
             headers: {
               "User-Agent": "Origin/2.0",
               "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
               ...(requestedRangeHeader ? { Range: requestedRangeHeader } : {}),
               ...(cookieHeader ? { Cookie: cookieHeader } : {})
             }
-          });
+          }));
 
           cookieHeader = mergeCookieHeader(cookieHeader, confirmedResponse.headers["set-cookie"]);
           currentResponse = confirmedResponse;
@@ -12891,7 +13310,7 @@ async function downloadFileWithParallelRanges({
       let attemptBytesWritten = 0;
       let response = null;
       try {
-        response = await axios({
+        response = await axios(getDownloadAxiosTransportConfig({
           method: "GET",
           url: sourceUrl,
           responseType: "stream",
@@ -12907,7 +13326,7 @@ async function downloadFileWithParallelRanges({
             "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
             Range: `bytes=${range.start}-${range.end}`
           }
-        });
+        }));
 
         const status = Number(response?.status || 0);
         if (status >= 400) {
@@ -13300,9 +13719,17 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
 
     try {
       const allowParallelForSource = !parallelDisabledSourceUrls.has(sourceKey);
+      let parallelMetadataProbe = null;
+      if (allowParallelForSource && totalBytes <= 0 && resumeStartBytes <= 0 && !isGoogleDriveCandidate(candidate)) {
+        parallelMetadataProbe = await probeParallelDownloadMetadata(sourceUrl, resolveParallelMetadataProbeTimeoutMs(game));
+        const probedTotalBytes = parseSizeBytes(parallelMetadataProbe?.totalBytes);
+        if (probedTotalBytes > 0) {
+          totalBytes = probedTotalBytes;
+        }
+      }
       const canUseParallelDownload =
         allowParallelForSource &&
-        canUseParallelRangeDownloadForCandidate(game, candidate, response, totalBytes, resumeStartBytes);
+        canUseParallelRangeDownloadForCandidate(game, candidate, response, totalBytes, resumeStartBytes, parallelMetadataProbe);
       let completedWithParallel = false;
       if (canUseParallelDownload) {
         if (response?.data && typeof response.data.destroy === "function") {
@@ -13338,7 +13765,7 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
           lastSampleAt = Date.now();
           lastSampleBytes = downloadedBytes;
           lastSpeedBps = 0;
-          const fallbackResponse = await axios({
+          const fallbackResponse = await axios(getDownloadAxiosTransportConfig({
             method: "GET",
             url: sourceUrl,
             responseType: "stream",
@@ -13347,11 +13774,12 @@ async function downloadFile({ game, destinationPath, onProgress, runControl, sou
             maxBodyLength: Infinity,
             maxContentLength: Infinity,
             validateStatus: () => true,
+            decompress: false,
             headers: {
               "User-Agent": "Origin/2.0",
               "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8"
             }
-          });
+          }));
           if (Number(fallbackResponse?.status || 0) >= 400) {
             const fallbackError = new Error(`HTTP ${fallbackResponse.status} ao reabrir stream principal.`);
             fallbackError.status = Number(fallbackResponse.status || 0);
@@ -17455,6 +17883,7 @@ if (!hasSingleInstanceLock) {
     appendStartupLog("[APP] whenReady iniciado.");
     await ensurePersistedAuthConfigFile().catch(() => {});
     await ensurePersistedUpdaterConfigFile().catch(() => {});
+    prepareDonatePixTempFilesForSession();
     ensureDownloadSourcePerformanceStateLoadedSync();
     ensureCatalogSizeCacheLoadedSync();
     ensureSocialActivityBackgroundMonitorStarted();
@@ -17556,6 +17985,7 @@ if (!hasSingleInstanceLock) {
     ipcMain.handle("launcher:create-game-shortcut", (_event, gameId) => createGameShortcut(gameId));
     ipcMain.handle("launcher:open-external-url", (_event, rawUrl) => openExternalUrl(rawUrl));
     ipcMain.handle("launcher:open-steam-client", () => openSteamClient());
+    ipcMain.handle("launcher:pix-generate-donate-qr", (_event, amount) => generateDonatePixQrImage(amount));
     ipcMain.handle("launcher:show-game-start-toast", (_event, payload) => showGameStartedDesktopToast(payload));
     ipcMain.handle("launcher:auth-get-session", () => getAuthSessionState());
     ipcMain.handle("launcher:auth-login-steam", () => loginWithSteam());
@@ -17625,6 +18055,7 @@ if (!hasSingleInstanceLock) {
     flushDownloadSourcePerformanceStateSync();
     flushPlaytimeStateSync();
     flushSocialActivityPublishQueueSync();
+    cleanupDonatePixTempFilesSync();
     destroyUpdateSplashWindow();
     destroyTray();
     appendStartupLog("[APP] encerrando launcher.");

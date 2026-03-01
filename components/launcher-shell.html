@@ -73,6 +73,22 @@
           </section>
 
           <button
+            id="railDonateBtn"
+            class="rail-install-btn rail-donate-btn"
+            type="button"
+            aria-label="Apoie o Origin Launcher"
+            aria-expanded="false"
+            aria-controls="donateView"
+          >
+            <span class="rail-install-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M12 19.1L5.7 12.9C4.1 11.3 4.1 8.6 5.7 7C7.3 5.4 10 5.4 11.6 7L12 7.4L12.4 7C14 5.4 16.7 5.4 18.3 7C19.9 8.6 19.9 11.3 18.3 12.9L12 19.1Z" fill="currentColor"></path>
+              </svg>
+            </span>
+            <span class="visually-hidden">Apoiar o Origin Launcher</span>
+          </button>
+
+          <button
             id="railDownloadsBtn"
             class="rail-install-btn"
             type="button"
@@ -361,6 +377,48 @@
                 <p>Jogos adicionados ou baixados aparecem aqui.</p>
               </header>
               <div id="libraryGrid" class="library-grid"></div>
+            </section>
+
+            <section id="donateView" class="view" aria-label="Apoie o Origin Launcher">
+              <div class="donate-page">
+                <section id="donateSelectScreen" class="donate-screen donate-screen-select" aria-label="Valores de contribuicao">
+                  <header class="donate-head">
+                    <p class="donate-kicker">APOIE O ORIGIN LAUNCHER</p>
+                    <h2>Escolha o valor da contribuicao</h2>
+                    <p>Selecione um valor para gerar seu QR Code PIX de apoio.</p>
+                  </header>
+
+                  <div class="donate-values-card">
+                    <h3>Valores disponiveis</h3>
+                    <p>Contribuicao unica. Escolha um valor para continuar.</p>
+                    <div id="donateAmountGrid" class="donate-amount-grid"></div>
+                  </div>
+                </section>
+
+                <section id="donatePaymentScreen" class="donate-screen donate-screen-payment" aria-label="Pagamento">
+                  <button id="donateBackBtn" class="donate-back-btn" type="button" aria-label="Voltar para escolha de valor">
+                    Voltar
+                  </button>
+
+                  <article class="donate-payment-card">
+                    <header class="donate-payment-head">
+                      <strong id="donatePaymentTitle">PIX - R$ 5,00</strong>
+                      <span id="donatePaymentSubtitle">Contribuicao unica</span>
+                    </header>
+                    <div class="donate-qr-frame donate-qr-frame--hero">
+                      <img id="donateQrImage" class="donate-qr-image" src="./assets/isotipo.png" alt="QR Code para contribuicao" />
+                    </div>
+                    <p id="donatePaymentDescription" class="donate-payment-description">
+                      Apoio para manter servidores, atualizacoes e melhorias no Origin Launcher.
+                    </p>
+                    <p id="donateQrAssetHint" class="donate-qr-asset-hint"></p>
+                    <div class="donate-payment-warning">
+                      O pagamento via QR Code nao aprova automaticamente. Abra um ticket no Discord e envie o comprovante
+                      para entrar na lista de donates.
+                    </div>
+                  </article>
+                </section>
+              </div>
             </section>
 
             <section id="downloadsView" class="view" aria-label="Downloads e instalacoes">

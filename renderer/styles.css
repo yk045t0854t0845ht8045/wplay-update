@@ -1325,6 +1325,30 @@ body.auth-locked .auth-gate {
   cursor: pointer;
 }
 
+.rail-donate-btn {
+  margin-top: 0;
+  margin-bottom: 0.55rem;
+  color: rgba(244, 255, 247, 0.98);
+  border-color: rgba(124, 255, 159, 0.52);
+  background: linear-gradient(165deg, rgba(36, 157, 84, 0.94), rgba(20, 113, 60, 0.96));
+  box-shadow:
+      inset 0 1px 0 rgba(185, 255, 208, 0.24),
+      0 12px 22px rgba(15, 65, 35, 0.36);
+}
+
+.rail-donate-btn:hover {
+  border-color: rgba(174, 255, 199, 0.72);
+  color: #ffffff;
+  background: linear-gradient(165deg, rgba(44, 176, 96, 0.96), rgba(22, 126, 68, 0.98));
+}
+
+.rail-donate-btn.is-active {
+  box-shadow:
+      inset 0 1px 0 rgba(201, 255, 221, 0.32),
+      0 0 0 1px rgba(105, 228, 145, 0.38),
+      0 16px 30px rgba(14, 67, 36, 0.48);
+}
+
 .rail-install-btn:hover {
   border-color: rgba(255, 255, 255, 0.24);
   color: #ffffff;
@@ -2209,6 +2233,11 @@ body.header-scrolled:not(.view-details):not(.ui-transitions-hold) .top-header {
   display: none !important;
 }
 
+.view-donate .stage-header,
+  .view-donate .status-line {
+  display: none !important;
+}
+
 .view-details .stage-surface {
   position: relative;
   padding: 0 0 2rem;
@@ -2246,9 +2275,11 @@ body.header-scrolled:not(.view-details):not(.ui-transitions-hold) .top-header {
 body.layout-centered.view-store .stage-header,
   body.layout-centered.view-library .stage-header,
   body.layout-centered.view-downloads .stage-header,
+  body.layout-centered.view-donate .stage-header,
   body.layout-centered.view-store #storeView,
   body.layout-centered.view-library #libraryView,
-  body.layout-centered.view-downloads #downloadsView {
+  body.layout-centered.view-downloads #downloadsView,
+  body.layout-centered.view-donate #donateView {
   width: min(var(--stage-centered-max-width), 100%);
   margin-left: auto;
   margin-right: auto;
@@ -2256,7 +2287,8 @@ body.layout-centered.view-store .stage-header,
 
 body.layout-centered.view-store:not(.view-details):not(.header-scrolled) .top-header,
   body.layout-centered.view-library:not(.view-details):not(.header-scrolled) .top-header,
-  body.layout-centered.view-downloads:not(.view-details):not(.header-scrolled) .top-header {
+  body.layout-centered.view-downloads:not(.view-details):not(.header-scrolled) .top-header,
+  body.layout-centered.view-donate:not(.view-details):not(.header-scrolled) .top-header {
   width: min(var(--stage-centered-max-width), 100%);
   margin-left: auto;
   margin-right: auto;
@@ -2264,7 +2296,8 @@ body.layout-centered.view-store:not(.view-details):not(.header-scrolled) .top-he
 
 body.layout-centered.header-scrolled.view-store:not(.view-details) .top-header,
   body.layout-centered.header-scrolled.view-library:not(.view-details) .top-header,
-  body.layout-centered.header-scrolled.view-downloads:not(.view-details) .top-header {
+  body.layout-centered.header-scrolled.view-downloads:not(.view-details) .top-header,
+  body.layout-centered.header-scrolled.view-donate:not(.view-details) .top-header {
   top: calc(-1 * var(--stage-pad-top));
   margin: 0 calc(-1 * var(--stage-pad-x)) var(--top-header-gap);
   z-index: 45;
@@ -2281,7 +2314,8 @@ body.layout-centered.header-scrolled.view-store:not(.view-details) .top-header,
 
 body.layout-centered.header-scrolled.view-store:not(.view-details):not(.ui-transitions-hold) .top-header,
   body.layout-centered.header-scrolled.view-library:not(.view-details):not(.ui-transitions-hold) .top-header,
-  body.layout-centered.header-scrolled.view-downloads:not(.view-details):not(.ui-transitions-hold) .top-header {
+  body.layout-centered.header-scrolled.view-downloads:not(.view-details):not(.ui-transitions-hold) .top-header,
+  body.layout-centered.header-scrolled.view-donate:not(.view-details):not(.ui-transitions-hold) .top-header {
   animation: headerDockFromTop 0.16s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -3058,6 +3092,306 @@ body.layout-centered.view-details .details-bottom {
 
 .view-downloads .stage-tools {
   display: none !important;
+}
+
+.view-donate .stage-tools {
+  display: none !important;
+}
+
+.donate-page{
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - var(--window-chrome-height) - var(--maintenance-banner-height) - 5.8rem);
+  padding: 0.4rem 0 1rem;
+}
+
+.donate-screen {
+  width: min(960px, 100%);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.donate-screen-payment {
+  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.donate-screen-payment .donate-payment-card {
+  width: min(760px, 100%);
+  margin-top: 0;
+}
+
+.donate-head{
+  border-radius: 1.35rem;
+  border-width: 1px;
+  padding-left: 1.5rem;
+  padding-right: 1.5rem;
+  padding-top: 1.25rem;
+  padding-bottom: 1.25rem;
+  border-color: rgba(123, 255, 171, 0.24);
+  background:
+      radial-gradient(circle at right top, rgba(35, 148, 80, 0.24), transparent 52%),
+      linear-gradient(170deg, rgba(12, 22, 16, 0.96), rgba(10, 18, 14, 0.96));
+  box-shadow:
+      inset 0 0 0 1px rgba(162, 252, 194, 0.06),
+      0 16px 30px rgba(8, 18, 12, 0.42);
+}
+
+.donate-kicker{
+  margin: 0px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: rgba(174, 255, 200, 0.82);
+  font-family: "Space Grotesk", "Sora", sans-serif;
+}
+
+.donate-head h2{
+  margin-top: 0.25rem;
+  font-size: 1.95rem;
+  font-weight: 600;
+  line-height: 1.25;
+  --tw-text-opacity: 1;
+  color: rgb(248 250 252 / var(--tw-text-opacity, 1));
+  margin-bottom: 0.35rem;
+  font-family: "Space Grotesk", "Sora", sans-serif;
+}
+
+.donate-head p{
+  margin: 0px;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  line-height: 1.625;
+  --tw-text-opacity: 1;
+  color: rgb(226 232 240 / var(--tw-text-opacity, 1));
+  max-width: 760px;
+}
+
+.donate-values-card,
+  .donate-payment-card{
+  margin-top: 1rem;
+  border-radius: 1.35rem;
+  border-width: 1px;
+  padding: 1.25rem;
+  border-color: rgba(255, 255, 255, 0.12);
+  background:
+      radial-gradient(circle at 20% 0%, rgba(80, 150, 255, 0.08), transparent 58%),
+      #101014;
+  box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+      0 22px 38px rgba(2, 8, 18, 0.42);
+}
+
+.donate-values-card h3,
+  .donate-payment-card h3{
+  margin: 0px;
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  font-weight: 600;
+  --tw-text-opacity: 1;
+  color: rgb(241 245 249 / var(--tw-text-opacity, 1));
+  font-family: "Space Grotesk", "Sora", sans-serif;
+}
+
+.donate-values-card p{
+  margin-bottom: 0px;
+  margin-top: 0.375rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  line-height: 1.625;
+  --tw-text-opacity: 1;
+  color: rgb(203 213 225 / var(--tw-text-opacity, 1));
+}
+
+.donate-amount-grid{
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.625rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.donate-amount-btn{
+  display: inline-flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.75rem;
+  border-width: 1px;
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+  padding-top: 0.625rem;
+  padding-bottom: 0.625rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  font-weight: 600;
+  --tw-text-opacity: 1;
+  color: rgb(241 245 249 / var(--tw-text-opacity, 1));
+  transition-property: all;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 200ms;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: linear-gradient(175deg, #191a22, #14151c);
+  cursor: pointer;
+}
+
+.donate-amount-btn:hover {
+  border-color: rgba(130, 252, 174, 0.44);
+  color: #f4fff7;
+  transform: translateY(-2px);
+  box-shadow: 0 14px 24px rgba(9, 31, 16, 0.34);
+}
+
+.donate-amount-btn.is-active {
+  border-color: rgba(126, 255, 174, 0.58);
+  color: #f5fff8;
+  background: linear-gradient(165deg, rgba(37, 152, 84, 0.84), rgba(20, 111, 59, 0.88));
+  box-shadow: inset 0 0 0 1px rgba(179, 255, 208, 0.16);
+}
+
+.donate-payment-head{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.125rem;
+  text-align: center;
+}
+
+.donate-payment-head strong{
+  font-size: 1.38rem;
+  font-weight: 600;
+  --tw-text-opacity: 1;
+  color: rgb(248 250 252 / var(--tw-text-opacity, 1));
+  font-family: "Space Grotesk", "Sora", sans-serif;
+}
+
+.donate-payment-head span{
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  --tw-text-opacity: 1;
+  color: rgb(148 163 184 / var(--tw-text-opacity, 1));
+}
+
+.donate-qr-frame{
+  margin-top: 1rem;
+  display: inline-flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 1rem;
+  border-width: 1px;
+  padding: 1rem;
+  min-height: 270px;
+  border-color: rgba(255, 255, 255, 0.14);
+  background:
+      radial-gradient(circle at center, rgba(140, 199, 255, 0.12), transparent 62%),
+      #17171d;
+}
+
+.donate-qr-frame--hero {
+  min-height: clamp(360px, 58vh, 560px);
+  padding: clamp(0.95rem, 2.2vw, 1.5rem);
+}
+
+.donate-qr-image {
+  width: min(100%, clamp(240px, 44vw, 520px));
+  aspect-ratio: 1 / 1;
+  border-radius: 0.95rem;
+  -o-object-fit: cover;
+     object-fit: cover;
+  background: #ffffff;
+  box-shadow:
+      0 22px 48px rgba(0, 0, 0, 0.34),
+      0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.donate-qr-image.is-fallback {
+  -o-object-fit: contain;
+     object-fit: contain;
+  padding: 1.3rem;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: none;
+}
+
+.donate-payment-description{
+  margin-bottom: 0px;
+  margin-top: 1rem;
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  line-height: 1.625;
+  --tw-text-opacity: 1;
+  color: rgb(203 213 225 / var(--tw-text-opacity, 1));
+}
+
+.donate-qr-asset-hint{
+  margin-bottom: 0px;
+  margin-top: 0.5rem;
+  text-align: center;
+  font-size: 11px;
+  --tw-text-opacity: 1;
+  color: rgb(100 116 139 / var(--tw-text-opacity, 1));
+  word-break: break-all;
+}
+
+.donate-payment-warning{
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: 1rem;
+  max-width: 620px;
+  border-radius: 0.75rem;
+  border-width: 1px;
+  padding-left: 0.875rem;
+  padding-right: 0.875rem;
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+  text-align: center;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  line-height: 1.625;
+  --tw-text-opacity: 1;
+  color: rgb(226 232 240 / var(--tw-text-opacity, 1));
+  border-color: rgba(255, 204, 126, 0.4);
+  background: linear-gradient(170deg, rgba(45, 32, 13, 0.58), rgba(35, 24, 10, 0.52));
+}
+
+.donate-back-btn{
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0.5rem;
+  border-width: 1px;
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  --tw-text-opacity: 1;
+  color: rgb(226 232 240 / var(--tw-text-opacity, 1));
+  transition-property: all;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 200ms;
+  align-self: flex-start;
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(20, 21, 28, 0.85);
+  cursor: pointer;
+}
+
+.donate-back-btn:hover {
+  border-color: rgba(168, 212, 255, 0.38);
+  color: #ffffff;
+  transform: translateY(-1px);
 }
 
 .downloads-page{
@@ -5359,6 +5693,18 @@ body.layout-centered.view-details .details-bottom {
     align-items: center;
   }
 
+  .donate-screen {
+    width: min(860px, 100%);
+  }
+
+  .donate-amount-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .donate-head h2 {
+    font-size: 1.58rem;
+  }
+
   .store-card {
     width: 100%;
   }
@@ -5474,6 +5820,10 @@ body.layout-centered.view-details .details-bottom {
     height: 50px;
   }
 
+  .rail-donate-btn {
+    margin-bottom: 0.45rem;
+  }
+
   .stage-surface {
     --stage-pad-x: 1rem;
     --stage-pad-top: 0.9rem;
@@ -5525,6 +5875,27 @@ body.layout-centered.view-details .details-bottom {
 
   .store-shelf-title {
     font-size: 1.58rem;
+  }
+
+  .donate-head {
+    padding: 0.9rem 0.95rem;
+  }
+
+  .donate-head h2 {
+    font-size: 1.38rem;
+  }
+
+  .donate-values-card,
+  .donate-payment-card {
+    padding: 0.85rem;
+  }
+
+  .donate-amount-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .donate-qr-frame--hero {
+    min-height: clamp(280px, 52vh, 420px);
   }
 
   .store-shelf-nav-btn {

@@ -20,7 +20,8 @@
   "dependencies": {
     "7zip-bin": "^5.2.0",
     "axios": "^1.7.9",
-    "electron-updater": "^6.6.2"
+    "electron-updater": "^6.6.2",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.20",
@@ -32,9 +33,9 @@
     "next": "^16.1.6",
     "notyf": "^3.10.0",
     "postcss": "^8.4.49",
+    "rcedit": "^5.0.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "rcedit": "^5.0.2",
     "tailwindcss": "^3.4.17"
   },
   "build": {

@@ -25,15 +25,26 @@ const sideHomeLogo = document.getElementById("sideHomeLogo");
 const navStoreBtn = document.getElementById("navStoreBtn");
 const navLibraryBtn = document.getElementById("navLibraryBtn");
 const railGamesList = document.getElementById("railGamesList");
+const railDonateBtn = document.getElementById("railDonateBtn");
 const railDownloadsBtn = document.getElementById("railDownloadsBtn");
 const railDownloadsCount = document.getElementById("railDownloadsCount");
 
 const storeView = document.getElementById("storeView");
 const detailsView = document.getElementById("detailsView");
 const libraryView = document.getElementById("libraryView");
+const donateView = document.getElementById("donateView");
 const downloadsView = document.getElementById("downloadsView");
 const storeGrid = document.getElementById("storeGrid");
 const libraryGrid = document.getElementById("libraryGrid");
+const donateSelectScreen = document.getElementById("donateSelectScreen");
+const donatePaymentScreen = document.getElementById("donatePaymentScreen");
+const donateAmountGrid = document.getElementById("donateAmountGrid");
+const donateBackBtn = document.getElementById("donateBackBtn");
+const donatePaymentTitle = document.getElementById("donatePaymentTitle");
+const donatePaymentSubtitle = document.getElementById("donatePaymentSubtitle");
+const donatePaymentDescription = document.getElementById("donatePaymentDescription");
+const donateQrImage = document.getElementById("donateQrImage");
+const donateQrAssetHint = document.getElementById("donateQrAssetHint");
 const downloadsActiveSection = document.getElementById("downloadsActiveSection");
 const downloadsActiveCount = document.getElementById("downloadsActiveCount");
 const downloadsActiveList = document.getElementById("downloadsActiveList");
@@ -96,6 +107,46 @@ const maintenanceBannerMessage = document.getElementById("maintenanceBannerMessa
 
 const FALLBACK_CARD_IMAGE = "https://placehold.co/640x360/0f0f0f/f2f2f2?text=Game";
 const FALLBACK_BANNER_IMAGE = "https://placehold.co/1280x720/0f0f0f/f2f2f2?text=Game+Banner";
+const DONATE_QR_FALLBACK_IMAGE = "./assets/isotipo.png";
+const DONATE_QR_LOADING_MESSAGE = "Gerando QR Code PIX localmente...";
+const DONATE_QR_READY_MESSAGE = "QR Code gerado localmente. Abra um ticket no Discord com o comprovante para entrar na lista de donates.";
+const DONATE_OPTIONS = [
+  {
+    amount: 5,
+    label: "R$ 5,00",
+    description: "Contribuicao para custos basicos de operacao do launcher."
+  },
+  {
+    amount: 7,
+    label: "R$ 7,00",
+    description: "Apoio para manter o launcher estavel e atualizado."
+  },
+  {
+    amount: 12,
+    label: "R$ 12,00",
+    description: "Ajuda direta para melhorias de desempenho e qualidade."
+  },
+  {
+    amount: 15,
+    label: "R$ 15,00",
+    description: "Contribuicao para evoluir recursos e experiencia do usuario."
+  },
+  {
+    amount: 25,
+    label: "R$ 25,00",
+    description: "Apoio premium para novas funcionalidades e manutencao continua."
+  },
+  {
+    amount: 50,
+    label: "R$ 50,00",
+    description: "Contribuicao forte para acelerar entregas e melhorias do projeto."
+  },
+  {
+    amount: 100,
+    label: "R$ 100,00",
+    description: "Apoio master para fortalecer infraestrutura e roadmap do launcher."
+  }
+];
 const LIBRARY_STORAGE_KEY = "wyzer.launcher.library.v1";
 const hardwareConcurrency = Number(window?.navigator?.hardwareConcurrency || 0);
 const deviceMemoryGb = Number(window?.navigator?.deviceMemory || 0);
@@ -237,6 +288,8 @@ const state = {
   appBootstrapped: false,
   view: "store",
   lastNonDetailView: "store",
+  donateSelectedAmount: DONATE_OPTIONS[0].amount,
+  donateStep: "select",
   storeFilter: "popular",
   storeAdvancedFiltersOpen: false,
   storeModeFilter: "all",
@@ -278,6 +331,8 @@ let uiTransitionReleaseTimer = null;
 let stageSurfaceResizeObserver = null;
 let stageSurfaceObservedWidth = 0;
 let stageSurfaceObservedHeight = 0;
+let donateQrRequestToken = 0;
+const donateQrCacheByAmount = new Map();
 
 function setStatus(text, isError = false) {
   statusMessage.textContent = text;
@@ -1189,6 +1244,7 @@ function hasActiveInstallInProgress() {
 }
 
 function renderRealtimeProgressFrame() {
+  renderRailDonate();
   renderRailDownloads();
 
   if (state.view === "downloads") {
@@ -3400,6 +3456,8 @@ function updateHeaderForView() {
     viewTitle.textContent = "Bilblioteca";
   } else if (state.view === "downloads") {
     viewTitle.textContent = "Downloads";
+  } else if (state.view === "donate") {
+    viewTitle.textContent = "Apoie o Origin Launcher";
   } else {
     const selected = getGameById(state.selectedGameId);
     viewTitle.textContent = selected?.name || "Game";
@@ -3585,7 +3643,7 @@ function closeSearch(clearQuery = true) {
 }
 
 function setView(nextView) {
-  if (!["store", "details", "library", "downloads"].includes(nextView)) {
+  if (!["store", "details", "library", "downloads", "donate"].includes(nextView)) {
     return;
   }
   const previousView = state.view;
@@ -3616,6 +3674,9 @@ function setView(nextView) {
   if (nextView !== "store") {
     state.storeAdvancedFiltersOpen = false;
   }
+  if (nextView === "donate" && previousView !== "donate") {
+    setDonateStep("select", { cancelQrRequest: true });
+  }
 
   if (previousView === "details" && nextView !== "details") {
     headerScrolledState = false;
@@ -3626,10 +3687,14 @@ function setView(nextView) {
   document.body.classList.toggle("view-downloads", nextView === "downloads");
   document.body.classList.toggle("view-store", nextView === "store");
   document.body.classList.toggle("view-library", nextView === "library");
+  document.body.classList.toggle("view-donate", nextView === "donate");
 
   storeView.classList.toggle("is-active", nextView === "store");
   detailsView.classList.toggle("is-active", nextView === "details");
   libraryView.classList.toggle("is-active", nextView === "library");
+  if (donateView) {
+    donateView.classList.toggle("is-active", nextView === "donate");
+  }
   downloadsView.classList.toggle("is-active", nextView === "downloads");
 
   const activeTopView = nextView === "details" ? state.lastNonDetailView : nextView;
@@ -4076,6 +4141,219 @@ function renderRailDownloads() {
   railDownloadsBtn.setAttribute("aria-expanded", state.view === "downloads" ? "true" : "false");
   railDownloadsCount.classList.toggle("is-hidden", !hasActiveDownloads);
   railDownloadsCount.textContent = String(Math.min(activeDownloads.length, 99));
+}
+
+function renderRailDonate() {
+  if (!railDonateBtn) {
+    return;
+  }
+  const isActive = state.view === "donate";
+  railDonateBtn.classList.toggle("is-active", isActive);
+  railDonateBtn.setAttribute("aria-expanded", isActive ? "true" : "false");
+}
+
+function getDonateOptionByAmount(amountValue) {
+  const requestedAmount = Number(amountValue);
+  if (Number.isFinite(requestedAmount)) {
+    const matched = DONATE_OPTIONS.find((option) => Number(option.amount) === requestedAmount);
+    if (matched) {
+      return matched;
+    }
+  }
+  return DONATE_OPTIONS[0];
+}
+
+function resolveSelectedDonateOption() {
+  const selected = getDonateOptionByAmount(state.donateSelectedAmount);
+  state.donateSelectedAmount = Number(selected.amount);
+  return selected;
+}
+
+function getDonateStep() {
+  return state.donateStep === "payment" ? "payment" : "select";
+}
+
+function setDonateStep(nextStep, options = {}) {
+  const resolvedStep = nextStep === "payment" ? "payment" : "select";
+  state.donateStep = resolvedStep;
+  if (resolvedStep === "select" && options.cancelQrRequest === true) {
+    donateQrRequestToken += 1;
+  }
+}
+
+function getDonateAmountCacheKey(amountValue) {
+  const parsed = Number(amountValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return "";
+  }
+  return parsed.toFixed(2);
+}
+
+function setDonateQrHintMessage(message) {
+  if (!donateQrAssetHint) {
+    return;
+  }
+  donateQrAssetHint.textContent = String(message || "").trim();
+}
+
+function setDonateQrFallbackState(message) {
+  if (!donateQrImage) {
+    return;
+  }
+  donateQrImage.dataset.loading = "0";
+  donateQrImage.dataset.fallback = "1";
+  donateQrImage.classList.add("is-fallback");
+  donateQrImage.src = DONATE_QR_FALLBACK_IMAGE;
+  if (message) {
+    setDonateQrHintMessage(message);
+  }
+}
+
+function setDonateQrLoadingState(selectedOption) {
+  if (!donateQrImage) {
+    return;
+  }
+  donateQrImage.dataset.loading = "1";
+  donateQrImage.dataset.fallback = "0";
+  donateQrImage.classList.remove("is-fallback");
+  donateQrImage.alt = `Gerando QR Code PIX para contribuicao de ${selectedOption.label}`;
+  donateQrImage.src = DONATE_QR_FALLBACK_IMAGE;
+  setDonateQrHintMessage(DONATE_QR_LOADING_MESSAGE);
+}
+
+function applyDonateQrReadyState(selectedOption, imageUrl) {
+  if (!donateQrImage) {
+    return;
+  }
+  donateQrImage.dataset.loading = "0";
+  donateQrImage.dataset.fallback = "0";
+  donateQrImage.dataset.errorReason = "";
+  donateQrImage.classList.remove("is-fallback");
+  donateQrImage.src = imageUrl;
+  donateQrImage.alt = `QR Code PIX para contribuicao de ${selectedOption.label}`;
+  setDonateQrHintMessage(DONATE_QR_READY_MESSAGE);
+}
+
+async function ensureDonateQrGenerated(selectedOption) {
+  if (!donateQrImage || !selectedOption) {
+    return;
+  }
+
+  const amountKey = getDonateAmountCacheKey(selectedOption.amount);
+  if (!amountKey) {
+    setDonateQrFallbackState("Valor de contribuicao invalido.");
+    return;
+  }
+
+  const cached = donateQrCacheByAmount.get(amountKey);
+  if (cached?.imageUrl) {
+    applyDonateQrReadyState(selectedOption, cached.imageUrl);
+    return;
+  }
+
+  if (typeof window.launcherApi?.generatePixDonationQr !== "function") {
+    setDonateQrFallbackState("Gerador de PIX indisponivel nesta versao do launcher.");
+    return;
+  }
+
+  const requestToken = ++donateQrRequestToken;
+  donateQrImage.dataset.errorReason = "Nao foi possivel carregar o QR Code PIX no momento.";
+  setDonateQrLoadingState(selectedOption);
+
+  try {
+    const payload = await window.launcherApi.generatePixDonationQr(Number(selectedOption.amount));
+    if (requestToken !== donateQrRequestToken) {
+      return;
+    }
+
+    const imageUrl = String(payload?.imageUrl || "").trim();
+    const pixCopyPaste = String(payload?.pixCopyPaste || "").trim();
+    if (payload?.ok !== true || !imageUrl) {
+      const errorMessage = String(payload?.error || "").trim() || "Falha ao gerar QR Code PIX.";
+      setDonateQrFallbackState(errorMessage);
+      return;
+    }
+
+    donateQrCacheByAmount.set(amountKey, {
+      imageUrl,
+      pixCopyPaste
+    });
+    applyDonateQrReadyState(selectedOption, imageUrl);
+  } catch (error) {
+    if (requestToken !== donateQrRequestToken) {
+      return;
+    }
+    const message = String(error?.message || "").trim() || "Falha ao gerar QR Code PIX.";
+    setDonateQrFallbackState(message);
+  }
+}
+
+function renderDonateView() {
+  if (
+    !donateView ||
+    !donateAmountGrid ||
+    !donateQrImage ||
+    !donatePaymentTitle ||
+    !donatePaymentSubtitle ||
+    !donatePaymentDescription
+  ) {
+    return;
+  }
+
+  const selectedOption = resolveSelectedDonateOption();
+  const donateStep = getDonateStep();
+  const paymentStepVisible = donateStep === "payment";
+
+  donateView.classList.toggle("is-step-select", !paymentStepVisible);
+  donateView.classList.toggle("is-step-payment", paymentStepVisible);
+
+  if (donateSelectScreen) {
+    donateSelectScreen.classList.toggle("is-hidden", paymentStepVisible);
+    donateSelectScreen.setAttribute("aria-hidden", paymentStepVisible ? "true" : "false");
+  }
+  if (donatePaymentScreen) {
+    donatePaymentScreen.classList.toggle("is-hidden", !paymentStepVisible);
+    donatePaymentScreen.setAttribute("aria-hidden", paymentStepVisible ? "false" : "true");
+  }
+
+  donateAmountGrid.innerHTML = DONATE_OPTIONS.map((option) => {
+    const isActive = Number(option.amount) === Number(selectedOption.amount);
+    return `
+      <button
+        type="button"
+        class="donate-amount-btn ${isActive ? "is-active" : ""}"
+        data-donate-amount="${Number(option.amount)}"
+        aria-pressed="${isActive ? "true" : "false"}"
+      >
+        ${escapeHtml(option.label)}
+      </button>
+    `;
+  }).join("");
+
+  donatePaymentTitle.textContent = `PIX - ${selectedOption.label}`;
+  donatePaymentSubtitle.textContent = `Apoio de ${selectedOption.label}`;
+  donatePaymentDescription.textContent = selectedOption.description;
+
+  if (!paymentStepVisible) {
+    donateQrImage.dataset.loading = "0";
+    donateQrImage.dataset.fallback = "0";
+    donateQrImage.classList.remove("is-fallback");
+    donateQrImage.src = DONATE_QR_FALLBACK_IMAGE;
+    donateQrImage.alt = "QR Code PIX de contribuicao";
+    setDonateQrHintMessage("Escolha um valor para gerar o QR Code PIX.");
+    return;
+  }
+
+  const amountKey = getDonateAmountCacheKey(selectedOption.amount);
+  const cached = amountKey ? donateQrCacheByAmount.get(amountKey) : null;
+  if (cached?.imageUrl) {
+    applyDonateQrReadyState(selectedOption, cached.imageUrl);
+  } else if (state.view === "donate" && paymentStepVisible) {
+    setDonateQrLoadingState(selectedOption);
+    void ensureDonateQrGenerated(selectedOption);
+  } else {
+    setDonateQrFallbackState(DONATE_QR_LOADING_MESSAGE);
+  }
 }
 
 function getDownloadsRenderSignature(activeDownloads, completedDownloads) {
@@ -5304,8 +5582,10 @@ function renderDetails(game) {
 function renderAll() {
   renderStoreGrid();
   renderLibraryGrid();
+  renderDonateView();
   renderDownloadsView();
   renderRailGames();
+  renderRailDonate();
   renderRailDownloads();
   updateHeaderForView();
 
@@ -6066,6 +6346,55 @@ function installEventBindings() {
       syncSearchVisibility();
       renderAll();
       setStatus("Abrindo downloads...");
+    });
+  }
+
+  if (railDonateBtn) {
+    railDonateBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setView("donate");
+      state.searchOpen = false;
+      syncSearchVisibility();
+      renderAll();
+      setStatus("Abrindo area de apoio...");
+    });
+  }
+
+  if (donateAmountGrid) {
+    donateAmountGrid.addEventListener("click", (event) => {
+      const amountButton = event.target.closest("[data-donate-amount]");
+      if (!(amountButton instanceof HTMLElement)) {
+        return;
+      }
+      const nextAmount = Number(amountButton.dataset.donateAmount || 0);
+      if (!Number.isFinite(nextAmount) || nextAmount <= 0) {
+        return;
+      }
+      state.donateSelectedAmount = nextAmount;
+      setDonateStep("payment");
+      renderDonateView();
+      const selectedOption = getDonateOptionByAmount(nextAmount);
+      setStatus(`Gerando pagamento para ${selectedOption.label}...`);
+    });
+  }
+
+  if (donateBackBtn) {
+    donateBackBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      setDonateStep("select", { cancelQrRequest: true });
+      renderDonateView();
+      setStatus("Escolha um novo valor para gerar outro QR Code.");
+    });
+  }
+
+  if (donateQrImage) {
+    donateQrImage.addEventListener("error", () => {
+      if (donateQrImage.dataset.fallback === "1") {
+        return;
+      }
+      const failureReason = String(donateQrImage.dataset.errorReason || "").trim() || "Falha ao carregar o QR Code PIX.";
+      setDonateQrFallbackState(failureReason);
     });
   }
 
