@@ -109,7 +109,8 @@ const FALLBACK_CARD_IMAGE = "https://placehold.co/640x360/0f0f0f/f2f2f2?text=Gam
 const FALLBACK_BANNER_IMAGE = "https://placehold.co/1280x720/0f0f0f/f2f2f2?text=Game+Banner";
 const DONATE_QR_FALLBACK_IMAGE = "./assets/isotipo.png";
 const DONATE_QR_LOADING_MESSAGE = "Gerando QR Code PIX localmente...";
-const DONATE_QR_READY_MESSAGE = "QR Code gerado localmente. Abra um ticket no Discord com o comprovante para entrar na lista de donates.";
+const DONATE_QR_READY_MESSAGE =
+  "Pagamento PIX aprovado normalmente. Para entrar na lista de donates, abra um ticket no Discord e envie o comprovante.";
 const DONATE_OPTIONS = [
   {
     amount: 5,
@@ -4331,8 +4332,8 @@ function renderDonateView() {
   }).join("");
 
   donatePaymentTitle.textContent = `PIX - ${selectedOption.label}`;
-  donatePaymentSubtitle.textContent = `Apoio de ${selectedOption.label}`;
-  donatePaymentDescription.textContent = selectedOption.description;
+  donatePaymentSubtitle.textContent = "Pagamento instantaneo via PIX";
+  donatePaymentDescription.textContent = `Escaneie no app do seu banco e confirme o PIX de ${selectedOption.label}.`;
 
   if (!paymentStepVisible) {
     donateQrImage.dataset.loading = "0";
