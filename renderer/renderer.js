@@ -692,6 +692,8 @@ function handleFriendActivityNotification(activity) {
   notify("success", `${safeName} iniciou`, safeGame, 4600);
   void showDesktopGameStartedToastPayload({
     activityId: String(activity.id || "").trim(),
+    actorSteamId: String(activity.actorSteamId || "").trim(),
+    gameId: String(activity.gameId || "").trim(),
     nickname: safeName,
     avatarUrl: String(activity.actorAvatarUrl || "").trim(),
     gameName: safeGame
