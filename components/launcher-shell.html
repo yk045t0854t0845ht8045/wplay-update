@@ -57,7 +57,7 @@
 
       <div class="launcher-shell">
         <aside class="side-rail">
-          <button id="sideHomeBtn" class="profile-badge" type="button" aria-label="Ir para Jogos">
+          <button id="sideHomeBtn" class="profile-badge" type="button" aria-label="Ir para Inicio">
             <img
               id="sideHomeLogo"
               class="profile-logo"
@@ -112,7 +112,8 @@
           <div class="stage-surface">
             <header class="top-header">
               <nav class="top-tabs" aria-label="Navegacao principal">
-                <button id="navStoreBtn" class="top-tab is-active" type="button" data-view="store">Jogos</button>
+                <button id="navHomeBtn" class="top-tab is-active" type="button" data-view="home">Inicio</button>
+                <button id="navStoreBtn" class="top-tab" type="button" data-view="store">Jogos</button>
                 <button id="navLibraryBtn" class="top-tab" type="button" data-view="library">Biblioteca</button>
               </nav>
 
@@ -197,7 +198,7 @@
             <header class="stage-header">
               <div class="stage-title">
                 <p class="kicker">ORIGIN GAME HUB</p>
-                <h1 id="viewTitle">Jogos</h1>
+                <h1 id="viewTitle">Inicio</h1>
               </div>
 
               <div class="stage-tools">
@@ -211,7 +212,9 @@
 
             <p id="statusMessage" class="status-line">Carregando jogos...</p>
 
-            <section id="storeView" class="view is-active" aria-label="Catalogo de jogos">
+            <section id="homeView" class="view is-active" aria-label="Inicio"></section>
+
+            <section id="storeView" class="view" aria-label="Catalogo de jogos">
               <div id="storeGrid" class="store-grid"></div>
             </section>
 
@@ -550,14 +553,55 @@
     <div id="steamRequiredModal" class="modal-overlay is-hidden" aria-hidden="true">
       <div class="modal-backdrop" data-close-steam-required="true"></div>
       <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="steamRequiredTitle">
-        <h3 id="steamRequiredTitle">Steam fechada</h3>
+        <div class="steam-required-brand" aria-hidden="true">
+          <img src="https://upload.wikimedia.org/wikipedia/commons/8/83/Steam_icon_logo.svg" alt="" />
+        </div>
+        <h3 id="steamRequiredTitle">Sua Steam nao esta aberta</h3>
         <p id="steamRequiredText" class="modal-text">
-          Para iniciar este jogo, voce precisa abrir a Steam. Depois volte ao launcher e tente novamente.
+          Para iniciar este jogo, abra sua Steam e tente novamente no launcher.
         </p>
 
         <div class="modal-actions">
-          <button id="steamRequiredOpenBtn" class="modal-btn modal-btn-primary" type="button">Abrir Steam</button>
-          <button id="steamRequiredCancelBtn" class="modal-btn modal-btn-ghost" type="button">Fechar</button>
+          <button id="steamRequiredConfirmBtn" class="modal-btn modal-btn-primary" type="button">Confirmar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="gameClosePendingModal" class="modal-overlay is-hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-close-game-close-pending="true"></div>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="gameClosePendingTitle">
+        <div class="game-close-brand" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8"></circle>
+            <path d="M12 7.6V12.1L15.1 14.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+          </svg>
+        </div>
+        <h3 id="gameClosePendingTitle">Fechamento em andamento</h3>
+        <p id="gameClosePendingText" class="modal-text">
+          O jogo pode ja ter sido fechado manualmente. Estamos atualizando o status no launcher.
+        </p>
+
+        <div class="modal-actions">
+          <button id="gameClosePendingConfirmBtn" class="modal-btn modal-btn-primary" type="button">Confirmar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="friendlyNoticeModal" class="modal-overlay is-hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-close-friendly-notice="true"></div>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="friendlyNoticeTitle">
+        <div class="friendly-notice-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8"></circle>
+            <path d="M12 8.6V12.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+            <circle cx="12" cy="15.9" r="1.1" fill="currentColor"></circle>
+          </svg>
+        </div>
+        <h3 id="friendlyNoticeTitle">Aviso</h3>
+        <p id="friendlyNoticeText" class="modal-text">Status atualizado.</p>
+
+        <div class="modal-actions">
+          <button id="friendlyNoticeConfirmBtn" class="modal-btn modal-btn-primary" type="button">Entendi</button>
         </div>
       </div>
     </div>

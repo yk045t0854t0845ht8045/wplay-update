@@ -22,6 +22,7 @@ const windowCloseBtn = document.getElementById("windowCloseBtn");
 const sideHomeBtn = document.getElementById("sideHomeBtn");
 const sideHomeLogo = document.getElementById("sideHomeLogo");
 
+const navHomeBtn = document.getElementById("navHomeBtn");
 const navStoreBtn = document.getElementById("navStoreBtn");
 const navLibraryBtn = document.getElementById("navLibraryBtn");
 const railGamesList = document.getElementById("railGamesList");
@@ -29,6 +30,7 @@ const railDonateBtn = document.getElementById("railDonateBtn");
 const railDownloadsBtn = document.getElementById("railDownloadsBtn");
 const railDownloadsCount = document.getElementById("railDownloadsCount");
 
+const homeView = document.getElementById("homeView");
 const storeView = document.getElementById("storeView");
 const detailsView = document.getElementById("detailsView");
 const libraryView = document.getElementById("libraryView");
@@ -94,8 +96,14 @@ const uninstallConfirmNowBtn = document.getElementById("uninstallConfirmNowBtn")
 const uninstallConfirmCancelBtn = document.getElementById("uninstallConfirmCancelBtn");
 const steamRequiredModal = document.getElementById("steamRequiredModal");
 const steamRequiredText = document.getElementById("steamRequiredText");
-const steamRequiredOpenBtn = document.getElementById("steamRequiredOpenBtn");
-const steamRequiredCancelBtn = document.getElementById("steamRequiredCancelBtn");
+const steamRequiredConfirmBtn = document.getElementById("steamRequiredConfirmBtn");
+const gameClosePendingModal = document.getElementById("gameClosePendingModal");
+const gameClosePendingText = document.getElementById("gameClosePendingText");
+const gameClosePendingConfirmBtn = document.getElementById("gameClosePendingConfirmBtn");
+const friendlyNoticeModal = document.getElementById("friendlyNoticeModal");
+const friendlyNoticeTitle = document.getElementById("friendlyNoticeTitle");
+const friendlyNoticeText = document.getElementById("friendlyNoticeText");
+const friendlyNoticeConfirmBtn = document.getElementById("friendlyNoticeConfirmBtn");
 const authGate = document.getElementById("authGate");
 const authGateStatus = document.getElementById("authGateStatus");
 const authSteamLoginBtn = document.getElementById("authSteamLoginBtn");
@@ -283,12 +291,14 @@ const state = {
   updateRestartModalOpen: false,
   uninstallConfirmModalOpen: false,
   steamRequiredModalOpen: false,
+  gameClosePendingModalOpen: false,
+  friendlyNoticeModalOpen: false,
   detailsManageMenuOpen: false,
   lastAutoUpdateNotifiedVersion: "",
   startupSafeModeNoticeShown: false,
   appBootstrapped: false,
-  view: "store",
-  lastNonDetailView: "store",
+  view: "home",
+  lastNonDetailView: "home",
   donateSelectedAmount: DONATE_OPTIONS[0].amount,
   donateStep: "select",
   storeFilter: "popular",
@@ -1985,7 +1995,7 @@ function setDetailsManageMenuOpen(open) {
 function parseLauncherError(message) {
   const raw = String(message || "").trim();
   if (!raw) return { code: "", message: "" };
-  const match = raw.match(/^\[([A-Z0-9_:-]+)\]\s*(.*)$/i);
+  const match = raw.match(/\[([A-Z0-9_:-]+)\]\s*(.*)$/i);
   if (!match) {
     return { code: "", message: raw };
   }
@@ -2008,24 +2018,77 @@ function setSteamRequiredModalOpen(open, gameName = "") {
 
   const safeName = String(gameName || "").trim();
   steamRequiredText.textContent = safeName
-    ? `Para iniciar ${safeName}, voce precisa abrir a Steam primeiro. Abra o cliente Steam e tente novamente.`
-    : "Para iniciar este jogo, voce precisa abrir a Steam primeiro. Abra o cliente Steam e tente novamente.";
+    ? `Para iniciar ${safeName}, abra sua Steam e tente novamente no launcher.`
+    : "Para iniciar este jogo, abra sua Steam e tente novamente no launcher.";
 }
 
-async function openSteamClientFromModal() {
-  if (typeof window.launcherApi?.openSteamClient !== "function") {
-    notify("error", "Steam", "API para abrir Steam indisponivel nesta versao.");
+function setGameClosePendingModalOpen(open, gameName = "") {
+  if (!gameClosePendingModal) return;
+  const nextOpen = Boolean(open);
+  state.gameClosePendingModalOpen = nextOpen;
+  gameClosePendingModal.classList.toggle("is-hidden", !nextOpen);
+  gameClosePendingModal.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+
+  if (!nextOpen || !gameClosePendingText) {
     return;
   }
 
-  try {
-    await window.launcherApi.openSteamClient();
-    setSteamRequiredModalOpen(false);
-    setStatus("Steam aberta. Tente iniciar o jogo novamente.");
-    notify("info", "Steam", "Cliente Steam aberto. Agora tente iniciar o jogo novamente.");
-  } catch (error) {
-    notify("error", "Steam", error?.message || "Nao foi possivel abrir Steam automaticamente.");
+  const safeName = String(gameName || "").trim();
+  gameClosePendingText.textContent = safeName
+    ? `${safeName} pode ja ter sido fechado manualmente. Estamos atualizando o status no launcher.`
+    : "O jogo pode ja ter sido fechado manualmente. Estamos atualizando o status no launcher.";
+}
+
+function setFriendlyNoticeModalOpen(open, payload = {}) {
+  if (!friendlyNoticeModal) return;
+  const nextOpen = Boolean(open);
+  state.friendlyNoticeModalOpen = nextOpen;
+  friendlyNoticeModal.classList.toggle("is-hidden", !nextOpen);
+  friendlyNoticeModal.setAttribute("aria-hidden", nextOpen ? "false" : "true");
+
+  if (!nextOpen) {
+    return;
   }
+
+  const safePayload = payload && typeof payload === "object" ? payload : {};
+  const title = String(safePayload.title || "Aviso").trim() || "Aviso";
+  const text = String(safePayload.text || "Status atualizado.").trim() || "Status atualizado.";
+  const variantRaw = String(safePayload.variant || "info").trim().toLowerCase();
+  const variant = ["info", "success", "warning"].includes(variantRaw) ? variantRaw : "info";
+
+  friendlyNoticeModal.dataset.variant = variant;
+  if (friendlyNoticeTitle) {
+    friendlyNoticeTitle.textContent = title;
+  }
+  if (friendlyNoticeText) {
+    friendlyNoticeText.textContent = text;
+  }
+}
+
+function openFriendlyActionModal(kind, gameName = "") {
+  const safeName = String(gameName || "").trim() || "Este jogo";
+  if (kind === "already-running") {
+    setFriendlyNoticeModalOpen(true, {
+      variant: "info",
+      title: "Jogo ja em execucao",
+      text: `${safeName} ja esta aberto. Voce pode voltar para ele quando quiser.`
+    });
+    return;
+  }
+  if (kind === "already-closed") {
+    setFriendlyNoticeModalOpen(true, {
+      variant: "success",
+      title: "Jogo ja estava fechado",
+      text: `${safeName} ja foi encerrado. Nao precisa fechar novamente.`
+    });
+    return;
+  }
+
+  setFriendlyNoticeModalOpen(true, {
+    variant: "info",
+    title: "Aviso",
+    text: "Status atualizado."
+  });
 }
 
 function renderAutoUpdateButton() {
@@ -3451,7 +3514,9 @@ function getLibraryGamesBySearchMode(applySearch = true) {
 }
 
 function updateHeaderForView() {
-  if (state.view === "store") {
+  if (state.view === "home") {
+    viewTitle.textContent = "Inicio";
+  } else if (state.view === "store") {
     if (state.storeFilter === "popular") viewTitle.textContent = "Jogos";
     if (state.storeFilter === "downloaded") viewTitle.textContent = "Mais baixados";
     if (state.storeFilter === "top") viewTitle.textContent = "Favoritos";
@@ -3646,7 +3711,7 @@ function closeSearch(clearQuery = true) {
 }
 
 function setView(nextView) {
-  if (!["store", "details", "library", "downloads", "donate"].includes(nextView)) {
+  if (!["home", "store", "details", "library", "downloads", "donate"].includes(nextView)) {
     return;
   }
   const previousView = state.view;
@@ -3688,10 +3753,14 @@ function setView(nextView) {
 
   document.body.classList.toggle("view-details", nextView === "details");
   document.body.classList.toggle("view-downloads", nextView === "downloads");
+  document.body.classList.toggle("view-home", nextView === "home");
   document.body.classList.toggle("view-store", nextView === "store");
   document.body.classList.toggle("view-library", nextView === "library");
   document.body.classList.toggle("view-donate", nextView === "donate");
 
+  if (homeView) {
+    homeView.classList.toggle("is-active", nextView === "home");
+  }
   storeView.classList.toggle("is-active", nextView === "store");
   detailsView.classList.toggle("is-active", nextView === "details");
   libraryView.classList.toggle("is-active", nextView === "library");
@@ -3701,6 +3770,9 @@ function setView(nextView) {
   downloadsView.classList.toggle("is-active", nextView === "downloads");
 
   const activeTopView = nextView === "details" ? state.lastNonDetailView : nextView;
+  if (navHomeBtn) {
+    navHomeBtn.classList.toggle("is-active", activeTopView === "home");
+  }
   navStoreBtn.classList.toggle("is-active", activeTopView === "store");
   navLibraryBtn.classList.toggle("is-active", activeTopView === "library");
 
@@ -5600,7 +5672,7 @@ function renderAll() {
   if (!selected) {
     state.selectedGameId = "";
     if (state.view === "details") {
-      setView(state.lastNonDetailView || "store");
+      setView(state.lastNonDetailView || "home");
     }
     syncHeaderStateStable();
     return;
@@ -5630,7 +5702,7 @@ function openDetails(gameId) {
 }
 
 function closeDetails() {
-  setView(state.lastNonDetailView || "store");
+  setView(state.lastNonDetailView || "home");
 }
 
 async function refreshGames(options = {}) {
@@ -5852,7 +5924,7 @@ async function handleGameAction(gameId, action) {
         await refreshGames();
         if (result?.alreadyRunning) {
           setStatus(`${game.name} ja esta em execucao.`);
-          notify("info", "Jogo em execucao", `${game.name} ja estava aberto.`);
+          openFriendlyActionModal("already-running", game.name);
           return;
         }
         setStatus(`Jogo iniciado: ${game.name}.`);
@@ -5869,8 +5941,7 @@ async function handleGameAction(gameId, action) {
         const parsedPlayError = parseLauncherError(error?.message || "");
         if (parsedPlayError.code === "STEAM_NOT_RUNNING") {
           setSteamRequiredModalOpen(true, game.name);
-          setStatus(parsedPlayError.message || "Steam nao esta aberta.", true);
-          notify("error", "Steam fechada", parsedPlayError.message || "Abra a Steam para iniciar o jogo.");
+          setStatus("Steam nao detectada. Abra a Steam e tente iniciar o jogo novamente.");
           return;
         }
         throw error;
@@ -5885,9 +5956,17 @@ async function handleGameAction(gameId, action) {
 
       const result = await window.launcherApi.closeGame(gameId);
       await refreshGames();
+      if (result?.closePending) {
+        setGameClosePendingModalOpen(true, game.name);
+        setStatus(`Estamos atualizando o status de ${game.name}...`);
+        window.setTimeout(() => {
+          void refreshGames({ lightweight: true, includeRunningState: true });
+        }, 1200);
+        return;
+      }
       if (result?.alreadyStopped) {
         setStatus(`${game.name} ja estava fechado.`);
-        notify("info", "Jogo ja fechado", `${game.name} nao estava em execucao.`);
+        openFriendlyActionModal("already-closed", game.name);
         return;
       }
       setStatus(`Jogo fechado: ${game.name}.`);
@@ -6020,6 +6099,44 @@ async function handleGameAction(gameId, action) {
       }
     }
   } catch (error) {
+    const parsedError = parseLauncherError(error?.message || "");
+    const normalizedErrorMessage = normalizeSearchText(error?.message || "");
+    if (action === "play" && parsedError.code === "STEAM_NOT_RUNNING") {
+      setSteamRequiredModalOpen(true, game.name);
+      setStatus("Steam nao detectada. Abra a Steam e tente iniciar o jogo novamente.");
+      return;
+    }
+    if (
+      action === "play" &&
+      (parsedError.code === "GAME_ALREADY_RUNNING" || normalizedErrorMessage.includes("ja esta em execucao"))
+    ) {
+      setStatus(`${game.name} ja esta em execucao.`);
+      openFriendlyActionModal("already-running", game.name);
+      return;
+    }
+    if (
+      action === "close" &&
+      (parsedError.code === "GAME_CLOSE_PENDING" ||
+        normalizedErrorMessage.includes("nao foi possivel fechar automaticamente"))
+    ) {
+      setGameClosePendingModalOpen(true, game?.name || "");
+      setStatus(`Estamos atualizando o status de ${game?.name || "jogo"}...`);
+      window.setTimeout(() => {
+        void refreshGames({ lightweight: true, includeRunningState: true });
+      }, 1200);
+      return;
+    }
+    if (
+      action === "close" &&
+      (parsedError.code === "GAME_ALREADY_STOPPED" ||
+        normalizedErrorMessage.includes("ja estava fechado") ||
+        normalizedErrorMessage.includes("nao esta em execucao"))
+    ) {
+      setStatus(`${game?.name || "O jogo"} ja estava fechado.`);
+      openFriendlyActionModal("already-closed", game?.name || "");
+      return;
+    }
+
     setStatus(`Erro: ${error.message}`, true);
     const installFailedByProgress = action === "install" && getInstallProgress(gameId)?.phase === "failed";
     if (!installFailedByProgress) {
@@ -6195,7 +6312,7 @@ function installEventBindings() {
   if (topSearchToggle) {
     topSearchToggle.addEventListener("click", () => {
       if (state.view === "details") {
-        setView(state.lastNonDetailView || "store");
+        setView(state.lastNonDetailView || "home");
         renderAll();
       }
 
@@ -6476,6 +6593,15 @@ function installEventBindings() {
     renderStoreGrid();
   });
 
+  if (navHomeBtn) {
+    navHomeBtn.addEventListener("click", () => {
+      setView("home");
+      state.searchOpen = false;
+      syncSearchVisibility();
+      renderAll();
+    });
+  }
+
   navStoreBtn.addEventListener("click", () => {
     setView("store");
     state.searchOpen = false;
@@ -6485,14 +6611,14 @@ function installEventBindings() {
 
   if (sideHomeBtn) {
     sideHomeBtn.addEventListener("click", () => {
-      setView("store");
+      setView("home");
       state.searchOpen = false;
       syncSearchVisibility();
       if (state.notificationsOpen) {
         setNotificationsPanelOpen(false);
       }
       renderAll();
-      setStatus("Abrindo Jogos...");
+      setStatus("Abrindo Inicio...");
     });
   }
 
@@ -6918,19 +7044,53 @@ function installEventBindings() {
     });
   }
 
-  if (steamRequiredCancelBtn) {
-    steamRequiredCancelBtn.addEventListener("click", () => {
+  if (steamRequiredConfirmBtn) {
+    steamRequiredConfirmBtn.addEventListener("click", () => {
       setSteamRequiredModalOpen(false);
     });
   }
 
-  if (steamRequiredOpenBtn) {
-    steamRequiredOpenBtn.addEventListener("click", async () => {
-      await openSteamClientFromModal();
+  if (gameClosePendingModal) {
+    gameClosePendingModal.addEventListener("click", (event) => {
+      const closeTarget = event.target.closest("[data-close-game-close-pending='true']");
+      if (closeTarget) {
+        setGameClosePendingModalOpen(false);
+      }
+    });
+  }
+
+  if (gameClosePendingConfirmBtn) {
+    gameClosePendingConfirmBtn.addEventListener("click", () => {
+      setGameClosePendingModalOpen(false);
+    });
+  }
+
+  if (friendlyNoticeModal) {
+    friendlyNoticeModal.addEventListener("click", (event) => {
+      const closeTarget = event.target.closest("[data-close-friendly-notice='true']");
+      if (closeTarget) {
+        setFriendlyNoticeModalOpen(false);
+      }
+    });
+  }
+
+  if (friendlyNoticeConfirmBtn) {
+    friendlyNoticeConfirmBtn.addEventListener("click", () => {
+      setFriendlyNoticeModalOpen(false);
     });
   }
 
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.friendlyNoticeModalOpen) {
+      setFriendlyNoticeModalOpen(false);
+      return;
+    }
+
+    if (event.key === "Escape" && state.gameClosePendingModalOpen) {
+      setGameClosePendingModalOpen(false);
+      return;
+    }
+
     if (event.key === "Escape" && state.steamRequiredModalOpen) {
       setSteamRequiredModalOpen(false);
       return;

@@ -250,10 +250,10 @@ function Resolve-ArchiveType {
   $override = [string]$OverrideType
   if ($override) {
     $normalized = $override.Trim().ToLowerInvariant()
-    if ($normalized -in @("zip", "rar", "none")) {
+    if ($normalized -in @("zip", "rar", "7z", "none")) {
       return $normalized
     }
-    throw "ArchiveType invalido: '$OverrideType'. Use zip, rar ou none."
+    throw "ArchiveType invalido: '$OverrideType'. Use zip, rar, 7z ou none."
   }
 
   $ext = [IO.Path]::GetExtension($PathValue).ToLowerInvariant()
@@ -262,6 +262,9 @@ function Resolve-ArchiveType {
   }
   if ($ext -eq ".rar") {
     return "rar"
+  }
+  if ($ext -eq ".7z") {
+    return "7z"
   }
   return "none"
 }

@@ -1442,6 +1442,7 @@ body.auth-locked .auth-gate {
 
 body.ui-transitions-hold .top-header,
   body.ui-transitions-hold .stage-header,
+  body.ui-transitions-hold #homeView,
   body.ui-transitions-hold #storeView,
   body.ui-transitions-hold #libraryView,
   body.ui-transitions-hold .hero-top,
@@ -2273,9 +2274,11 @@ body.header-scrolled:not(.view-details):not(.ui-transitions-hold) .top-header {
 }
 
 body.layout-centered.view-store .stage-header,
+  body.layout-centered.view-home .stage-header,
   body.layout-centered.view-library .stage-header,
   body.layout-centered.view-downloads .stage-header,
   body.layout-centered.view-donate .stage-header,
+  body.layout-centered.view-home #homeView,
   body.layout-centered.view-store #storeView,
   body.layout-centered.view-library #libraryView,
   body.layout-centered.view-downloads #downloadsView,
@@ -2286,6 +2289,7 @@ body.layout-centered.view-store .stage-header,
 }
 
 body.layout-centered.view-store:not(.view-details):not(.header-scrolled) .top-header,
+  body.layout-centered.view-home:not(.view-details):not(.header-scrolled) .top-header,
   body.layout-centered.view-library:not(.view-details):not(.header-scrolled) .top-header,
   body.layout-centered.view-downloads:not(.view-details):not(.header-scrolled) .top-header,
   body.layout-centered.view-donate:not(.view-details):not(.header-scrolled) .top-header {
@@ -2295,6 +2299,7 @@ body.layout-centered.view-store:not(.view-details):not(.header-scrolled) .top-he
 }
 
 body.layout-centered.header-scrolled.view-store:not(.view-details) .top-header,
+  body.layout-centered.header-scrolled.view-home:not(.view-details) .top-header,
   body.layout-centered.header-scrolled.view-library:not(.view-details) .top-header,
   body.layout-centered.header-scrolled.view-downloads:not(.view-details) .top-header,
   body.layout-centered.header-scrolled.view-donate:not(.view-details) .top-header {
@@ -2313,10 +2318,16 @@ body.layout-centered.header-scrolled.view-store:not(.view-details) .top-header,
 }
 
 body.layout-centered.header-scrolled.view-store:not(.view-details):not(.ui-transitions-hold) .top-header,
+  body.layout-centered.header-scrolled.view-home:not(.view-details):not(.ui-transitions-hold) .top-header,
   body.layout-centered.header-scrolled.view-library:not(.view-details):not(.ui-transitions-hold) .top-header,
   body.layout-centered.header-scrolled.view-downloads:not(.view-details):not(.ui-transitions-hold) .top-header,
   body.layout-centered.header-scrolled.view-donate:not(.view-details):not(.ui-transitions-hold) .top-header {
   animation: headerDockFromTop 0.16s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+body.view-home .stage-header,
+  body.view-home #statusMessage {
+  display: none;
 }
 
 body.layout-centered.view-details .top-header {
@@ -5283,7 +5294,8 @@ body.layout-centered.view-details .details-bottom {
 }
 
 #steamRequiredModal .modal-panel {
-  max-width: 500px;
+  max-width: 480px;
+  text-align: center;
   border-color: rgba(255, 255, 255, 0.08);
   background: #0c0c0e;
   box-shadow:
@@ -5291,32 +5303,177 @@ body.layout-centered.view-details .details-bottom {
       inset 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 
-#steamRequiredModal .modal-text {
-  color: rgba(232, 234, 239, 0.78);
+#steamRequiredModal .steam-required-brand {
+  margin: 0 auto 0.9rem;
+  display: flex;
+  justify-content: center;
 }
 
-#steamRequiredModal #steamRequiredOpenBtn {
+#steamRequiredModal .steam-required-brand img {
+  width: 72px;
+  height: 72px;
+  display: block;
+}
+
+#steamRequiredModal h3 {
+  text-align: center;
+}
+
+#steamRequiredModal .modal-text {
+  text-align: center;
+  color: rgba(232, 234, 239, 0.78);
+  max-width: 38ch;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#steamRequiredModal .modal-actions {
+  justify-content: center;
+  margin-top: 1.15rem;
+}
+
+#steamRequiredModal #steamRequiredConfirmBtn {
+  min-width: 170px;
   border-color: rgba(255, 255, 255, 0.94);
   background: #ffffff;
   color: #09090a;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
 }
 
-#steamRequiredModal #steamRequiredOpenBtn:hover:not(:disabled) {
+#steamRequiredModal #steamRequiredConfirmBtn:hover:not(:disabled) {
   background: #f4f6fa;
   border-color: #ffffff;
   transform: translateY(-1px);
 }
 
-#steamRequiredModal #steamRequiredCancelBtn {
-  border-color: rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(242, 244, 248, 0.92);
+#gameClosePendingModal .modal-panel {
+  max-width: 500px;
+  text-align: center;
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #0c0c0e;
+  box-shadow:
+      0 26px 64px rgba(0, 0, 0, 0.56),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 
-#steamRequiredModal #steamRequiredCancelBtn:hover:not(:disabled) {
-  border-color: rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.1);
+#gameClosePendingModal .game-close-brand {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 0.9rem;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(156, 214, 255, 0.24);
+  color: #bfe3ff;
+  background: radial-gradient(circle at 28% 24%, rgba(122, 209, 255, 0.2), rgba(14, 18, 28, 0.96));
+}
+
+#gameClosePendingModal .game-close-brand svg {
+  width: 34px;
+  height: 34px;
+  display: block;
+}
+
+#gameClosePendingModal h3 {
+  text-align: center;
+}
+
+#gameClosePendingModal .modal-text {
+  text-align: center;
+  color: rgba(232, 234, 239, 0.78);
+  max-width: 42ch;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#gameClosePendingModal .modal-actions {
+  justify-content: center;
+  margin-top: 1.15rem;
+}
+
+#gameClosePendingModal #gameClosePendingConfirmBtn {
+  min-width: 170px;
+  border-color: rgba(255, 255, 255, 0.94);
+  background: #ffffff;
+  color: #09090a;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+#gameClosePendingModal #gameClosePendingConfirmBtn:hover:not(:disabled) {
+  background: #f4f6fa;
+  border-color: #ffffff;
+  transform: translateY(-1px);
+}
+
+#friendlyNoticeModal .modal-panel {
+  max-width: 500px;
+  text-align: center;
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #0c0c0e;
+  box-shadow:
+      0 26px 64px rgba(0, 0, 0, 0.56),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+#friendlyNoticeModal .friendly-notice-icon {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 0.9rem;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(156, 214, 255, 0.24);
+  color: #bfe3ff;
+  background: radial-gradient(circle at 28% 24%, rgba(122, 209, 255, 0.2), rgba(14, 18, 28, 0.96));
+}
+
+#friendlyNoticeModal[data-variant="success"] .friendly-notice-icon {
+  border-color: rgba(122, 237, 173, 0.28);
+  color: #9ff3c7;
+  background: radial-gradient(circle at 28% 24%, rgba(66, 195, 134, 0.26), rgba(14, 24, 18, 0.96));
+}
+
+#friendlyNoticeModal[data-variant="warning"] .friendly-notice-icon {
+  border-color: rgba(255, 204, 127, 0.3);
+  color: #ffd89b;
+  background: radial-gradient(circle at 28% 24%, rgba(255, 184, 76, 0.24), rgba(26, 19, 12, 0.96));
+}
+
+#friendlyNoticeModal .friendly-notice-icon svg {
+  width: 34px;
+  height: 34px;
+  display: block;
+}
+
+#friendlyNoticeModal h3 {
+  text-align: center;
+}
+
+#friendlyNoticeModal .modal-text {
+  text-align: center;
+  color: rgba(232, 234, 239, 0.78);
+  max-width: 42ch;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#friendlyNoticeModal .modal-actions {
+  justify-content: center;
+  margin-top: 1.15rem;
+}
+
+#friendlyNoticeModal #friendlyNoticeConfirmBtn {
+  min-width: 170px;
+  border-color: rgba(255, 255, 255, 0.94);
+  background: #ffffff;
+  color: #09090a;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+#friendlyNoticeModal #friendlyNoticeConfirmBtn:hover:not(:disabled) {
+  background: #f4f6fa;
+  border-color: #ffffff;
+  transform: translateY(-1px);
 }
 
 .\!notyf {

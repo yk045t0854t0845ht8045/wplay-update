@@ -307,6 +307,7 @@ const INSTALL_AUTO_RETRY_DISABLED_CODES = new Set([
   "INSUFFICIENT_DISK_SPACE",
   "CHECKSUM_MISMATCH",
   "ARCHIVE_PASSWORD",
+  "ARCHIVE_TOOL_UNAVAILABLE",
   "RAR_TOOL_UNSUPPORTED",
   "ARCHIVE_INVALID",
   "SECURITY_THREAT",
@@ -401,8 +402,16 @@ const downloadSourceLatencyProbeCacheByKey = new Map();
 const sevenZipExecutableCache = {
   path: ""
 };
+const sevenZipRarSupportCache = {
+  checkedPath: "",
+  supported: null
+};
 const winRarExecutableCache = {
   path: ""
+};
+const executableLookupCacheByName = new Map();
+const tarExecutableCache = {
+  available: null
 };
 const autoUpdateState = {
   supported: false,
@@ -7298,7 +7307,7 @@ function slugifyId(input, fallback = "game") {
 
 function normalizeArchiveType(value) {
   const type = String(value || "").toLowerCase();
-  if (type === "zip" || type === "rar" || type === "none") {
+  if (type === "zip" || type === "rar" || type === "7z" || type === "none") {
     return type;
   }
   return "zip";
@@ -8761,6 +8770,61 @@ function resolveDownloadStallTimeoutMs(game) {
   return Math.max(DOWNLOAD_STALL_TIMEOUT_MIN_MS, Math.min(DOWNLOAD_STALL_TIMEOUT_MAX_MS, rawTimeoutMs));
 }
 
+async function ensureArchiveExtractionSupport(game = {}) {
+  const archiveType = normalizeArchiveType(game?.archiveType || "zip");
+  if (archiveType === "none") {
+    return {
+      ok: true,
+      archiveType,
+      mode: "direct-copy"
+    };
+  }
+
+  if (archiveType === "rar") {
+    const supportsRarVia7Zip = await isSevenZipRarSupported().catch(() => false);
+    const hasWinRarTool = Boolean(await resolveWinRarExecutablePath().catch(() => ""));
+    const hasTarTool = await isTarAvailable().catch(() => false);
+    if (!supportsRarVia7Zip && !hasWinRarTool && !hasTarTool) {
+      const extractionToolError = new Error(
+        formatInstallFailure(
+          "ARCHIVE_TOOL_UNAVAILABLE",
+          "Nenhum extrator compativel com RAR foi encontrado no sistema.",
+          "Instale 7-Zip (7z.exe) ou WinRAR/UnRAR, ou publique este jogo em .zip."
+        )
+      );
+      extractionToolError.failureCode = "ARCHIVE_TOOL_UNAVAILABLE";
+      throw extractionToolError;
+    }
+
+    return {
+      ok: true,
+      archiveType,
+      mode: supportsRarVia7Zip ? "7zip" : hasWinRarTool ? "winrar" : "tar"
+    };
+  }
+
+  const hasSevenZip = Boolean(await resolveSevenZipExecutablePath().catch(() => ""));
+  const hasTarTool = await isTarAvailable().catch(() => false);
+  const hasExpandArchive = process.platform === "win32" && archiveType === "zip";
+  if (!hasSevenZip && !hasTarTool && !hasExpandArchive) {
+    const extractionToolError = new Error(
+      formatInstallFailure(
+        "ARCHIVE_TOOL_UNAVAILABLE",
+        "Nenhum extrator compativel foi encontrado para este arquivo.",
+        "Instale 7-Zip (7z.exe) ou publique o jogo em formato ZIP."
+      )
+    );
+    extractionToolError.failureCode = "ARCHIVE_TOOL_UNAVAILABLE";
+    throw extractionToolError;
+  }
+
+  return {
+    ok: true,
+    archiveType,
+    mode: hasSevenZip ? "7zip" : hasTarTool ? "tar" : "expand-archive"
+  };
+}
+
 async function runInstallPreflightChecks(options = {}) {
   const safeOptions = options && typeof options === "object" ? options : {};
   const game = safeOptions.game && typeof safeOptions.game === "object" ? safeOptions.game : {};
@@ -8819,6 +8883,8 @@ async function runInstallPreflightChecks(options = {}) {
       throw localArchiveError;
     }
   }
+
+  await ensureArchiveExtractionSupport(game);
 
   const knownArchiveBytes = resolveKnownInstallArchiveBytes(game, localArchiveBytes);
   const sizeBudget = estimateRequiredFreeBytesForInstall(game, knownArchiveBytes, existingPartialArchiveBytes);
@@ -13341,6 +13407,7 @@ function getArchiveExt(game) {
   const archiveType = normalizeArchiveType(game.archiveType);
   if (archiveType === "zip") return ".zip";
   if (archiveType === "rar") return ".rar";
+  if (archiveType === "7z") return ".7z";
   return ".bin";
 }
 
@@ -14544,6 +14611,71 @@ async function inspectDownloadedArchiveFile(archivePath, expectedArchiveType = "
   }
 }
 
+function normalizeExecutableCandidatePath(value) {
+  const raw = String(value || "").trim().replace(/^"+|"+$/g, "");
+  if (!raw) return "";
+  return path.normalize(raw);
+}
+
+function getWindowsProgramFilesRoots() {
+  if (process.platform !== "win32") {
+    return [];
+  }
+  return [
+    process.env.ProgramW6432,
+    process.env.ProgramFiles,
+    process.env["ProgramFiles(x86)"],
+    "C:\\Program Files",
+    "C:\\Program Files (x86)"
+  ]
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index);
+}
+
+async function resolveExecutableCandidatesFromSystemPath(executableNames = []) {
+  const names = Array.isArray(executableNames) ? executableNames : [];
+  const lookupCommand = process.platform === "win32" ? "where.exe" : "which";
+  const resolved = [];
+
+  for (const entry of names) {
+    const name = String(entry || "").trim();
+    if (!name) continue;
+
+    const cacheKey = `${process.platform}:${name.toLowerCase()}`;
+    const cached = normalizeExecutableCandidatePath(executableLookupCacheByName.get(cacheKey) || "");
+    if (cached && (await pathExists(cached))) {
+      resolved.push(cached);
+      continue;
+    }
+
+    let result = null;
+    try {
+      result = await runCommandCapture(lookupCommand, [name], { timeoutMs: 6000 });
+    } catch (_error) {
+      continue;
+    }
+    if (!result || result.timedOut || result.code !== 0) {
+      continue;
+    }
+
+    const lines = String(result.output || "")
+      .split(/\r?\n/)
+      .map((line) => normalizeExecutableCandidatePath(line))
+      .filter(Boolean);
+    for (const candidate of lines) {
+      if (!(await pathExists(candidate))) {
+        continue;
+      }
+      executableLookupCacheByName.set(cacheKey, candidate);
+      resolved.push(candidate);
+      break;
+    }
+  }
+
+  return [...new Set(resolved.map((item) => normalizeExecutableCandidatePath(item)).filter(Boolean))];
+}
+
 async function resolveSevenZipExecutablePath() {
   if (sevenZipExecutableCache.path && (await pathExists(sevenZipExecutableCache.path))) {
     return sevenZipExecutableCache.path;
@@ -14551,6 +14683,23 @@ async function resolveSevenZipExecutablePath() {
 
   const archFolder = get7zipArchFolder();
   const candidates = [];
+
+  const pathCandidates = await resolveExecutableCandidatesFromSystemPath([
+    "7z.exe",
+    "7zz.exe",
+    "7za.exe",
+    "7z",
+    "7zz",
+    "7za"
+  ]);
+  candidates.push(...pathCandidates);
+
+  for (const root of getWindowsProgramFilesRoots()) {
+    candidates.push(path.join(root, "7-Zip", "7z.exe"));
+    candidates.push(path.join(root, "7-Zip", "7zz.exe"));
+    candidates.push(path.join(root, "7-Zip", "7za.exe"));
+  }
+
   if (path7za) {
     const directPath = path.normalize(path7za);
     candidates.push(directPath);
@@ -14566,7 +14715,7 @@ async function resolveSevenZipExecutablePath() {
   }
 
   const tested = [];
-  const uniqueCandidates = [...new Set(candidates.filter(Boolean).map((item) => path.normalize(item)))];
+  const uniqueCandidates = [...new Set(candidates.map((item) => normalizeExecutableCandidatePath(item)).filter(Boolean))];
   for (const candidate of uniqueCandidates) {
     tested.push(candidate);
     if (!(await pathExists(candidate))) {
@@ -14576,7 +14725,8 @@ async function resolveSevenZipExecutablePath() {
     const asarPathPattern = /app\.asar[\\/]/i;
     if (asarPathPattern.test(candidate)) {
       const tempDir = path.join(app.getPath("userData"), "bin");
-      const tempPath = path.join(tempDir, `7za-${archFolder}.exe`);
+      const baseName = path.basename(candidate, path.extname(candidate)) || "7za";
+      const tempPath = path.join(tempDir, `${baseName}-${archFolder}.exe`);
       try {
         await fsp.mkdir(tempDir, { recursive: true });
         await fsp.copyFile(candidate, tempPath);
@@ -14592,7 +14742,7 @@ async function resolveSevenZipExecutablePath() {
   }
 
   throw new Error(
-    `Nao foi possivel localizar o 7za.exe para extrair arquivos. Caminhos testados: ${tested.join(" | ")}`
+    `Nao foi possivel localizar uma ferramenta 7-Zip para extrair arquivos. Caminhos testados: ${tested.join(" | ")}`
   );
 }
 
@@ -14601,30 +14751,26 @@ async function resolveWinRarExecutablePath() {
     return winRarExecutableCache.path;
   }
 
-  if (process.platform !== "win32") {
-    return "";
-  }
-
-  const roots = [
-    process.env.ProgramW6432,
-    process.env.ProgramFiles,
-    process.env["ProgramFiles(x86)"],
-    "C:\\Program Files",
-    "C:\\Program Files (x86)"
-  ]
-    .map((entry) => String(entry || "").trim())
-    .filter(Boolean);
-  const uniqueRoots = [...new Set(roots)];
-
-  const executableNames = ["UnRAR.exe", "Rar.exe"];
   const candidates = [];
-  for (const root of uniqueRoots) {
-    for (const executableName of executableNames) {
-      candidates.push(path.join(root, "WinRAR", executableName));
+  const pathCandidates = await resolveExecutableCandidatesFromSystemPath([
+    "UnRAR.exe",
+    "RAR.exe",
+    "WinRAR.exe",
+    "unrar",
+    "rar",
+    "winrar"
+  ]);
+  candidates.push(...pathCandidates);
+
+  if (process.platform === "win32") {
+    for (const root of getWindowsProgramFilesRoots()) {
+      candidates.push(path.join(root, "WinRAR", "UnRAR.exe"));
+      candidates.push(path.join(root, "WinRAR", "Rar.exe"));
+      candidates.push(path.join(root, "WinRAR", "WinRAR.exe"));
     }
   }
 
-  for (const candidate of candidates) {
+  for (const candidate of [...new Set(candidates.map((item) => normalizeExecutableCandidatePath(item)).filter(Boolean))]) {
     if (await pathExists(candidate)) {
       winRarExecutableCache.path = candidate;
       return candidate;
@@ -14699,35 +14845,81 @@ function isLikelyExtractionPathError(rawMessage) {
   );
 }
 
+function isLikelyArchiveToolAvailabilityError(rawMessage) {
+  const lower = normalizeTextForMatch(rawMessage || "");
+  if (!lower) {
+    return false;
+  }
+  return (
+    lower.includes("unsupported archive") ||
+    lower.includes("cannot open the file as archive") ||
+    lower.includes("archive format not supported") ||
+    lower.includes("nao e um arquivo compactado valido") ||
+    lower.includes("winrar/unrar nao encontrado") ||
+    lower.includes("nao foi possivel localizar uma ferramenta 7-zip")
+  );
+}
+
+async function isSevenZipRarSupported() {
+  const sevenZipPath = await resolveSevenZipExecutablePath().catch(() => "");
+  if (!sevenZipPath) {
+    return false;
+  }
+
+  if (
+    sevenZipRarSupportCache.checkedPath === sevenZipPath &&
+    typeof sevenZipRarSupportCache.supported === "boolean"
+  ) {
+    return sevenZipRarSupportCache.supported;
+  }
+
+  let supported = false;
+  try {
+    const result = await runCommandCapture(sevenZipPath, ["i"], { timeoutMs: 9000 });
+    const output = normalizeTextForMatch(result?.output || "");
+    supported = result?.code === 0 && /(^|\s)rar(\s|$)/i.test(output);
+  } catch (_error) {
+    supported = false;
+  }
+
+  sevenZipRarSupportCache.checkedPath = sevenZipPath;
+  sevenZipRarSupportCache.supported = supported;
+  return supported;
+}
+
+async function isTarAvailable() {
+  if (typeof tarExecutableCache.available === "boolean") {
+    return tarExecutableCache.available;
+  }
+
+  try {
+    const command = process.platform === "win32" ? "tar.exe" : "tar";
+    const result = await runCommandCapture(command, ["--version"], { timeoutMs: 6000 });
+    tarExecutableCache.available = result?.code === 0;
+  } catch (_error) {
+    tarExecutableCache.available = false;
+  }
+
+  return tarExecutableCache.available;
+}
+
+function escapePowerShellSingleQuoted(value) {
+  return String(value || "").replace(/'/g, "''");
+}
+
 async function runSevenZip(args, fallbackMessage) {
   const sevenZipPath = await resolveSevenZipExecutablePath();
-  await new Promise((resolve, reject) => {
-    const proc = spawn(sevenZipPath, args, {
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-
-    let output = "";
-    proc.stdout.on("data", (chunk) => {
-      output += chunk.toString();
-    });
-    proc.stderr.on("data", (chunk) => {
-      output += chunk.toString();
-    });
-
-    proc.on("error", (error) => reject(error));
-    proc.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      const message = normalizeExtractionErrorMessage(
-        output,
-        `${fallbackMessage} Codigo ${code}. ${output.trim()}`
-      );
-      reject(new Error(message));
-    });
-  });
+  const result = await runCommandCapture(sevenZipPath, args, { timeoutMs: ARCHIVE_TOOL_TIMEOUT_MS });
+  if (result.timedOut) {
+    throw new Error(`${fallbackMessage} Tempo excedido ao processar o arquivo.`);
+  }
+  if (result.code !== 0) {
+    const message = normalizeExtractionErrorMessage(
+      result.output,
+      `${fallbackMessage} Codigo ${result.code}. ${String(result.output || "").trim()}`
+    );
+    throw new Error(message);
+  }
 }
 
 async function runWinRar(args, fallbackMessage) {
@@ -14749,18 +14941,55 @@ async function runWinRar(args, fallbackMessage) {
   }
 }
 
+async function runTar(args, fallbackMessage) {
+  if (!(await isTarAvailable())) {
+    throw new Error("Ferramenta TAR nao encontrada no sistema.");
+  }
+  const command = process.platform === "win32" ? "tar.exe" : "tar";
+  const result = await runCommandCapture(command, args, { timeoutMs: ARCHIVE_TOOL_TIMEOUT_MS });
+  if (result.timedOut) {
+    throw new Error(`${fallbackMessage} Tempo excedido ao processar o arquivo.`);
+  }
+  if (result.code !== 0) {
+    const message = normalizeExtractionErrorMessage(
+      result.output,
+      `${fallbackMessage} Codigo ${result.code}. ${String(result.output || "").trim()}`
+    );
+    throw new Error(message);
+  }
+}
+
+async function runPowerShellExpandArchive(archivePath, targetDir, fallbackMessage) {
+  if (process.platform !== "win32") {
+    throw new Error("PowerShell Expand-Archive indisponivel nesta plataforma.");
+  }
+  const src = escapePowerShellSingleQuoted(archivePath);
+  const dst = escapePowerShellSingleQuoted(targetDir);
+  const script =
+    `$src='${src}';` +
+    `$dst='${dst}';` +
+    "New-Item -ItemType Directory -Force -Path $dst | Out-Null;" +
+    "Expand-Archive -LiteralPath $src -DestinationPath $dst -Force";
+  const result = await runCommandCapture(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    { timeoutMs: ARCHIVE_TOOL_TIMEOUT_MS }
+  );
+  if (result.timedOut) {
+    throw new Error(`${fallbackMessage} Tempo excedido ao processar o arquivo.`);
+  }
+  if (result.code !== 0) {
+    const message = normalizeExtractionErrorMessage(
+      result.output,
+      `${fallbackMessage} Codigo ${result.code}. ${String(result.output || "").trim()}`
+    );
+    throw new Error(message);
+  }
+}
+
 async function testArchiveIntegrity(archivePath, game) {
   const archiveType = normalizeArchiveType(game?.archiveType || "zip");
   const archivePassword = game?.archivePassword || "";
-
-  if (archiveType === "rar") {
-    const winRarPath = await resolveWinRarExecutablePath();
-    if (winRarPath) {
-      const args = ["t", archivePath, "-idq", buildWinRarPasswordArg(archivePassword)];
-      await runWinRar(args, "Arquivo invalido/corrompido (teste RAR).");
-      return;
-    }
-  }
 
   const args = ["t", archivePath, "-y"];
   const passwordArg = buildSevenZipPasswordArg(archivePassword);
@@ -14768,17 +14997,44 @@ async function testArchiveIntegrity(archivePath, game) {
     args.push(passwordArg);
   }
 
+  if (archiveType === "rar") {
+    try {
+      await runSevenZip(args, "Arquivo invalido/corrompido (teste 7-Zip).");
+      return;
+    } catch (error) {
+      if (!isLikelyArchiveToolAvailabilityError(error?.message || "")) {
+        throw error;
+      }
+    }
+
+    const rarTestArgs = ["t", archivePath, "-idq", buildWinRarPasswordArg(archivePassword)];
+    try {
+      await runWinRar(rarTestArgs, "Arquivo invalido/corrompido (teste RAR).");
+      return;
+    } catch (_error) {
+      // Continue to TAR fallback.
+    }
+
+    try {
+      await runTar(["-tf", archivePath], "Arquivo invalido/corrompido (teste TAR).");
+      return;
+    } catch (_error) {
+      throw new Error(
+        "Nao foi possivel validar este arquivo RAR com os extratores disponiveis. Instale 7-Zip (7z.exe) ou WinRAR/UnRAR, ou publique o jogo em .zip."
+      );
+    }
+  }
+
   try {
     await runSevenZip(args, "Arquivo invalido/corrompido (teste 7z).");
   } catch (error) {
-    const lower = String(error?.message || "").toLowerCase();
-    if (
-      archiveType === "rar" &&
-      (lower.includes("cannot open the file as archive") ||
-        lower.includes("nao e um arquivo compactado valido") ||
-        lower.includes("unsupported archive"))
-    ) {
-      throw new Error("Este arquivo RAR nao e compativel com o extrator interno. Instale o WinRAR no Windows ou publique em .zip.");
+    if (archiveType === "zip") {
+      try {
+        await runTar(["-tf", archivePath], "Arquivo invalido/corrompido (teste TAR).");
+        return;
+      } catch (_error) {
+        // Keep original 7-Zip error below.
+      }
     }
     throw error;
   }
@@ -14787,49 +15043,78 @@ async function testArchiveIntegrity(archivePath, game) {
 async function extractArchive(archivePath, targetDir, game) {
   const archiveType = normalizeArchiveType(game?.archiveType || "zip");
   const archivePassword = game?.archivePassword || "";
-
-  if (archiveType === "rar") {
-    const winRarPath = await resolveWinRarExecutablePath();
-    if (winRarPath) {
-      const args = ["x", archivePath, `${targetDir}${path.sep}`, "-idq", "-o+", "-y", buildWinRarPasswordArg(archivePassword)];
-      try {
-        await runWinRar(args, "Falha ao extrair arquivo RAR.");
-        return;
-      } catch (error) {
-        const rawMessage = String(error?.message || "").trim();
-        if (!isLikelyExtractionPathError(rawMessage)) {
-          throw error;
-        }
-
-        // WinRAR can fail with deep/nested paths; retry extraction with 7-Zip.
-        await fsp.mkdir(targetDir, { recursive: true }).catch(() => {});
-      }
-    }
-  }
-
   const args = ["x", archivePath, `-o${targetDir}`, "-y"];
   const passwordArg = buildSevenZipPasswordArg(archivePassword);
   if (passwordArg) {
     args.push(passwordArg);
   }
 
+  if (archiveType === "rar") {
+    try {
+      await runSevenZip(args, "Falha ao extrair arquivo RAR.");
+      return;
+    } catch (error) {
+      const rawMessage = String(error?.message || "").trim();
+      if (isLikelyExtractionPathError(rawMessage)) {
+        throw new Error(
+          "Falha ao extrair: caminho interno muito longo para este jogo. Use installDirName mais curto (ex.: jogo curto) ou publique o pacote com menos pastas aninhadas."
+        );
+      }
+      if (!isLikelyArchiveToolAvailabilityError(rawMessage)) {
+        throw error;
+      }
+    }
+
+    const rarExtractArgs = ["x", archivePath, `${targetDir}${path.sep}`, "-idq", "-o+", "-y", buildWinRarPasswordArg(archivePassword)];
+    try {
+      await runWinRar(rarExtractArgs, "Falha ao extrair arquivo RAR.");
+      return;
+    } catch (error) {
+      const rawMessage = String(error?.message || "").trim();
+      if (isLikelyExtractionPathError(rawMessage)) {
+        throw new Error(
+          "Falha ao extrair: caminho interno muito longo para este jogo. Use installDirName mais curto (ex.: jogo curto) ou publique o pacote com menos pastas aninhadas."
+        );
+      }
+    }
+
+    try {
+      await runTar(["-xf", archivePath, "-C", targetDir], "Falha ao extrair arquivo RAR (TAR).");
+      return;
+    } catch (_error) {
+      throw new Error(
+        "Nao foi possivel extrair este arquivo RAR com os extratores disponiveis. Instale 7-Zip (7z.exe) ou WinRAR/UnRAR, ou publique o jogo em .zip."
+      );
+    }
+  }
+
   try {
     await runSevenZip(args, "Falha ao extrair arquivo.");
+    return;
   } catch (error) {
-    const lower = String(error?.message || "").toLowerCase();
-    if (isLikelyExtractionPathError(lower)) {
+    const rawMessage = String(error?.message || "").trim();
+    if (isLikelyExtractionPathError(rawMessage)) {
       throw new Error(
         "Falha ao extrair: caminho interno muito longo para este jogo. Use installDirName mais curto (ex.: jogo curto) ou publique o pacote com menos pastas aninhadas."
       );
     }
-    if (
-      archiveType === "rar" &&
-      (lower.includes("cannot open the file as archive") ||
-        lower.includes("nao e um arquivo compactado valido") ||
-        lower.includes("unsupported archive"))
-    ) {
-      throw new Error("Nao foi possivel extrair este RAR com o extrator interno. Instale o WinRAR no Windows ou publique em .zip.");
+
+    if (archiveType === "zip") {
+      try {
+        await runTar(["-xf", archivePath, "-C", targetDir], "Falha ao extrair arquivo ZIP (TAR).");
+        return;
+      } catch (_error) {
+        // Keep trying ZIP-native fallback.
+      }
+
+      try {
+        await runPowerShellExpandArchive(archivePath, targetDir, "Falha ao extrair arquivo ZIP (Expand-Archive).");
+        return;
+      } catch (_error) {
+        // Keep original 7-Zip error below.
+      }
     }
+
     throw error;
   }
 }
@@ -15243,6 +15528,13 @@ function normalizeInstallFailureMessage(error) {
       "O launcher alterna automaticamente para modo de conexao unica quando necessario."
     );
   }
+  if (explicitFailureCode === "ARCHIVE_TOOL_UNAVAILABLE" || explicitFailureCode === "RAR_TOOL_UNSUPPORTED") {
+    return formatInstallFailure(
+      "ARCHIVE_TOOL_UNAVAILABLE",
+      "Nenhum extrator compativel foi encontrado para processar este pacote.",
+      "Instale 7-Zip (7z.exe) ou WinRAR/UnRAR, ou publique o jogo em .zip."
+    );
+  }
 
   const raw = String(error?.message || "Falha inesperada durante a instalacao.")
     .replace(/\s+/g, " ")
@@ -15399,14 +15691,17 @@ function normalizeInstallFailureMessage(error) {
     );
   }
   if (
+    lower.includes("archive_tool_unavailable") ||
+    lower.includes("nenhum extrator compativel") ||
     lower.includes("instale o winrar") ||
     lower.includes("winrar/unrar nao encontrado") ||
-    lower.includes("nao foi possivel extrair este rar com o extrator interno")
+    lower.includes("nao foi possivel validar este arquivo rar com os extratores disponiveis") ||
+    lower.includes("nao foi possivel extrair este arquivo rar com os extratores disponiveis")
   ) {
     return formatInstallFailure(
-      "RAR_TOOL_UNSUPPORTED",
-      "O extrator interno nao conseguiu processar este arquivo RAR.",
-      "Instale WinRAR no Windows ou publique o jogo em .zip."
+      "ARCHIVE_TOOL_UNAVAILABLE",
+      "Nenhum extrator compativel foi encontrado para processar este pacote.",
+      "Instale 7-Zip (7z.exe) ou WinRAR/UnRAR, ou publique o jogo em .zip."
     );
   }
   if (
@@ -16302,7 +16597,8 @@ async function installGameNow(gameId) {
         });
       }
 
-      if (game.archiveType === "none") {
+      const gameArchiveType = normalizeArchiveType(game.archiveType || "zip");
+      if (gameArchiveType === "none") {
         const fallbackExecutable = game.launchExecutable || "game.exe";
         const executableTarget = resolveInside(installDir, fallbackExecutable);
         await fsp.mkdir(path.dirname(executableTarget), { recursive: true });
@@ -18415,11 +18711,18 @@ async function closeGame(gameId) {
   const expectedLower = expectedProcessNames
     .map((value) => normalizeProcessNameForMatch(value))
     .filter(Boolean);
-  const runningProcessNamesLower = await getRunningProcessNamesLower();
-  const hasExpectedProcessRunning = expectedLower.some((name) => runningProcessNamesLower.has(name));
+  const hasExpectedProcessRunning = await confirmGameProcessStillRunning(expectedLower, {
+    retries: 3,
+    intervalMs: 420
+  });
 
   if (hasExpectedProcessRunning) {
-    throw new Error("O jogo esta em execucao, mas nao foi possivel fechar automaticamente.");
+    return {
+      ok: true,
+      closePending: true,
+      alreadyStopped: false,
+      closedProcesses: []
+    };
   }
 
   clearSocialActivityEmitDebounceForGame({
