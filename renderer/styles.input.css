@@ -1264,6 +1264,830 @@
     display: none;
   }
 
+  .home-showcase {
+    display: flex;
+    flex-direction: column;
+    gap: 0.82rem;
+    width: 100%;
+  }
+
+  .home-featured-banner {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    border-radius: 1.35rem;
+    border: 0;
+    cursor: pointer;
+    min-height: clamp(340px, 53vh, 520px);
+    background: #101216;
+    box-shadow:
+      0 20px 44px rgba(3, 9, 19, 0.44);
+  }
+
+  .home-featured-banner::before {
+    content: "";
+    position: absolute;
+    inset: -12% -18%;
+    z-index: 1;
+    pointer-events: none;
+    background: linear-gradient(
+      105deg,
+      rgba(255, 255, 255, 0) 16%,
+      rgba(255, 255, 255, 0.08) 36%,
+      rgba(255, 255, 255, 0.22) 50%,
+      rgba(255, 255, 255, 0.08) 63%,
+      rgba(255, 255, 255, 0) 84%
+    );
+    opacity: 0;
+    transform: translate3d(-16%, 0, 0) skewX(-14deg);
+    mix-blend-mode: screen;
+  }
+
+  .home-featured-media {
+    position: absolute;
+    inset: 0;
+  }
+
+  .home-featured-media img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: translate3d(0, 0, 0) scale(1.02);
+    will-change: transform, opacity, filter;
+  }
+
+  .home-featured-shade {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 78% 22%, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 35%),
+      linear-gradient(98deg, rgba(10, 10, 12, 0.86) 18%, rgba(10, 10, 12, 0.42) 53%, rgba(10, 10, 12, 0.76) 100%);
+    will-change: transform, opacity, filter;
+  }
+
+  .home-featured-content {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: clamp(0.75rem, 1.3vw, 1.15rem);
+    padding: clamp(1.1rem, 2.3vw, 1.85rem);
+  }
+
+  .home-featured-copy {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 0.62rem;
+    max-width: min(550px, 100%);
+    align-self: end;
+    will-change: transform, opacity;
+  }
+
+  .home-featured-logo {
+    width: min(344px, 62%);
+    max-height: 84px;
+    object-fit: contain;
+    object-position: left center;
+    filter: drop-shadow(0 10px 20px rgba(0, 0, 0, 0.42));
+  }
+
+  .home-featured-title {
+    margin: 0;
+    font-size: clamp(1.72rem, 3.6vw, 2.52rem);
+    font-family: "Space Grotesk", "Sora", sans-serif;
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    color: #f4f8ff;
+    text-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  }
+
+  .home-featured-description {
+    margin: 0;
+    max-width: min(470px, 100%);
+    font-size: clamp(0.84rem, 0.94vw, 0.92rem);
+    line-height: 1.34;
+    color: rgba(232, 242, 255, 0.95);
+    text-shadow: 0 8px 18px rgba(0, 0, 0, 0.46);
+  }
+
+  .home-featured-actions {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-top: 0.32rem;
+  }
+
+  .home-featured-action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.55rem;
+    min-height: 49px;
+    border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, 0.72);
+    background: rgba(255, 255, 255, 0.97);
+    color: #0d1116;
+    padding: 0.72rem 1.38rem;
+    font-size: 0.86rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    transition: transform 180ms ease, box-shadow 180ms ease, filter 180ms ease;
+    box-shadow: 0 14px 28px rgba(5, 10, 18, 0.42);
+  }
+
+  .home-featured-action-icon {
+    display: inline-flex;
+    width: 1.34rem;
+    height: 1.34rem;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .home-featured-action-icon svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  .home-featured-action-btn:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.03);
+    box-shadow: 0 16px 30px rgba(5, 10, 18, 0.4);
+  }
+
+  .home-featured-action-btn:disabled {
+    cursor: default;
+    opacity: 0.72;
+    transform: none;
+    filter: none;
+    box-shadow: 0 14px 28px rgba(5, 10, 18, 0.42);
+  }
+
+  .home-featured-action-btn:focus-visible,
+  .home-featured-indicator:focus-visible {
+    outline: 2px solid rgba(236, 246, 255, 0.88);
+    outline-offset: 2px;
+  }
+
+  .home-featured-hero-stats {
+    justify-self: end;
+    align-self: end;
+    margin-bottom: 0;
+    will-change: transform, opacity;
+  }
+
+  .home-featured-side-stats {
+    width: fit-content;
+    min-width: 168px;
+    max-width: 100%;
+  }
+
+  .home-featured-library-value.is-negative {
+    color: #e6a8a8;
+  }
+
+  .home-featured-indicators {
+    display: flex;
+    width: min(980px, 94%);
+    max-width: calc(100% - 0.8rem);
+    justify-content: center;
+    gap: 0.56rem;
+    margin: 0.14rem auto 0;
+  }
+
+  .home-featured-indicator {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    width: 92px;
+    height: 5px;
+    border: 0;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.1);
+    cursor: pointer;
+    transition: width 320ms cubic-bezier(0.22, 1, 0.36, 1), background 220ms ease, opacity 220ms ease;
+    opacity: 0.76;
+  }
+
+  .home-featured-indicator::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: rgba(255, 255, 255, 0.9);
+    transform: translate3d(-102%, 0, 0);
+    opacity: 0;
+    transition: transform 380ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
+    will-change: transform, opacity;
+  }
+
+  .home-featured-indicator:hover {
+    background: rgba(255, 255, 255, 0.24);
+    opacity: 1;
+  }
+
+  .home-featured-indicator.is-active {
+    width: 146px;
+    background: rgba(255, 255, 255, 0.1);
+    opacity: 1;
+  }
+
+  .home-featured-indicator.is-active::before {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+  }
+
+  .home-featured-banner.is-animating.is-forward .home-featured-media img {
+    animation: home-featured-slide-in-forward 620ms cubic-bezier(0.2, 0.9, 0.18, 1) both;
+  }
+
+  .home-featured-banner.is-animating.is-backward .home-featured-media img {
+    animation: home-featured-slide-in-backward 620ms cubic-bezier(0.2, 0.9, 0.18, 1) both;
+  }
+
+  .home-featured-banner.is-animating .home-featured-shade {
+    animation: home-featured-shade-settle 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .home-featured-banner.is-animating.is-forward .home-featured-copy {
+    animation: home-featured-copy-in-forward 540ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .home-featured-banner.is-animating.is-backward .home-featured-copy {
+    animation: home-featured-copy-in-backward 540ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .home-featured-banner.is-animating.is-forward .home-featured-hero-stats {
+    animation: home-featured-stats-in-forward 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .home-featured-banner.is-animating.is-backward .home-featured-hero-stats {
+    animation: home-featured-stats-in-backward 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .home-featured-banner.is-animating::before {
+    animation: home-featured-light-sweep 720ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .home-featured-banner.is-animating.is-backward::before {
+    animation-name: home-featured-light-sweep-backward;
+  }
+
+  .home-showcase-skeleton {
+    pointer-events: none;
+  }
+
+  .home-skeleton-line {
+    display: block;
+    border-radius: 999px;
+    background:
+      linear-gradient(110deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.03));
+    background-size: 210% 100%;
+    animation: storeSkeletonShimmer 1.9s linear infinite;
+    animation-delay: var(--skeleton-delay, 0ms);
+  }
+
+  .home-featured-banner-skeleton {
+    cursor: default;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background:
+      linear-gradient(145deg, rgba(18, 24, 32, 0.96), rgba(10, 12, 17, 0.98));
+  }
+
+  .home-featured-banner-skeleton::before {
+    display: none;
+  }
+
+  .home-featured-skeleton-surface {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 24% 18%, rgba(72, 118, 173, 0.15), rgba(72, 118, 173, 0) 34%),
+      linear-gradient(132deg, rgba(13, 18, 26, 0.76), rgba(13, 18, 26, 0.24) 56%, rgba(13, 18, 26, 0.88));
+  }
+
+  .home-featured-skeleton-surface::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(112deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
+    background-size: 210% 100%;
+    animation: storeSkeletonShimmer 2.15s linear infinite;
+  }
+
+  .home-featured-skeleton-logo {
+    width: min(312px, 58%);
+    height: 72px;
+    max-width: 100%;
+  }
+
+  .home-featured-skeleton-title {
+    width: min(420px, 86%);
+    height: 26px;
+  }
+
+  .home-featured-skeleton-line {
+    width: min(438px, 96%);
+    height: 13px;
+  }
+
+  .home-featured-skeleton-line.is-short {
+    width: min(318px, 72%);
+  }
+
+  .home-featured-skeleton-button {
+    width: 156px;
+    height: 46px;
+    border-radius: 15px;
+  }
+
+  .home-featured-side-stats-skeleton {
+    background: transparent;
+    border-color: transparent;
+    backdrop-filter: none;
+    padding: 0;
+    gap: 0.7rem;
+  }
+
+  .home-featured-stat-skeleton {
+    display: flex;
+    min-height: 112px;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 0.65rem;
+    background: rgba(17, 21, 28, 0.84);
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .home-featured-stat-value {
+    width: 74%;
+    height: 30px;
+  }
+
+  .home-featured-stat-label {
+    width: 52%;
+    height: 11px;
+  }
+
+  .home-featured-skeleton-indicators {
+    display: flex;
+    width: min(980px, 94%);
+    max-width: calc(100% - 0.8rem);
+    justify-content: center;
+    gap: 0.56rem;
+    margin: 0.14rem auto 0;
+  }
+
+  .home-featured-skeleton-indicator {
+    display: block;
+    width: 92px;
+    height: 5px;
+    border-radius: 7px;
+    background:
+      linear-gradient(110deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0.08));
+    background-size: 210% 100%;
+    animation: storeSkeletonShimmer 1.9s linear infinite;
+    animation-delay: var(--skeleton-delay, 0ms);
+    opacity: 0.7;
+  }
+
+  .home-featured-skeleton-indicator.is-active {
+    width: 146px;
+    opacity: 1;
+  }
+
+  .home-most-played {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    gap: 0.96rem;
+    margin-top: 0.34rem;
+  }
+
+  .home-most-played-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.9rem;
+    padding-top: 0.1rem;
+  }
+
+  .home-most-played-title {
+    margin: 0;
+    font-size: clamp(1.6rem, 2.8vw, 2.2rem);
+    line-height: 0.96;
+    letter-spacing: -0.03em;
+    color: #f4f8ff;
+    font-family: "Space Grotesk", "Sora", sans-serif;
+  }
+
+  .home-most-played-track {
+    --home-most-played-card-width: 198px;
+    --home-most-played-card-active-width: 432px;
+    display: flex;
+    width: 100%;
+    align-items: flex-start;
+    gap: 1rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.1rem 0 0.45rem;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+  }
+
+  .home-most-played-track::-webkit-scrollbar {
+    display: none;
+  }
+
+  .home-most-played-card {
+    position: relative;
+    display: flex;
+    width: var(--home-most-played-card-width);
+    min-width: var(--home-most-played-card-width);
+    flex: 0 0 var(--home-most-played-card-width);
+    flex-direction: column;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    text-align: left;
+    color: inherit;
+    cursor: pointer;
+    scroll-snap-align: start;
+    transition:
+      flex-basis 420ms cubic-bezier(0.22, 1, 0.36, 1),
+      width 420ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 220ms ease,
+      filter 220ms ease,
+      opacity 220ms ease,
+      box-shadow 220ms ease;
+  }
+
+  .home-most-played-card:hover {
+    transform: translate3d(0, -2px, 0);
+  }
+
+  .home-most-played-card:focus-visible {
+    outline: 2px solid rgba(232, 242, 255, 0.92);
+    outline-offset: 4px;
+  }
+
+  .home-most-played-card:not(.is-active) {
+    opacity: 0.94;
+    filter: saturate(0.95);
+  }
+
+  .home-most-played-card.is-active {
+    width: var(--home-most-played-card-active-width);
+    min-width: var(--home-most-played-card-active-width);
+    flex-basis: var(--home-most-played-card-active-width);
+    opacity: 1;
+    filter: saturate(1);
+  }
+
+  .home-most-played-poster {
+    position: relative;
+    overflow: hidden;
+    display: block;
+    height: clamp(280px, 30vw, 388px);
+    border-radius: 1.38rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: #13171d;
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+      0 20px 34px rgba(3, 8, 16, 0.38);
+    transform: translate3d(0, 0, 0);
+  }
+
+  .home-most-played-poster img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    transform: scale(1);
+    transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), filter 240ms ease;
+  }
+
+  .home-most-played-card:hover .home-most-played-poster img {
+    transform: scale(1.02);
+  }
+
+  .home-most-played-card.is-active .home-most-played-poster img {
+    transform: scale(1.03);
+  }
+
+  .home-most-played-overlay {
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(180deg, rgba(5, 8, 14, 0.06), rgba(5, 8, 14, 0.2) 48%, rgba(5, 8, 14, 0.88) 100%),
+      radial-gradient(circle at 24% 20%, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0) 34%);
+    transition: opacity 260ms ease, filter 260ms ease;
+  }
+
+  .home-most-played-card:not(.is-active) .home-most-played-overlay {
+    opacity: 0.94;
+    filter: saturate(0.95);
+  }
+
+  .home-most-played-badge {
+    position: absolute;
+    top: 0.9rem;
+    left: 0.9rem;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    max-width: calc(100% - 1.8rem);
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 54, 144, 0.94);
+    color: #fff8fe;
+    padding: 0.28rem 0.78rem;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .home-most-played-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding-top: 0.78rem;
+  }
+
+  .home-most-played-kicker {
+    font-size: 0.77rem;
+  }
+
+  .home-most-played-name {
+    min-height: 0;
+  }
+
+  .home-most-played-price-row {
+    margin-top: 0.02rem;
+    flex-wrap: wrap;
+  }
+
+  .home-most-played-fallback {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: rgba(179, 194, 216, 0.84);
+  }
+
+  .home-most-played-card-skeleton {
+    pointer-events: none;
+    cursor: default;
+    width: var(--home-most-played-card-width);
+    min-width: var(--home-most-played-card-width);
+    flex: 0 0 var(--home-most-played-card-width);
+    opacity: var(--skeleton-card-opacity, 1);
+  }
+
+  .home-most-played-card-skeleton.is-active {
+    width: var(--home-most-played-card-active-width);
+    min-width: var(--home-most-played-card-active-width);
+    flex-basis: var(--home-most-played-card-active-width);
+  }
+
+  .home-most-played-skeleton-poster {
+    position: relative;
+    overflow: hidden;
+    display: block;
+    height: clamp(280px, 30vw, 388px);
+    border-radius: 1.38rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background:
+      linear-gradient(145deg, rgba(17, 22, 31, 0.96), rgba(11, 14, 20, 0.98));
+  }
+
+  .home-most-played-skeleton-poster::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(112deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0));
+    background-size: 210% 100%;
+    animation: storeSkeletonShimmer 2.05s linear infinite;
+    animation-delay: var(--skeleton-delay, 0ms);
+  }
+
+  .home-most-played-skeleton-meta {
+    gap: 0.48rem;
+  }
+
+  .home-most-played-skeleton-title {
+    width: 232px;
+    max-width: 58%;
+    height: 26px;
+  }
+
+  .home-most-played-skeleton-kicker {
+    width: 112px;
+    height: 12px;
+  }
+
+  .home-most-played-skeleton-name {
+    width: min(210px, 92%);
+    height: 16px;
+  }
+
+  .home-most-played-skeleton-name.is-short {
+    width: min(164px, 72%);
+  }
+
+  .home-most-played-skeleton-price {
+    width: 132px;
+    height: 18px;
+  }
+
+  @keyframes home-featured-slide-in-forward {
+    0% {
+      opacity: 0;
+      filter: saturate(1.18) brightness(1.05);
+      transform: translate3d(88px, 0, 0) scale(1.1);
+    }
+
+    60% {
+      opacity: 1;
+      filter: saturate(1.06) brightness(1.02);
+      transform: translate3d(-12px, 0, 0) scale(1.045);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scale(1.02);
+      filter: saturate(1) brightness(1);
+    }
+  }
+
+  @keyframes home-featured-slide-in-backward {
+    0% {
+      opacity: 0;
+      filter: saturate(1.18) brightness(1.05);
+      transform: translate3d(-88px, 0, 0) scale(1.1);
+    }
+
+    60% {
+      opacity: 1;
+      filter: saturate(1.06) brightness(1.02);
+      transform: translate3d(12px, 0, 0) scale(1.045);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+      filter: saturate(1) brightness(1);
+    }
+  }
+
+  @keyframes home-featured-shade-settle {
+    0% {
+      opacity: 0.52;
+      transform: translate3d(0, 0, 0) scaleX(1.06);
+      filter: blur(6px);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scaleX(1);
+      filter: blur(0);
+    }
+  }
+
+  @keyframes home-featured-copy-in-forward {
+    0% {
+      opacity: 0;
+      transform: translate3d(42px, 0, 0);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+  }
+
+  @keyframes home-featured-copy-in-backward {
+    0% {
+      opacity: 0;
+      transform: translate3d(-42px, 0, 0);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+  }
+
+  @keyframes home-featured-stats-in-forward {
+    0% {
+      opacity: 0;
+      transform: translate3d(-34px, 0, 0) scale(0.96);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+  }
+
+  @keyframes home-featured-stats-in-backward {
+    0% {
+      opacity: 0;
+      transform: translate3d(34px, 0, 0) scale(0.96);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+  }
+
+  @keyframes home-featured-light-sweep {
+    0% {
+      opacity: 0;
+      transform: translate3d(-22%, 0, 0) skewX(-14deg);
+    }
+
+    28% {
+      opacity: 0.82;
+    }
+
+    100% {
+      opacity: 0;
+      transform: translate3d(16%, 0, 0) skewX(-14deg);
+    }
+  }
+
+  @keyframes home-featured-light-sweep-backward {
+    0% {
+      opacity: 0;
+      transform: translate3d(22%, 0, 0) skewX(-14deg);
+    }
+
+    28% {
+      opacity: 0.82;
+    }
+
+    100% {
+      opacity: 0;
+      transform: translate3d(-16%, 0, 0) skewX(-14deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .home-featured-media img,
+    .home-featured-shade,
+    .home-featured-copy,
+    .home-featured-hero-stats,
+    .home-featured-banner::before {
+      animation: none;
+    }
+
+    .home-featured-indicator,
+    .home-featured-indicator::before,
+    .home-most-played-card,
+    .home-most-played-poster img,
+    .home-most-played-overlay {
+      transition: none;
+    }
+  }
+
+  .home-empty-state {
+    display: flex;
+    min-height: 260px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.55rem;
+    border-radius: 1rem;
+    border: 1px dashed rgba(204, 226, 250, 0.26);
+    background: rgba(15, 20, 30, 0.68);
+    text-align: center;
+    padding: 1.1rem;
+  }
+
+  .home-empty-state h2 {
+    margin: 0;
+    font-size: 1.15rem;
+    color: #eef5ff;
+  }
+
+  .home-empty-state p {
+    margin: 0;
+    font-size: 0.9rem;
+    color: rgba(201, 217, 236, 0.9);
+  }
+
   body.layout-centered.view-details .top-header {
     width: 100%;
     margin: 0;
@@ -2484,7 +3308,10 @@
   }
 
   .hero-stats {
-    @apply grid w-[168px] grid-cols-1 gap-2 rounded-2xl border p-2;
+    @apply grid grid-cols-1 gap-2 rounded-2xl border p-2;
+    width: fit-content;
+    min-width: 168px;
+    max-width: 100%;
     border-color: rgba(255, 255, 255, 0.12);
     background: #101014;
     backdrop-filter: blur(8px);
@@ -2492,22 +3319,26 @@
 
   .stat-card {
     @apply rounded-xl border px-3 py-3;
+    min-width: 100%;
     border-color: rgba(255, 255, 255, 0.12);
     background: #16161c;
   }
 
   .stat-value-row {
     @apply flex items-center gap-1.5;
+    flex-wrap: nowrap;
   }
 
   .stat-value-row strong {
     @apply text-[2rem] font-semibold leading-none text-white;
+    white-space: nowrap;
     letter-spacing: -0.02em;
     font-family: "Space Grotesk", "Sora", sans-serif;
   }
 
   .stat-icon {
     @apply inline-flex h-6 w-6 text-slate-300;
+    order: -1;
   }
 
   .stat-label {
@@ -3898,6 +4729,24 @@
     --stage-pad-x: 1.5rem;
   }
 
+  .home-featured-content {
+    grid-template-columns: minmax(0, 1fr) minmax(270px, 330px);
+  }
+
+  .home-featured-logo {
+    width: min(294px, 66%);
+  }
+
+  .home-most-played-track {
+    --home-most-played-card-width: 188px;
+    --home-most-played-card-active-width: 400px;
+  }
+
+  .home-most-played-poster,
+  .home-most-played-skeleton-poster {
+    height: clamp(268px, 33vw, 360px);
+  }
+
   .view-details {
     --details-overlay-header-height: 72px;
   }
@@ -3917,7 +4766,7 @@
   }
 
   .hero-stats {
-    width: 168px;
+    min-width: 168px;
   }
 
   .hero-top {
@@ -3944,6 +4793,42 @@
 @media (max-width: 1140px) {
   :root {
     --side-rail-width: 82px;
+  }
+
+  .home-featured-banner {
+    min-height: 500px;
+  }
+
+  .home-featured-content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .home-featured-side-stats {
+    min-width: 168px;
+  }
+
+  .home-featured-logo {
+    width: min(262px, 72%);
+  }
+
+  .home-most-played {
+    gap: 0.9rem;
+  }
+
+  .home-most-played-track {
+    gap: 0.86rem;
+    --home-most-played-card-width: 182px;
+    --home-most-played-card-active-width: 350px;
+  }
+
+  .home-most-played-card,
+  .home-most-played-card-skeleton {
+    min-width: var(--home-most-played-card-width);
+  }
+
+  .home-most-played-poster,
+  .home-most-played-skeleton-poster {
+    height: clamp(250px, 42vw, 332px);
   }
 
   .launcher-shell {
@@ -4043,6 +4928,116 @@
 @media (max-width: 860px) {
   :root {
     --maintenance-banner-visual-height: 42px;
+  }
+
+  .home-featured-banner {
+    min-height: 470px;
+  }
+
+  .home-featured-content {
+    padding: 0.95rem;
+    gap: 0.78rem;
+  }
+
+  .home-featured-logo {
+    width: min(214px, 76%);
+    max-height: 62px;
+  }
+
+  .home-featured-description {
+    font-size: 0.78rem;
+    line-height: 1.3;
+  }
+
+  .home-featured-actions {
+    gap: 0.54rem;
+  }
+
+  .home-featured-action-btn {
+    min-height: 40px;
+    border-radius: 11px;
+    padding: 0.56rem 0.96rem;
+    font-size: 0.74rem;
+  }
+
+  .home-featured-action-icon {
+    width: 1.18rem;
+    height: 1.18rem;
+  }
+
+  .home-featured-side-stats {
+    min-width: 160px;
+  }
+
+  .home-featured-side-stats .stat-value-row strong {
+    font-size: 1.92rem;
+  }
+
+  .home-featured-side-stats .stat-label {
+    font-size: 0.62rem;
+  }
+
+  .home-featured-indicator {
+    width: 56px;
+    height: 4px;
+    border-radius: 6px;
+  }
+
+  .home-featured-indicator.is-active {
+    width: 88px;
+  }
+
+  .home-featured-skeleton-indicator {
+    width: 56px;
+    height: 4px;
+    border-radius: 6px;
+  }
+
+  .home-featured-skeleton-indicator.is-active {
+    width: 88px;
+  }
+
+  .home-most-played {
+    gap: 0.8rem;
+  }
+
+  .home-most-played-title {
+    font-size: 1.46rem;
+  }
+
+  .home-most-played-track {
+    gap: 0.75rem;
+    padding-bottom: 0.35rem;
+    --home-most-played-card-width: 168px;
+    --home-most-played-card-active-width: 292px;
+  }
+
+  .home-most-played-card,
+  .home-most-played-card-skeleton {
+    min-width: var(--home-most-played-card-width);
+  }
+
+  .home-most-played-poster,
+  .home-most-played-skeleton-poster {
+    height: 244px;
+    border-radius: 1.05rem;
+  }
+
+  .home-most-played-badge {
+    top: 0.74rem;
+    left: 0.74rem;
+    min-height: 24px;
+    max-width: calc(100% - 1.48rem);
+    padding: 0.22rem 0.62rem;
+    font-size: 0.64rem;
+  }
+
+  .home-most-played-kicker {
+    font-size: 0.72rem;
+  }
+
+  .home-most-played-name {
+    font-size: 0.96rem;
   }
 
   body.maintenance-mode-on {
@@ -4259,7 +5254,9 @@
   }
 
   .hero-stats {
-    width: min(168px, 100%);
+    width: fit-content;
+    min-width: min(168px, 100%);
+    max-width: 100%;
   }
 
   .hero-body {

@@ -5312,6 +5312,49 @@ function parsePositiveInteger(value) {
   return Math.floor(parsed);
 }
 
+function parseCatalogMetricNumber(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  }
+
+  const raw = String(value ?? "").trim();
+  if (!raw) return 0;
+
+  const compactMatch = raw.match(/^\s*([+-]?\d+(?:[.,]\d+)?)\s*([kKmMbB])\s*$/);
+  let numericToken = raw;
+  let multiplier = 1;
+  if (compactMatch) {
+    numericToken = String(compactMatch[1] || "");
+    const suffix = String(compactMatch[2] || "").toLowerCase();
+    if (suffix === "k") multiplier = 1_000;
+    if (suffix === "m") multiplier = 1_000_000;
+    if (suffix === "b") multiplier = 1_000_000_000;
+  }
+
+  let normalized = numericToken.replace(/[^\d,.\-]/g, "");
+  if (!normalized) return 0;
+
+  const hasComma = normalized.includes(",");
+  const hasDot = normalized.includes(".");
+  if (hasComma && hasDot) {
+    if (normalized.lastIndexOf(",") > normalized.lastIndexOf(".")) {
+      normalized = normalized.replace(/\./g, "").replace(",", ".");
+    } else {
+      normalized = normalized.replace(/,/g, "");
+    }
+  } else if (hasComma) {
+    normalized = normalized.replace(",", ".");
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+
+  const resolved = parsed * multiplier;
+  return Number.isFinite(resolved) && resolved >= 0 ? resolved : 0;
+}
+
 function parseDonatePixAmount(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
@@ -8089,6 +8132,47 @@ function mapSupabaseCatalogRowToEntry(row) {
     genres,
     averagePlayTime: pickFirstDefinedValue(merged, ["averagePlayTime", "average_play_time"]),
     averageAchievement: pickFirstDefinedValue(merged, ["averageAchievement", "average_achievement"]),
+    downloadCount: pickFirstDefinedValue(merged, [
+      "downloadCount",
+      "download_count",
+      "downloadsCount",
+      "downloads_count",
+      "downloads",
+      "totalDownloads",
+      "total_downloads",
+      "totalInstalls",
+      "total_installs",
+      "installCount",
+      "install_count",
+      "installs",
+      "launcherDownloads",
+      "launcher_downloads",
+      "launcherDownloadCount",
+      "launcher_download_count"
+    ]),
+    weeklyDownloads: pickFirstDefinedValue(merged, [
+      "weeklyDownloads",
+      "weekly_downloads",
+      "downloadsWeekly",
+      "downloads_weekly"
+    ]),
+    monthlyDownloads: pickFirstDefinedValue(merged, [
+      "monthlyDownloads",
+      "monthly_downloads",
+      "downloadsMonthly",
+      "downloads_monthly"
+    ]),
+    popularityScore: pickFirstDefinedValue(merged, [
+      "popularityScore",
+      "popularity_score",
+      "trendingScore",
+      "trending_score",
+      "rankScore",
+      "rank_score",
+      "score"
+    ]),
+    featuredRank: pickFirstDefinedValue(merged, ["featuredRank", "featured_rank", "rank", "position"]),
+    featuredScore: pickFirstDefinedValue(merged, ["featuredScore", "featured_score"]),
     storeType: pickFirstDefinedValue(merged, ["storeType", "store_type"]),
     storeTag: pickFirstDefinedValue(merged, ["storeTag", "store_tag"]),
     currentPrice: pickFirstDefinedValue(merged, ["currentPrice", "current_price"]),
@@ -11622,6 +11706,44 @@ async function readCatalogBundle(options = {}) {
           entry.achievementPercent ??
           entry.completionRate
       );
+      const downloadCount = parseCatalogMetricNumber(
+        entry.downloadCount ??
+          entry.download_count ??
+          entry.downloadsCount ??
+          entry.downloads_count ??
+          entry.downloads ??
+          entry.totalDownloads ??
+          entry.total_downloads ??
+          entry.totalInstalls ??
+          entry.total_installs ??
+          entry.installCount ??
+          entry.install_count ??
+          entry.installs ??
+          entry.launcherDownloads ??
+          entry.launcher_downloads ??
+          entry.launcherDownloadCount ??
+          entry.launcher_download_count
+      );
+      const weeklyDownloads = parseCatalogMetricNumber(
+        entry.weeklyDownloads ?? entry.weekly_downloads ?? entry.downloadsWeekly ?? entry.downloads_weekly
+      );
+      const monthlyDownloads = parseCatalogMetricNumber(
+        entry.monthlyDownloads ?? entry.monthly_downloads ?? entry.downloadsMonthly ?? entry.downloads_monthly
+      );
+      const popularityScore = parseCatalogMetricNumber(
+        entry.popularityScore ??
+          entry.popularity_score ??
+          entry.trendingScore ??
+          entry.trending_score ??
+          entry.rankScore ??
+          entry.rank_score ??
+          entry.score
+      );
+      const featuredRank = Math.max(
+        0,
+        Math.floor(parseCatalogMetricNumber(entry.featuredRank ?? entry.featured_rank ?? entry.rank ?? entry.position))
+      );
+      const featuredScore = parseCatalogMetricNumber(entry.featuredScore ?? entry.featured_score);
       const storeType = normalizeOptionalString(entry.storeType || entry.productType || entry.storeKind || entry.cardKind);
       const storeTag = normalizeOptionalString(entry.storeTag || entry.badge || entry.highlightTag);
       const currentPrice = normalizeStatValue(entry.currentPrice ?? entry.salePrice ?? entry.price);
@@ -11693,6 +11815,19 @@ async function readCatalogBundle(options = {}) {
         genres,
         averagePlayTime,
         averageAchievement,
+        downloadCount: Math.max(0, Math.round(downloadCount)),
+        weeklyDownloads: Math.max(0, Math.round(weeklyDownloads)),
+        monthlyDownloads: Math.max(0, Math.round(monthlyDownloads)),
+        popularityScore: Math.max(0, Math.round(popularityScore)),
+        featuredRank,
+        featuredScore: Math.max(0, Math.round(featuredScore)),
+        hasDownloadMetric:
+          downloadCount > 0 ||
+          weeklyDownloads > 0 ||
+          monthlyDownloads > 0 ||
+          popularityScore > 0 ||
+          featuredScore > 0 ||
+          featuredRank > 0,
         storeType,
         storeTag,
         currentPrice,

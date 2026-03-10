@@ -301,11 +301,6 @@ const state = {
   lastNonDetailView: "home",
   donateSelectedAmount: DONATE_OPTIONS[0].amount,
   donateStep: "select",
-  homeFeaturedIndex: 0,
-  homeFeaturedDirection: "forward",
-  homeFeaturedAnimateNext: false,
-  homeMostPlayedIndex: 0,
-  homeMostPlayedGameId: "",
   storeFilter: "popular",
   storeAdvancedFiltersOpen: false,
   storeModeFilter: "all",
@@ -327,7 +322,6 @@ let progressRenderFrame = 0;
 let lastProgressRenderAt = 0;
 let lastProgressStatusAt = 0;
 let lastProgressStatusMessage = "";
-let previousHomeViewSignature = "";
 let previousStoreGridRenderSignature = "";
 let previousStoreGridAnimationSignature = "";
 let previousLibraryGridSignature = "";
@@ -2471,27 +2465,14 @@ function formatGameSizeStat(game) {
   return manualSize;
 }
 
-function getResolvedGamePlayedHours(game) {
-  const launcherSeconds = Number(game?.launcherPlayTimeSeconds);
-  if (Number.isFinite(launcherSeconds) && launcherSeconds > 0) {
-    return launcherSeconds / 3600;
-  }
-
-  const launcherHours = parseLooseNumber(game?.launcherPlayTimeHours);
-  if (Number.isFinite(launcherHours) && launcherHours > 0) {
-    return launcherHours;
-  }
-
-  const userHours = parseLooseNumber(game?.userPlayTimeHours ?? game?.averagePlayTime ?? "");
-  if (Number.isFinite(userHours) && userHours > 0) {
-    return userHours;
-  }
-
-  return 0;
-}
-
 function formatPlayedHoursStat(game) {
-  const resolvedHours = getResolvedGamePlayedHours(game);
+  const launcherSeconds = Number(game?.launcherPlayTimeSeconds);
+  const launcherHours =
+    Number.isFinite(launcherSeconds) && launcherSeconds > 0
+      ? launcherSeconds / 3600
+      : parseLooseNumber(game?.launcherPlayTimeHours);
+  const userHours = parseLooseNumber(game?.userPlayTimeHours ?? game?.averagePlayTime ?? "");
+  const resolvedHours = Number.isFinite(launcherHours) && launcherHours > 0 ? launcherHours : userHours;
 
   if (!Number.isFinite(resolvedHours) || resolvedHours < 0) {
     return "0 h";
@@ -3532,565 +3513,6 @@ function getLibraryGamesBySearchMode(applySearch = true) {
   return games;
 }
 
-function trimHomeFeaturedText(value, maxLength = 210) {
-  const normalized = String(value || "").replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return "";
-  }
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
-}
-
-function compareHomeFeaturedGames(gameA, gameB) {
-  const rankA = Math.max(0, Math.floor(Number(gameA?.featuredRank) || 0));
-  const rankB = Math.max(0, Math.floor(Number(gameB?.featuredRank) || 0));
-  const hasRankA = rankA > 0;
-  const hasRankB = rankB > 0;
-  if (hasRankA !== hasRankB) {
-    return hasRankA ? -1 : 1;
-  }
-  if (hasRankA && rankA !== rankB) {
-    return rankA - rankB;
-  }
-
-  const featuredScoreDiff = (Number(gameB?.featuredScore) || 0) - (Number(gameA?.featuredScore) || 0);
-  if (featuredScoreDiff !== 0) {
-    return featuredScoreDiff;
-  }
-
-  const popularityDiff = (Number(gameB?.popularityScore) || 0) - (Number(gameA?.popularityScore) || 0);
-  if (popularityDiff !== 0) {
-    return popularityDiff;
-  }
-
-  const monthlyDownloadsDiff = (Number(gameB?.monthlyDownloads) || 0) - (Number(gameA?.monthlyDownloads) || 0);
-  if (monthlyDownloadsDiff !== 0) {
-    return monthlyDownloadsDiff;
-  }
-
-  const weeklyDownloadsDiff = (Number(gameB?.weeklyDownloads) || 0) - (Number(gameA?.weeklyDownloads) || 0);
-  if (weeklyDownloadsDiff !== 0) {
-    return weeklyDownloadsDiff;
-  }
-
-  const downloadCountDiff = (Number(gameB?.downloadCount) || 0) - (Number(gameA?.downloadCount) || 0);
-  if (downloadCountDiff !== 0) {
-    return downloadCountDiff;
-  }
-
-  const installStateDiff =
-    (Number(Boolean(gameB?.installed)) + Number(Boolean(isInLibrary(gameB?.id)))) -
-    (Number(Boolean(gameA?.installed)) + Number(Boolean(isInLibrary(gameA?.id))));
-  if (installStateDiff !== 0) {
-    return installStateDiff;
-  }
-
-  return String(gameA?.name || "").localeCompare(String(gameB?.name || ""), "pt-BR", { sensitivity: "base" });
-}
-
-function getHomeFeaturedGames() {
-  const candidates = Array.isArray(state.games) ? [...state.games] : [];
-  candidates.sort(compareHomeFeaturedGames);
-  return candidates.slice(0, 5);
-}
-
-function getHomeFeaturedDirection(currentIndex, nextIndex, itemCount) {
-  const total = Math.max(0, Math.floor(Number(itemCount) || 0));
-  if (total <= 1) {
-    return "forward";
-  }
-
-  const current = Math.max(0, Math.min(total - 1, Math.floor(Number(currentIndex) || 0)));
-  const next = Math.max(0, Math.min(total - 1, Math.floor(Number(nextIndex) || 0)));
-  if (current === next) {
-    return state.homeFeaturedDirection === "backward" ? "backward" : "forward";
-  }
-
-  const forwardDistance = next >= current ? next - current : total - current + next;
-  const backwardDistance = current >= next ? current - next : current + total - next;
-  return forwardDistance <= backwardDistance ? "forward" : "backward";
-}
-
-function resolveHomeFeaturedIndex(featuredGames) {
-  const items = Array.isArray(featuredGames) ? featuredGames : [];
-  if (!items.length) {
-    state.homeFeaturedIndex = 0;
-    return 0;
-  }
-  const currentIndex = Number(state.homeFeaturedIndex);
-  const safeIndex = Number.isFinite(currentIndex) ? Math.floor(currentIndex) : 0;
-  const nextIndex = Math.max(0, Math.min(items.length - 1, safeIndex));
-  state.homeFeaturedIndex = nextIndex;
-  return nextIndex;
-}
-
-function getHomeFeaturedMetricIcon(kind) {
-  if (kind === "library") {
-    return `
-      <svg viewBox="0 0 24 24" fill="none">
-        <path d="M7.2 5.4H16.8C17.7 5.4 18.4 6.1 18.4 7V18.6L15.6 17.1L12 18.9L8.4 17.1L5.6 18.6V7C5.6 6.1 6.3 5.4 7.2 5.4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path>
-        <path d="M9.2 9.1H14.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path>
-        <path d="M9.2 12.3H13.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path>
-      </svg>
-    `;
-  }
-  if (kind === "downloads") {
-    return `
-      <svg viewBox="0 0 24 24" fill="none">
-        <path d="M12 4.4V13.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
-        <path d="M8.8 10.7L12 13.9L15.2 10.7" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
-        <rect x="5.1" y="15.2" width="13.8" height="4.5" rx="1.6" stroke="currentColor" stroke-width="1.7"></rect>
-      </svg>
-    `;
-  }
-  if (kind === "clock") {
-    return `
-      <svg viewBox="0 0 24 24" fill="none">
-        <circle cx="12" cy="12" r="8.3" stroke="currentColor" stroke-width="1.8"></circle>
-        <path d="M12 7.7V12.2L15.2 14.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
-      </svg>
-    `;
-  }
-  if (kind === "storage") {
-    return `
-      <svg viewBox="0 0 24 24" fill="none">
-        <rect x="4.8" y="5.4" width="14.4" height="4.6" rx="1.5" stroke="currentColor" stroke-width="1.7"></rect>
-        <rect x="4.8" y="13.8" width="14.4" height="4.6" rx="1.5" stroke="currentColor" stroke-width="1.7"></rect>
-        <path d="M8 7.7H8.1M8 16.1H8.1" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"></path>
-      </svg>
-    `;
-  }
-  if (kind === "trophy") {
-    return `
-      <svg viewBox="0 0 24 24" fill="none">
-        <path d="M8.4 5.3H15.6V8.7C15.6 11 14.1 12.9 12 13.8C9.9 12.9 8.4 11 8.4 8.7V5.3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"></path>
-        <path d="M8.4 6.6H6.8C5.8 6.6 5 7.4 5 8.4C5 9.9 6.2 11.1 7.7 11.1H8.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
-        <path d="M15.6 6.6H17.2C18.2 6.6 19 7.4 19 8.4C19 9.9 17.8 11.1 16.3 11.1H15.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
-        <path d="M12 13.9V18.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-        <path d="M9.2 18.7H14.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-      </svg>
-    `;
-  }
-  return `
-    <svg viewBox="0 0 24 24" fill="none">
-      <path d="M12 4.6L14.1 8.9L18.8 9.6L15.4 12.9L16.2 17.6L12 15.4L7.8 17.6L8.6 12.9L5.2 9.6L9.9 8.9L12 4.6Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"></path>
-    </svg>
-  `;
-}
-
-function getHomeFeaturedActionIcon(action) {
-  if (action === "details") {
-    return `
-      <svg viewBox="0 0 24 24" fill="none">
-        <path d="M8 7.2H13.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
-        <path d="M8 12H16.2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
-        <path d="M8 16.8H12.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path>
-        <path d="M14.1 7.3H18.2V11.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
-        <path d="M17.9 7.6L13.6 11.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-      </svg>
-    `;
-  }
-  if (action === "install") {
-    return getHomeFeaturedMetricIcon("downloads");
-  }
-  if (action === "play") {
-    return `
-      <svg viewBox="0 0 24 24" fill="none">
-        <path d="M9 7.5V16.5L16.5 12L9 7.5Z" fill="currentColor"></path>
-      </svg>
-    `;
-  }
-  if (action === "close") {
-    return `
-      <svg viewBox="0 0 24 24" fill="none">
-        <rect x="8" y="8" width="8" height="8" rx="1.7" fill="currentColor"></rect>
-      </svg>
-    `;
-  }
-  return `
-    <svg viewBox="0 0 24 24" fill="none">
-      <path d="M9.2 7.8H14.8V16.2H9.2V7.8Z" stroke="currentColor" stroke-width="1.8"></path>
-      <path d="M7 5.7H17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-      <path d="M7 18.3H17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-    </svg>
-  `;
-}
-
-function getHomeFeaturedPrimaryAction(game) {
-  return {
-    action: "details",
-    label: "Ir para pagina"
-  };
-}
-
-function compareHomeMostPlayedGames(gameA, gameB) {
-  const playedHoursDiff = getResolvedGamePlayedHours(gameB) - getResolvedGamePlayedHours(gameA);
-  if (Math.abs(playedHoursDiff) > 0.01) {
-    return playedHoursDiff;
-  }
-
-  const monthlyDownloadsDiff = (Number(gameB?.monthlyDownloads) || 0) - (Number(gameA?.monthlyDownloads) || 0);
-  if (monthlyDownloadsDiff !== 0) {
-    return monthlyDownloadsDiff;
-  }
-
-  const weeklyDownloadsDiff = (Number(gameB?.weeklyDownloads) || 0) - (Number(gameA?.weeklyDownloads) || 0);
-  if (weeklyDownloadsDiff !== 0) {
-    return weeklyDownloadsDiff;
-  }
-
-  const downloadCountDiff = (Number(gameB?.downloadCount) || 0) - (Number(gameA?.downloadCount) || 0);
-  if (downloadCountDiff !== 0) {
-    return downloadCountDiff;
-  }
-
-  const installStateDiff =
-    (Number(Boolean(gameB?.installed)) + Number(Boolean(isInLibrary(gameB?.id)))) -
-    (Number(Boolean(gameA?.installed)) + Number(Boolean(isInLibrary(gameA?.id))));
-  if (installStateDiff !== 0) {
-    return installStateDiff;
-  }
-
-  return String(gameA?.name || "").localeCompare(String(gameB?.name || ""), "pt-BR", { sensitivity: "base" });
-}
-
-function getHomeMostPlayedGames() {
-  const candidates = Array.isArray(state.games) ? [...state.games] : [];
-  candidates.sort(compareHomeMostPlayedGames);
-  return candidates.slice(0, 5);
-}
-
-function resolveHomeMostPlayedIndex(mostPlayedGames) {
-  const items = Array.isArray(mostPlayedGames) ? mostPlayedGames : [];
-  if (!items.length) {
-    state.homeMostPlayedIndex = 0;
-    state.homeMostPlayedGameId = "";
-    return 0;
-  }
-
-  const selectedGameId = String(state.homeMostPlayedGameId || "").trim();
-  if (selectedGameId) {
-    const selectedIndex = items.findIndex((game) => String(game?.id || "").trim() === selectedGameId);
-    if (selectedIndex >= 0) {
-      state.homeMostPlayedIndex = selectedIndex;
-      return selectedIndex;
-    }
-  }
-
-  const currentIndex = Number(state.homeMostPlayedIndex);
-  const safeIndex = Number.isFinite(currentIndex) ? Math.floor(currentIndex) : 0;
-  const nextIndex = Math.max(0, Math.min(items.length - 1, safeIndex));
-  state.homeMostPlayedIndex = nextIndex;
-  state.homeMostPlayedGameId = String(items[nextIndex]?.id || "").trim();
-  return nextIndex;
-}
-
-function getHomeMostPlayedPriceMarkup(game) {
-  const priceInfo = getStorePriceInfo(game);
-  if (priceInfo.mode === "discount") {
-    return `
-      <span class="store-card-price-row home-most-played-price-row">
-        <span class="store-card-discount-badge">${escapeHtml(priceInfo.discount)}</span>
-        <span class="store-card-original-price">${escapeHtml(priceInfo.original)}</span>
-        <span class="store-card-current-price">${escapeHtml(priceInfo.current)}</span>
-      </span>
-    `;
-  }
-
-  if (priceInfo.mode === "price" || priceInfo.mode === "comingSoon") {
-    return `
-      <span class="store-card-price-row home-most-played-price-row${priceInfo.mode === "comingSoon" ? " is-coming-soon" : ""}">
-        <span class="store-card-current-price">${escapeHtml(priceInfo.current || "Em breve")}</span>
-      </span>
-    `;
-  }
-
-  const freeFlag = game?.isFree === true || game?.free === true;
-  if (freeFlag) {
-    const originalLabel = normalizePriceLabel(game.originalPrice || game.listPrice || game.basePrice);
-    return `
-      <span class="store-card-price-row is-free home-most-played-price-row">
-        <span class="store-card-discount-badge">-100%</span>
-        ${originalLabel ? `<span class="store-card-original-price">${escapeHtml(originalLabel)}</span>` : ""}
-        <span class="store-card-current-price">Gratis</span>
-      </span>
-    `;
-  }
-
-  return `<span class="home-most-played-fallback">${escapeHtml(getStoreCardKind(game))}</span>`;
-}
-
-function getHomeLoadingSkeletonMarkup() {
-  const indicatorMarkup = Array.from({ length: 4 }, (_entry, index) => {
-    const activeClass = index === 0 ? " is-active" : "";
-    return `<span class="home-featured-skeleton-indicator${activeClass}" aria-hidden="true" style="--skeleton-delay: ${index * 80}ms;"></span>`;
-  }).join("");
-
-  const cardMarkup = Array.from({ length: 5 }, (_entry, index) => {
-    const activeClass = index === 0 ? " is-active" : "";
-    const opacity = Math.max(0.18, 0.92 - index * 0.12);
-    return `
-      <article class="home-most-played-card home-most-played-card-skeleton${activeClass}" aria-hidden="true" style="--skeleton-card-opacity: ${opacity.toFixed(3)}; --skeleton-delay: ${index * 95}ms;">
-        <span class="home-most-played-poster home-most-played-skeleton-poster"></span>
-        <span class="home-most-played-meta home-most-played-skeleton-meta">
-          <span class="home-skeleton-line home-most-played-skeleton-kicker"></span>
-          <span class="home-skeleton-line home-most-played-skeleton-name"></span>
-          <span class="home-skeleton-line home-most-played-skeleton-name is-short"></span>
-          <span class="home-skeleton-line home-most-played-skeleton-price"></span>
-        </span>
-      </article>
-    `;
-  }).join("");
-
-  return `
-    <section class="home-showcase home-showcase-skeleton" aria-label="Carregando Inicio" aria-busy="true">
-      <article class="home-featured-banner home-featured-banner-skeleton" aria-hidden="true">
-        <span class="home-featured-skeleton-surface"></span>
-        <div class="home-featured-content">
-          <div class="home-featured-copy">
-            <span class="home-skeleton-line home-featured-skeleton-logo" style="--skeleton-delay: 60ms;"></span>
-            <span class="home-skeleton-line home-featured-skeleton-title" style="--skeleton-delay: 120ms;"></span>
-            <span class="home-skeleton-line home-featured-skeleton-line" style="--skeleton-delay: 170ms;"></span>
-            <span class="home-skeleton-line home-featured-skeleton-line is-short" style="--skeleton-delay: 220ms;"></span>
-            <div class="home-featured-actions">
-              <span class="home-skeleton-line home-featured-skeleton-button" style="--skeleton-delay: 280ms;"></span>
-            </div>
-          </div>
-          <aside class="home-featured-hero-stats">
-            <div class="hero-stats home-featured-side-stats home-featured-side-stats-skeleton">
-              <span class="stat-card home-featured-stat-skeleton" style="--skeleton-delay: 140ms;">
-                <span class="home-skeleton-line home-featured-stat-value"></span>
-                <span class="home-skeleton-line home-featured-stat-label"></span>
-              </span>
-              <span class="stat-card home-featured-stat-skeleton" style="--skeleton-delay: 220ms;">
-                <span class="home-skeleton-line home-featured-stat-value"></span>
-                <span class="home-skeleton-line home-featured-stat-label"></span>
-              </span>
-            </div>
-          </aside>
-        </div>
-      </article>
-
-      <div class="home-featured-skeleton-indicators" aria-hidden="true">
-        ${indicatorMarkup}
-      </div>
-
-      <section class="home-most-played is-skeleton" aria-label="Carregando os mais jogados" aria-hidden="true">
-        <header class="home-most-played-head">
-          <span class="home-skeleton-line home-most-played-skeleton-title"></span>
-        </header>
-        <div class="home-most-played-track is-skeleton">
-          ${cardMarkup}
-        </div>
-      </section>
-    </section>
-  `;
-}
-
-function syncHomeMostPlayedSelection() {
-  if (!(homeView instanceof HTMLElement)) {
-    return;
-  }
-
-  const cards = Array.from(homeView.querySelectorAll(".home-most-played-card[data-home-most-played-index]"));
-  if (!cards.length) {
-    return;
-  }
-
-  const maxIndex = cards.length - 1;
-  const activeIndex = Math.max(0, Math.min(maxIndex, Number(state.homeMostPlayedIndex) || 0));
-  state.homeMostPlayedIndex = activeIndex;
-  state.homeMostPlayedGameId = String(cards[activeIndex]?.getAttribute("data-game-id") || "").trim();
-
-  cards.forEach((card, index) => {
-    const isActive = index === activeIndex;
-    card.classList.toggle("is-active", isActive);
-    card.setAttribute("aria-pressed", isActive ? "true" : "false");
-  });
-}
-
-function renderHomeView() {
-  if (!homeView) {
-    return;
-  }
-
-  const featuredGames = getHomeFeaturedGames();
-  if (!featuredGames.length) {
-    const isLoading = state.storeCatalogLoading || !state.appBootstrapped;
-    previousHomeViewSignature = isLoading ? "loading" : "empty:ready";
-    state.homeFeaturedAnimateNext = false;
-    homeView.innerHTML = isLoading
-      ? getHomeLoadingSkeletonMarkup()
-      : `
-        <section class="home-empty-state" aria-live="polite">
-          <h2>Nenhum banner disponivel agora.</h2>
-          <p>Adicione um jogo com banner no catalogo para preencher a tela Inicio.</p>
-        </section>
-      `;
-    return;
-  }
-
-  const activeIndex = resolveHomeFeaturedIndex(featuredGames);
-  const featuredGame = featuredGames[activeIndex];
-  const mostPlayedGames = getHomeMostPlayedGames();
-  const activeMostPlayedIndex = resolveHomeMostPlayedIndex(mostPlayedGames);
-  const bannerUrl = getBannerImage(featuredGame);
-  const logoUrl = getLogoImage(featuredGame);
-  const description = trimHomeFeaturedText(
-    featuredGame.longDescription || featuredGame.description || "Sem descricao disponivel para este destaque."
-  );
-  const primaryAction = getHomeFeaturedPrimaryAction(featuredGame);
-  const sizeLabel = formatGameSizeStat(featuredGame);
-  const isLibraryMember = isInLibrary(featuredGame.id) || featuredGame.installed === true;
-  const libraryValue = isLibraryMember ? "SIM" : "NAO";
-  const nextSignature = [
-    featuredGames.map((game) => game.id).join(","),
-    activeIndex,
-    featuredGame.id,
-    bannerUrl,
-    logoUrl,
-    description,
-    primaryAction.action,
-    primaryAction.label,
-    sizeLabel,
-    libraryValue,
-    mostPlayedGames.map((game) => game.id).join(","),
-    activeMostPlayedIndex
-  ].join("::");
-  const shouldAnimate = state.homeFeaturedAnimateNext || !previousHomeViewSignature;
-  if (nextSignature === previousHomeViewSignature && !shouldAnimate) {
-    return;
-  }
-
-  const directionClass = state.homeFeaturedDirection === "backward" ? " is-backward" : " is-forward";
-  const animationClass = shouldAnimate ? ` is-animating${directionClass}` : "";
-  const indicatorsMarkup =
-    featuredGames.length > 1
-      ? `
-        <div class="home-featured-indicators" aria-label="Selecionar banner em destaque">
-          ${featuredGames
-            .map((game, index) => {
-              const activeClass = index === activeIndex ? " is-active" : "";
-              return `
-                <button
-                  class="home-featured-indicator${activeClass}"
-                  type="button"
-                  data-home-featured-index="${index}"
-                  aria-label="Exibir destaque ${index + 1}: ${escapeHtml(game.name || "Jogo")}"
-                  aria-pressed="${index === activeIndex ? "true" : "false"}"
-                ></button>
-              `;
-            })
-            .join("")}
-        </div>
-      `
-      : "";
-  const mostPlayedMarkup = mostPlayedGames.length
-    ? `
-      <section class="home-most-played" aria-labelledby="homeMostPlayedTitle">
-        <header class="home-most-played-head">
-          <h2 class="home-most-played-title" id="homeMostPlayedTitle">Os mais jogados</h2>
-        </header>
-
-        <div class="home-most-played-track" aria-label="Jogos mais jogados agora">
-          ${mostPlayedGames
-            .map((game, index) => {
-              const activeCardClass = index === activeMostPlayedIndex ? " is-active" : "";
-              const cardKind = getStoreCardKind(game);
-              const featureTag = getStoreFeatureTag(game);
-              const dotStateClass = getCoverDotStateClass(game);
-              return `
-                <button
-                  class="home-most-played-card${activeCardClass}"
-                  type="button"
-                  data-home-most-played-index="${index}"
-                  data-game-id="${escapeHtml(game.id)}"
-                  aria-label="${index === activeMostPlayedIndex ? "Abrir" : "Expandir"} ${escapeHtml(game.name || "Jogo")}"
-                  aria-pressed="${index === activeMostPlayedIndex ? "true" : "false"}"
-                >
-                  <span class="home-most-played-poster">
-                    <img src="${escapeHtml(getCardImage(game))}" alt="" loading="lazy" />
-                    <span class="home-most-played-overlay" aria-hidden="true"></span>
-                    <span class="store-card-state-dot ${dotStateClass}" aria-hidden="true"></span>
-                    ${
-                      featureTag
-                        ? `<span class="home-most-played-badge">${escapeHtml(featureTag)}</span>`
-                        : ""
-                    }
-                  </span>
-                  <span class="home-most-played-meta" aria-hidden="true">
-                    <span class="store-card-kind home-most-played-kicker">${escapeHtml(cardKind)}</span>
-                    <span class="store-card-name home-most-played-name">${escapeHtml(game.name || "Jogo")}</span>
-                    ${getHomeMostPlayedPriceMarkup(game)}
-                  </span>
-                </button>
-              `;
-            })
-            .join("")}
-        </div>
-      </section>
-    `
-    : "";
-
-  homeView.innerHTML = `
-    <section class="home-showcase">
-      <article class="home-featured-banner${animationClass}" data-open-game="${escapeHtml(featuredGame.id)}" aria-label="${escapeHtml(featuredGame.name || "Jogo")}">
-        <div class="home-featured-media" aria-hidden="true">
-          <img src="${escapeHtml(bannerUrl)}" alt="" loading="eager" />
-        </div>
-        <div class="home-featured-shade"></div>
-        <div class="home-featured-content">
-          <div class="home-featured-copy">
-            ${
-              logoUrl
-                ? `<img class="home-featured-logo" src="${escapeHtml(logoUrl)}" alt="${escapeHtml(featuredGame.name || "Logo do jogo")}" loading="eager" />`
-                : ""
-            }
-            <h2 class="home-featured-title">${escapeHtml(featuredGame.name || "Jogo")}</h2>
-            <p class="home-featured-description">${escapeHtml(description)}</p>
-            <div class="home-featured-actions">
-              <button
-                class="home-featured-action-btn"
-                type="button"
-                data-home-featured-action="${escapeHtml(primaryAction.action)}"
-                data-game-id="${escapeHtml(featuredGame.id)}"
-              >
-                <span class="home-featured-action-icon" aria-hidden="true">${getHomeFeaturedActionIcon(primaryAction.action)}</span>
-                <span>${escapeHtml(primaryAction.label)}</span>
-              </button>
-            </div>
-          </div>
-          <aside class="home-featured-hero-stats" aria-label="Informacoes rapidas de ${escapeHtml(featuredGame.name || "Jogo")}">
-            <div class="hero-stats home-featured-side-stats">
-              <article class="stat-card">
-                <div class="stat-value-row">
-                  <strong>${escapeHtml(sizeLabel)}</strong>
-                  <span class="stat-icon" aria-hidden="true">${getHomeFeaturedMetricIcon("storage")}</span>
-                </div>
-                <span class="stat-label">Tamanho</span>
-              </article>
-              <article class="stat-card">
-                <div class="stat-value-row">
-                  <strong class="home-featured-library-value${isLibraryMember ? " is-positive" : " is-negative"}">${escapeHtml(libraryValue)}</strong>
-                  <span class="stat-icon" aria-hidden="true">${getHomeFeaturedMetricIcon("library")}</span>
-                </div>
-                <span class="stat-label">Na biblioteca</span>
-              </article>
-            </div>
-          </aside>
-        </div>
-      </article>
-      ${indicatorsMarkup}
-      ${mostPlayedMarkup}
-    </section>
-  `;
-  previousHomeViewSignature = nextSignature;
-  state.homeFeaturedAnimateNext = false;
-  syncHomeMostPlayedSelection();
-}
-
 function updateHeaderForView() {
   if (state.view === "home") {
     viewTitle.textContent = "Inicio";
@@ -4779,7 +4201,7 @@ function buildDownloadSpeedLabel(gameId, progress) {
   if (speed <= 0) return "Conectando...";
   const speedLabel = formatBytesPerSecond(speed);
   const etaLabel = getDownloadEtaText(progress, speed);
-  return etaLabel ? `${speedLabel} â€¢ ${etaLabel}` : speedLabel;
+  return etaLabel ? `${speedLabel} • ${etaLabel}` : speedLabel;
 }
 
 function renderRailDownloads() {
@@ -5060,9 +4482,9 @@ function patchDownloadsRuntimeProgress(activeDownloads) {
     const speedText = buildDownloadSpeedLabel(gameId, progress);
     const phaseLabel =
       progress?.phase === "queued" && queuePosition > 0
-        ? `${phaseText} â€¢ #${queuePosition}`
+        ? `${phaseText} • #${queuePosition}`
         : sourceLabel && progress?.phase === "downloading"
-          ? `${phaseText} â€¢ ${sourceLabel}`
+          ? `${phaseText} • ${sourceLabel}`
           : phaseText;
 
     const speedNode = item.querySelector(".downloads-item-speed");
@@ -5149,9 +4571,9 @@ function renderDownloadsView() {
       const speedText = buildDownloadSpeedLabel(gameId, progress);
       const phaseLabel =
         progress?.phase === "queued" && queuePosition > 0
-          ? `${phaseText} â€¢ #${queuePosition}`
+          ? `${phaseText} • #${queuePosition}`
           : sourceLabel && progress?.phase === "downloading"
-            ? `${phaseText} â€¢ ${sourceLabel}`
+            ? `${phaseText} • ${sourceLabel}`
             : phaseText;
       const phaseLower = String(progress?.phase || "").toLowerCase();
       const canPause = ["queued", "preparing", "downloading"].includes(phaseLower);
@@ -5717,7 +5139,7 @@ function getLibraryCardSubtitle(game) {
   }
   if (game.running) return "Em execucao";
   if (game.installed) {
-    return game.size ? `Instalado â€¢ ${game.size}` : "Instalado";
+    return game.size ? `Instalado • ${game.size}` : "Instalado";
   }
   if (game.comingSoon) return "Em breve";
   return "Na biblioteca";
@@ -6145,7 +5567,7 @@ function getDetailsStatusLabel(game) {
   if (isGameBusy(game.id)) return getDownloadPhaseLabel(getInstallProgress(game.id));
   if (game.running) return "Em execucao";
   if (game.installed) {
-    return game.size ? `Instalado â€¢ ${game.size}` : "Instalado";
+    return game.size ? `Instalado • ${game.size}` : "Instalado";
   }
   if (game.comingSoon) return "Em breve";
   if (isInLibrary(game.id)) return "Na biblioteca";
@@ -6233,7 +5655,6 @@ function renderDetails(game) {
 }
 
 function renderAll() {
-  renderHomeView();
   renderStoreGrid();
   renderLibraryGrid();
   renderDonateView();
@@ -7267,78 +6688,6 @@ function installEventBindings() {
         setStatus(message, true);
         notify("error", "Downloads", message);
       }
-    });
-  }
-
-  if (homeView) {
-    homeView.addEventListener("click", async (event) => {
-      const indicatorButton = event.target.closest("[data-home-featured-index]");
-      if (indicatorButton instanceof HTMLElement) {
-        event.preventDefault();
-        const featuredGames = getHomeFeaturedGames();
-        const currentIndex = resolveHomeFeaturedIndex(featuredGames);
-        const nextIndex = Number(indicatorButton.dataset.homeFeaturedIndex || 0);
-        if (!Number.isFinite(nextIndex)) {
-          return;
-        }
-        if (nextIndex === currentIndex) {
-          return;
-        }
-        state.homeFeaturedDirection = getHomeFeaturedDirection(currentIndex, nextIndex, featuredGames.length);
-        state.homeFeaturedAnimateNext = true;
-        state.homeFeaturedIndex = nextIndex;
-        renderHomeView();
-        return;
-      }
-
-      const mostPlayedButton = event.target.closest("[data-home-most-played-index]");
-      if (mostPlayedButton instanceof HTMLElement) {
-        event.preventDefault();
-        const mostPlayedGames = getHomeMostPlayedGames();
-        const currentIndex = resolveHomeMostPlayedIndex(mostPlayedGames);
-        const nextIndex = Number(mostPlayedButton.dataset.homeMostPlayedIndex || 0);
-        if (!Number.isFinite(nextIndex)) {
-          return;
-        }
-
-        if (nextIndex !== currentIndex) {
-          state.homeMostPlayedIndex = Math.max(0, Math.min(mostPlayedGames.length - 1, Math.floor(nextIndex)));
-          state.homeMostPlayedGameId = String(mostPlayedGames[state.homeMostPlayedIndex]?.id || "").trim();
-          syncHomeMostPlayedSelection();
-          return;
-        }
-
-        const gameId = String(mostPlayedButton.dataset.gameId || "").trim();
-        if (!gameId) {
-          return;
-        }
-        openDetails(gameId);
-        return;
-      }
-
-      const actionButton = event.target.closest("[data-home-featured-action]");
-      if (actionButton instanceof HTMLElement) {
-        event.preventDefault();
-        event.stopPropagation();
-        const gameId = String(actionButton.dataset.gameId || "").trim();
-        const action = String(actionButton.dataset.homeFeaturedAction || "details").trim();
-        if (!gameId) {
-          return;
-        }
-        await handleGameAction(gameId, action);
-        return;
-      }
-
-      const featuredCard = event.target.closest(".home-featured-banner[data-open-game]");
-      if (!(featuredCard instanceof HTMLElement)) {
-        return;
-      }
-
-      const gameId = String(featuredCard.dataset.openGame || "").trim();
-      if (!gameId) {
-        return;
-      }
-      openDetails(gameId);
     });
   }
 
